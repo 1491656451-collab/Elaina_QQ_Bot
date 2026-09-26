@@ -1,0 +1,32 @@
+# ==== 伊蕾娜 QQ 机器人：不上传到 GitHub 的文件（开源版）====
+# 放在仓库根目录 D:\QQBot\.gitignore
+
+# ---- 密钥和账号（绝对不能传）----
+bot/.env
+NapCat.Shell/
+
+# ---- 运行时数据：聊天记录、别人的档案和 QQ 号、表情、模型、空间数据 ----
+bot/data/
+
+# ---- 版权内容：小说原文、由小说整理的知识库、角色人设、说说图库里的插画 ----
+novel/
+bot/knowledge/summaries/
+bot/knowledge/characters.md
+bot/personas/elaina.md
+bot/qzone/images/
+
+# ---- 只给自己看的文档：含真实 QQ 号、群号、聊天内容或本机配置 ----
+docs/当前参数一览.md
+docs/问题排查记录-封控.md
+docs/风控记录.md
+docs/项目文件整理.md
+
+# ---- Python 环境和缓存 ----
+bot/.venv/
+__pycache__/
+*.pyc
+
+# ---- 系统杂项 ----
+Thumbs.db
+desktop.ini
+.DS_Store
