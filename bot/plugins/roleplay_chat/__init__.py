@@ -586,6 +586,78 @@ def gender_step(qq: int, text: str) -> str:
             "（比如“真的假的？”“嗯……我怎么有点不信呢”）。别追问细节，也别说要验证。")
 
 
+# ------------------------------------------------------------------ 送东西：面包、钱
+# 嘴上说“[给面包]”“给你钱”不会直接当真：面包每人每天只收一次；钱不加好感，她按帮的忙、接的委托收合理的报酬
+_BREAD = r"(?:面包|吐司|可颂|牛角包|法棍|贝果|菠萝包|甜甜圈|羊角包|🍞|🥐|🥖|🥯)"
+_GIVE = r"(?:给|送|递|塞|投喂|喂|分|赏|孝敬|上供|献上|奉上|请(?=你|您))(?!我)"
+_TO_HER = r"(?:你|您|伊蕾娜(?:小姐)?|魔女小姐)?"
+_BREAD_RE = re.compile(
+    rf"[\[【［]\s*(?:给|送)?{_BREAD}\s*[\]】］]"
+    rf"|{_GIVE}\s*{_TO_HER}[^，,。？?！!\n\[\]【】［］]{{0,6}}?{_BREAD}"
+    rf"|{_BREAD}\s*(?:给你|送你|请你|拿去|拿着|接着)"
+    rf"|^[🍞🥐🥖🥯\s]+$"
+)
+_NUM = r"(?:\d+(?:\.\d+)?|[一二两三四五六七八九十百千万亿几半]+)"
+_WORLD = r"(?:铜币|银币|金币)"
+_FOREIGN = r"(?:元|块钱|块(?![面蛋饼糖石肉])|毛钱|人民币|rmb|美元|美金|日元|円|欧元|英镑|比特币|[Qq]币|点券|软妹币|大洋)"
+_PAY = r"(?:给|送|赏|付|转|打|塞|递|发|奉上|支付)"
+_WORLD_AMT = rf"{_NUM}\s*(?:枚|个|袋|箱)?\s*{_WORLD}"
+_FOREIGN_AMT = rf"{_NUM}\s*(?:万|千|百)?\s*{_FOREIGN}"
+_REWARD = r"(?:报酬|酬劳|谢礼|工钱|委托费|小费|定金|订金|酬金)"
+_MONEY_WORLD_RE = re.compile(rf"{_PAY}[^，,。？?！!\n]{{0,8}}?{_WORLD_AMT}|{_WORLD_AMT}\s*(?:给你|送你|拿去|拿着|赏你)"
+    rf"|{_WORLD_AMT}\s*(?:是|当|作为|做)?\s*(?:你的)?{_REWARD}|{_REWARD}\s*(?:是|有|为|给你)?\s*{_WORLD_AMT}|[\[【［][^\]】］]{{0,6}}{_WORLD}[^\]】］]{{0,6}}[\]】］]", re.I)
+_MONEY_FOREIGN_RE = re.compile(
+    rf"{_PAY}[^，,。？?！!\n]{{0,8}}?{_FOREIGN_AMT}|{_FOREIGN_AMT}\s*(?:给你|送你|拿去|拿着|赏你)"
+    rf"|{_FOREIGN_AMT}\s*(?:是|当|作为|做)?\s*(?:你的)?{_REWARD}|{_REWARD}\s*(?:是|有|为|给你)?\s*{_FOREIGN_AMT}"
+    rf"|(?:QQ|微信|支付宝)?红包|转账|转你|打钱|[\[【［][^\]】］]{{0,6}}(?:{_FOREIGN}|红包)[^\]】］]{{0,6}}[\]】］]",
+    re.I,
+)
+_MONEY_VAGUE_RE = re.compile(
+    r"[\[【［]\s*(?:给|送|打|赏)?\s*钱\s*[\]】］]|给你钱|给你点钱|钱给你|赏你|打赏|给你(?:点)?(?:零花钱|小费|报酬|酬劳|工钱|委托费|路费|谢礼)"
+    r"|付(?:你|给你)?(?:报酬|酬劳|工钱|委托费)"
+)
+
+
+def _not_negated(text: str, m: re.Match) -> bool:
+    return not (m.start() > 0 and text[m.start() - 1] in "不没别")
+
+
+def detect_gifts(text: str) -> list[tuple[str, str]]:
+    """看对方是不是在说送她东西：返回 [(种类, 原话片段)]，钱和面包各最多一项。
+    种类：world（铜币银币金币）/ foreign（别的钱）/ vague（没说给多少）/ bread"""
+    out = []
+    for group in ((("world", _MONEY_WORLD_RE), ("foreign", _MONEY_FOREIGN_RE), ("vague", _MONEY_VAGUE_RE)), (("bread", _BREAD_RE),)):
+        hit = next(((kind, m.group(0).strip()) for kind, rx in group for m in rx.finditer(text) if _not_negated(text, m)), None)
+        if hit:
+            out.append(hit)
+    return out
+
+
+_MONEY_RULE = ("你爱钱，但取之有道：只收自己出力换来的报酬。看最近的聊天：对方是为你帮的忙、答应接下的委托付钱，而且数目合理"
+               "（一枚铜币大约一个面包，一枚银币够住一晚便宜旅馆，金币是大钱，只配大委托），就收下，嫌少可以讨价还价；"
+               "你什么都没做、对方无缘无故塞钱、数目大得离谱，就不收，还会起疑（比如“无功不受禄。”“你想让我干什么？”）。"
+               "嘴上说给钱不等于钱真的到了你手里，别当成已经收到了一大笔钱，也别因此对对方态度变好。")
+
+
+def gift_hint(kind: str, snippet: str, bread_first: bool, fam: str) -> str:
+    if kind == "bread":
+        if not bread_first:
+            return (f"【送面包】对方说要送你面包（「{snippet}」），可今天已经送过一次了。一天一个就够了，这次不收"
+                    "（比如“今天已经吃过了。”“想用面包收买我？没那么容易。”），也别表现得很高兴。")
+        extra = {
+            "disliked": "不过你讨厌这个人，收不收看你心情，就算收了也不会因此改观。",
+            "stranger": "你和对方不熟：收下归收下，道声谢就行，别一下子变亲热。",
+        }.get(fam, "")
+        return f"【送面包】对方说要送你面包（「{snippet}」），这是今天第一次。你最爱面包，收下了，嘴上可以嘴硬，但看得出挺高兴。{extra}"
+    head = f"【给钱】对方说要给你钱（「{snippet}」）。"
+    if kind == "foreign":
+        return (head + "对方说的不是铜币、银币、金币，是你没听说过的钱，你不知道它值多少，不会收（可以吐槽“那是哪个国家的钱？”）；"
+                "除非对方把它换成铜币、银币、金币，或者讲清楚它到底值多少，而且讲得通。" + _MONEY_RULE)
+    if kind == "vague":
+        return head + "对方没说给多少、给的是什么钱，可以先问清楚（“多少？什么钱？”），别先高兴起来。" + _MONEY_RULE
+    return head + _MONEY_RULE
+
+
 # ------------------------------------------------------------------ 出错通知
 _last_alert: dict[str, float] = {}
 
@@ -1292,6 +1364,9 @@ async def converse(bot: Bot, event: MessageEvent, catchup_age: float | None = No
         length_hint = short_hint() if mode == "short" else LENGTH_HINT[mode]
         time_memo = time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))
         gender_memo = gender_step(event.user_id, text)
+        gifts = detect_gifts(text)
+        bread_first = any(k == "bread" for k, _ in gifts) and not ltm.bread_given_today(event.user_id)
+        gift_memo = "\n".join(gift_hint(k, snip[:20], bread_first, fam) for k, snip in gifts)
         diary_memo = qzone_diary.diary_context(text)     # 有人提到她的说说：告诉她最近写了什么
         late_memo = ""
         if catchup_age is not None:
@@ -1309,10 +1384,10 @@ async def converse(bot: Bot, event: MessageEvent, catchup_age: float | None = No
             sticker_memo = sticker_hint(sticker_emotions, only_ok)
         skip_memo = ""
         if (cfg.skip_by_model and catchup_age is None and len(text) <= 12 and not _looks_like_question(text)
-                and not she_asked(history)):
+                and not she_asked(history) and not gifts):
             skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                          "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
-        extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, skip_memo) if x)
+        extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, skip_memo) if x)
         recall_msg = [{"role": "system", "content": extra}]
 
         messages = api_messages(
@@ -1390,6 +1465,8 @@ async def converse(bot: Bot, event: MessageEvent, catchup_age: float | None = No
         save_history(key)
         tier_now = familiarity_of(event.user_id)     # 按说这句话时的关系算
         ltm.bump_talk(event.user_id, name)
+        if bread_first:                               # 今天第一次送面包：收下（讨厌的人送的不加分）
+            ltm.take_bread(event.user_id, 0 if tier_now == "disliked" else cfg.gift_bread_affection)
         hit = next((w for w in cfg.taboo_words if w in text), None)
         if hit:
             k = cfg.taboo_tier_multiplier.get(tier_now, 1.0)

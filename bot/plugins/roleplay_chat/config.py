@@ -166,6 +166,10 @@ class Config(BaseModel):
     merge_wait_incomplete: float = 8.0    # 看起来还没说完（“我跟你说”“然后”、逗号结尾、只叫了她一声），等几秒
     merge_wait_max: float = 20.0          # 从第一条算起最多等多久，到点就回
 
+    # 送东西：嘴上说“[给面包]”“给你钱”不会直接当真，防止靠这个刷好感
+    gift_bread_affection: float = 2.0     # 送面包：每人每天只收一次，收下时加几分（讨厌的人送不加分）
+    # 钱不加好感：她只按帮的忙、接的委托收合理的报酬；只认铜币、银币、金币
+
     # 不回水话：对方只说“哈哈”“嗯”“好的”或者话题自然结束时，她有时候不接话
     skip_filler: bool = True
     skip_filler_prob: dict[str, float] = {"disliked": 0.9, "stranger": 0.7, "acquaintance": 0.5, "close": 0.3}   # 明显的水话，直接不回的概率（不调用模型）
