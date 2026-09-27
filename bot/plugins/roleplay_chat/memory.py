@@ -223,10 +223,13 @@ class LongTermMemory:
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
-                    max_tokens=1000,
+                    max_tokens=self.summary_max_tokens,
                     response_format={"type": "json_object"},
                     extra_body={"thinking": {"type": "disabled"}},
                 )
+                if resp.choices[0].finish_reason == "length":
+                    logger.warning(f"长期记忆整理写到一半被截断了（MEMORY_SUMMARY_MAX_TOKENS={self.summary_max_tokens} 不够），这次作废，下次再试：{key}")
+                    return
                 data = json.loads(resp.choices[0].message.content or "{}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"长期记忆整理失败（下次再试）：{e}")
@@ -282,6 +285,7 @@ class LongTermMemory:
     # 分数 -100～100。来源：① 正常聊天（默认不加分，可在配置里开）；② 长期记忆整理时按对话内容加减分；
     # ③ 管理员手动调整。很久不聊会慢慢回落到 0（好感和讨厌都会淡去）。
     close_friends: tuple = ()
+    summary_max_tokens: int = 2000           # 整理时模型最多写多少（要把每个人的整份档案重写一遍）
     gender_cap: bool = True                  # 只有确认是女生才能到“很熟”
     affection_cfg = {
         "base_gain": 0, "daily_cap": 5,

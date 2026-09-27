@@ -221,6 +221,10 @@ class Qzone:
         # 风控信号（限流码、验证页、403）出现时调用：await on_risk(种类, 说明)。由空间日记模块接上“熔断”
         self.on_risk: Callable[[str, str], Awaitable[None]] | None = None
         self.last_write: tuple[float, str] | None = None     # 最近一次写操作（时间, 做了什么），对照下线时间用
+        self.cookie_at = 0.0                                  # 最近一次向 NapCat 要到凭证的时间
+        # 发请求前的闸门：guard(方法) 返回原因就不发（抛 QzoneError("hold")）。由空间日记模块接上：
+        # 账号下线了什么都不发；刚上线、刚要到凭证时不写
+        self.guard: Callable[[str], str | None] | None = None
 
     # -------------------------------------------------------------- 登录态
     async def ctx(self, refresh: bool = False) -> _Ctx:
@@ -235,7 +239,14 @@ class Qzone:
                 if not jar.get("p_skey"):
                     self._log("cookie", "-", 0, "警告：没有 p_skey，改用 skey 算 g_tk，空间接口可能不认")
                 self._ctx = _Ctx(int(uin), skey, jar.get("p_skey", "") or skey, time.time())
+                self.cookie_at = time.time()
+                self._log("要凭证", "-", 0, f"向 NapCat 要到了空间凭证（{self.cookie_source or '?'}）")
             return self._ctx
+
+    def forget_ctx(self) -> None:
+        """丢掉缓存的凭证（重新上线后用新的，不沿用被踢那次登录的）"""
+        self._ctx = None
+        self.cookie_at = 0.0
 
     # -------------------------------------------------------------- 日志
     def _log(self, op: str, url: str, status: int, note: str) -> None:
@@ -249,7 +260,16 @@ class Qzone:
     # -------------------------------------------------------------- 请求
     async def _req(self, op: str, method: str, url: str, *, params=None, data=None,
                    headers=None, timeout: float = 20, page_ok: bool = False, _retry: int = 0) -> dict:
+        why = self.guard(method) if self.guard else None
+        if why:
+            self._log(op, url, 0, f"没发：{why}")
+            raise QzoneError("hold", why)
         c = await self.ctx()
+        if method == "POST" and self.guard:          # 这次刚要到凭证：闸门会让它先等一等
+            why = self.guard(method)
+            if why:
+                self._log(op, url, 0, f"没发：{why}")
+                raise QzoneError("hold", why)
         h = {
             "User-Agent": UA,
             "Referer": f"https://user.qzone.qq.com/{c.uin}",

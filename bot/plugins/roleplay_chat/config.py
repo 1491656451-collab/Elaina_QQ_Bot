@@ -77,8 +77,9 @@ class Config(BaseModel):
     memory_enabled: bool = True
     memory_dir: str = "data/memory"
     memory_batch: int = 8                 # 被挤出短期记忆的消息攒够几条就整理一次
-    memory_max_facts: int = 12            # 每人档案最多几条
-    memory_max_events: int = 8            # 每个群往事最多几条
+    memory_max_facts: int = 20            # 每人档案最多几条（9/27 从 12 加到 20）
+    memory_max_events: int = 12           # 每个群往事最多几条（9/27 从 8 加到 12）
+    memory_summary_max_tokens: int = 2000 # 后台整理时模型最多写多少（要把每个人的整份档案重写一遍，写不下这次整理就作废）
 
     # ---- 好感度（决定她对人冷淡还是随意）----
     # 分数 -100～100：长期记忆整理时按对话内容 +5～-15；踩雷立刻扣分；很久不聊慢慢回落到 0
@@ -137,6 +138,7 @@ class Config(BaseModel):
     qzone_max_replies_per_poll: int = 2   # 每一轮最多回几条（评论和 @ 合计），剩下的留到下一轮
     qzone_reply_gap_min: float = 120.0    # 同一轮里两条回复之间隔多久（秒）
     qzone_reply_gap_max: float = 300.0
+    qzone_startup_grace_minutes: float = 30.0   # 机器人连上 NapCat 后这么久内，空间一概不碰（9/26 两次被踢都是刚上线 1 分多钟就写空间）
     qzone_risk_pause_hours: float = 24.0  # 熔断：空间一出现风控信号（限流码 -10049、验证页、403），空间功能自动停这么久
     qzone_mention_reply: bool = True      # 别人在自己的说说里 @ 她、在别人说说下 @ 她或回她：也按聊天规则回（查评论时顺便读“与我相关”）
 
@@ -151,20 +153,24 @@ class Config(BaseModel):
     peak_extra_delay_max: float = 20.0
 
     # ---- 出错通知 ----
+    log_file: str = "data/logs/bot_{time:YYYY-MM-DD}.log"   # 机器人自己的运行日志也存一份（留空不存），方便事后查“为什么没回”
+    log_retention_days: int = 14
+    offline_alert: bool = True            # 小号被踢下线 / 和 NapCat 断开后，重新上线时私信管理员说明情况
     admin_alert_interval: int = 3600      # 余额不足/Key 失效时私信管理员，同类提醒最短间隔（秒）
 
     # ---- 没 @ 也回复（群聊）----
     smart_reply: bool = True              # 看得出是在跟她说话 / 提到她时也回复
     smart_names: list[str] = ["伊蕾娜", "灰之魔女", "魔女小姐", "Elaina", "elaina"]   # 消息里出现这些词算“提到她”（NICKNAME 里的名字也算）
     smart_window: int = 90                # 她在群里说完话后多少秒内，接着说的话也可能是在跟她说
-    smart_min_interval: float = 60.0      # 同一个群“没 @ 也回复”的最短间隔（秒），防止刷屏
+    smart_min_interval: float = 60.0      # 同一个群“没 @ 也回复”的最短间隔（秒），防止刷屏；她刚回过的人接着跟她说话不受这个限制
     smart_judge: bool = True              # 让模型先判断一下是不是在跟她说话（每次判断约 200 token）；关掉则提到名字就回
-    followup_window: int = 30             # 某人叫了她之后，这么多秒内他接着发的话直接算在跟她说（不用判断）
+    followup_window: int = 60             # 她回完某人之后（从她最后一条发出算起），这么多秒内这个人接着说的话直接算在跟她说（不用判断）
     # 分条发送：收到消息先等一等，同一个人接着发的合成一条再回；每来一条新的重新计时
     merge_wait: float = 4.0               # 看不出话说完没说完时，等几秒
     merge_wait_complete: float = 3.0      # 看起来话说完了（问号结尾、完整的一句），等几秒
     merge_wait_incomplete: float = 8.0    # 看起来还没说完（“我跟你说”“然后”、逗号结尾、只叫了她一声），等几秒
     merge_wait_max: float = 20.0          # 从第一条算起最多等多久，到点就回
+    sticker_follow_seconds: float = 20.0  # 她正在回、或者回完这么多秒内，对方单独补的一个表情算同一条消息，不单独回
 
     # 送东西：嘴上说“[给面包]”“给你钱”不会直接当真，防止靠这个刷好感
     gift_bread_affection: float = 2.0     # 送面包：每人每天只收一次，收下时加几分（讨厌的人送不加分）
@@ -174,6 +180,36 @@ class Config(BaseModel):
     skip_filler: bool = True
     skip_filler_prob: dict[str, float] = {"disliked": 0.9, "stranger": 0.7, "acquaintance": 0.5, "close": 0.3}   # 明显的水话，直接不回的概率（不调用模型）
     skip_by_model: bool = True            # 短消息让她自己判断要不要接话（觉得没必要就不回）
+
+    # ---- 主动插话：群里聊得正热时，她偶尔自己插一句（没人叫她）----
+    interject_enabled: bool = True
+    interject_daily_max: int = 2          # 每个群每天最多主动插几次
+    interject_min_gap_hours: float = 3.0  # 同一个群两次插话至少隔几小时
+    interject_hot_minutes: float = 5.0    # “聊得正热”：这么多分钟内……
+    interject_hot_messages: int = 6       # ……至少这么多条消息……
+    interject_hot_people: int = 2         # ……来自至少这么多人
+    interject_prob: float = 0.3           # 聊到她感兴趣 / 想吐槽的话题时，每来一条消息有多大概率让她看一眼要不要插话
+    interject_offtopic_prob: float = 0.02 # 别的话题：很少插（插话集中在她感兴趣的话题上）
+    interject_topics: list[str] = [
+        # 她感兴趣的
+        "面包", "旅行", "旅游", "魔法", "金币", "银币", "铜币", "赚钱", "委托", "报酬", "书", "旅馆", "甜点", "咖啡", "占卜",
+        # 她会吐槽 / 忍不住接话的
+        "自恋", "美少女", "魔女", "扫帚", "伊蕾娜", "灰之魔女", "可爱", "漂亮", "蘑菇", "穷", "没钱",
+    ]
+    interject_hours: str = "10:00-23:00"  # 只在这段时间插话（北京时间）；高峰时段也不插
+    interject_retry_minutes: float = 30.0 # 她看了觉得没什么想说的，这个群多久以后再看
+
+    # ---- 冒泡：白名单群里很久没人说话时，她偶尔自己说一句 ----
+    bubble_enabled: bool = True
+    bubble_quiet_hours: float = 4.0       # 群里这么多小时没人说话，才可能冒泡
+    bubble_daily_max: int = 1             # 每个群每天最多冒泡几次
+    bubble_min_gap_hours: float = 36.0    # 同一个群两次冒泡至少隔几小时（大概两天一次，免得像定时机器人）
+    bubble_global_daily_max: int = 2      # 所有群加起来每天最多冒泡几次
+    bubble_prob: float = 0.08             # 满足条件时，每次检查有多大概率冒泡
+    bubble_check_minutes: float = 20.0    # 多久检查一次
+    bubble_hours: str = "10:00-22:00"     # 只在这段时间冒泡（北京时间）；高峰时段也不冒
+
+    ignore_users: list[int] = []          # 完全不理这些 QQ（比如群里别的机器人），免得两个机器人对着聊
 
     # ---- 触发范围 ----
     enable_group: bool = True             # 群聊是否回复（关掉后群里完全不说话，也不旁听、不判断）
@@ -196,7 +232,8 @@ class Config(BaseModel):
     global_rate_per_minute: int = 12      # 全局每分钟最多回复条数
     global_rate_per_hour: int = 60        # 全局每小时最多回复条数（降低被风控的概率）
     group_rate_per_hour: int = 40         # 每个群每小时最多回复条数
-    farewell_on_limit: bool = True        # 快用完每小时限额时，最后补一句“我要上路了”之类的告别（不调用模型）
+    farewell_on_limit: bool = True        # 每小时限额用完时，补一句“我要上路了”之类的告别（不调用模型）
+    farewell_active_minutes: float = 10.0 # 全局限额用完时，这么多分钟内她说过话的群和私聊都会收到告别
     reply_delay_min: float = 1.5          # 回复前随机“打字”延迟（秒）
     reply_delay_max: float = 4.0
     reply_delay_per_char: float = 0.25    # 打字速度：每个字多少秒（0.25 ≈ 每秒 4 个字，手机打字差不多这个速度）

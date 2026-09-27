@@ -64,18 +64,40 @@ def is_peak(ranges: str, holidays: list[str], now: datetime | None = None) -> bo
     return any(a <= minute < b for a, b in parse_ranges(ranges))
 
 
-FAREWELL_LINES = [
-    "好了，我该上路了。",
-    "我要去下一个国家了，有缘再见。",
-    "天色不早了，我得赶路了。",
-    "扫帚已经等不及了，我先走一步。",
-    "今天就聊到这儿吧，我要启程了。",
-    "下一站还挺远的，我先出发了。",
+# 每小时额度用完时的告别：群里对大家说，私聊对这个人说。每次挑一句没用过的
+FAREWELL_GROUP_LINES = [
+    "好了，今天就陪你们到这儿，我该上路了。",
+    "天快黑了，我得赶在关城门前到下一个镇子。先走了。",
+    "扫帚已经等得不耐烦了，我先出发了。",
+    "下一站还挺远的，再不走今晚就要露宿了。各位回见。",
+    "我去找家旅馆落脚，今天就聊到这儿吧。",
+    "嗯……时间差不多了，我要启程了。别太想我。",
+    "有人托我送信，我得赶路了，先失陪。",
+    "今天说得够多了，我去下一个国家看看。",
+    "我去买面包了，顺便赶路，回头再说。",
+    "风向正好，适合飞。我走了。",
+    "就到这儿吧，旅途还长着呢。",
+    "我要去赶路了，你们慢慢聊。",
 ]
+FAREWELL_PRIVATE_LINES = [
+    "我得走了，下次再聊吧。",
+    "天色不早了，我先赶路，回头再说。",
+    "我要去下一个国家了，有缘再见。",
+    "先不聊了，我得在天黑前找到旅馆。",
+    "扫帚在催我了，下次再说吧。",
+    "今天就到这儿，我要上路了。",
+    "我去办点事，晚点再找你……看我心情。",
+    "要赶路了，你也早点休息。",
+    "先这样吧，我要出发了。",
+    "我得走了。别以为我是嫌你烦，是真的要赶路。",
+]
+FAREWELL_LINES = FAREWELL_GROUP_LINES      # 旧名字，别的地方还在用
 
 
-def farewell_line() -> str:
-    return random.choice(FAREWELL_LINES)
+def farewell_line(private: bool = False, avoid=()) -> str:
+    lines = FAREWELL_PRIVATE_LINES if private else FAREWELL_GROUP_LINES
+    fresh = [x for x in lines if x not in avoid]
+    return random.choice(fresh or lines)
 
 
 def busy_line() -> str:

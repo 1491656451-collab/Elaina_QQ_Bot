@@ -20,7 +20,7 @@ import re
 import time
 from datetime import datetime, timedelta
 
-from nonebot import get_bots, get_driver, logger, on_command, on_notice
+from nonebot import get_bots, get_driver, logger, on_command, on_message, on_notice
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment, NoticeEvent
 from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
@@ -145,6 +145,42 @@ async def _on_risk(kind: str, note: str) -> None:
 
 
 qz.on_risk = _on_risk
+
+
+# ------------------------------------------------------------------ 闸门：下线了不动空间；刚上线、刚要到凭证不写
+# 9/26 的 #3、#4 都是机器人刚连上 1 分多钟、刚要到凭证几秒就往空间里写，随后被踢；上线半小时后再写的那次没事。
+_online_since: float | None = None      # 这次连上 NapCat 的时间；None = 没连上或账号已被下线
+_offline_note = "机器人还没连上 NapCat"
+_cookie_gap = random.uniform(5, 10) * 60
+
+
+def write_block(method: str = "POST") -> str | None:
+    """现在能不能碰空间：返回不能的原因，能就返回 None。只读请求只看有没有下线"""
+    if _online_since is None:
+        return _offline_note
+    if method != "POST":
+        return None
+    now = time.time()
+    grace = cfg.qzone_startup_grace_minutes * 60
+    if now - _online_since < grace:
+        return f"刚上线 {int((now - _online_since) // 60)} 分钟，{datetime.fromtimestamp(_online_since + grace, BJ):%H:%M} 之后才写空间"
+    if not qz.cookie_at:
+        return "还没有空间凭证：先要一个，过几分钟再写"
+    if now - qz.cookie_at < _cookie_gap:
+        return f"刚要到新凭证，{datetime.fromtimestamp(qz.cookie_at + _cookie_gap, BJ):%H:%M} 之后才写空间"
+    return None
+
+
+def write_ready_at() -> float:
+    """最早什么时候可以写（给定时任务安排重试用）"""
+    t = time.time()
+    if _online_since is not None:
+        t = max(t, _online_since + cfg.qzone_startup_grace_minutes * 60)
+    t = max(t, (qz.cookie_at or time.time()) + _cookie_gap)
+    return t
+
+
+qz.guard = write_block
 
 
 async def _alert(e: Exception, what: str) -> None:
@@ -819,11 +855,25 @@ async def daily_summary() -> int:
 _poll_gap = 0.0
 
 
+_retry_poll_at = 0.0     # 上一轮有回复被闸门挡住：到这个时间再查一次（不用等满 2 小时）
+
+
+async def _warm_cookie() -> None:
+    """要写空间但还没有凭证：先要一个，然后按闸门等几分钟再写（别“要到凭证几秒就写”）"""
+    if not qz.cookie_at:
+        try:
+            await qz.ctx()
+        except QzoneError as e:
+            logger.warning(f"QQ 空间：要凭证失败：{e}")
+
+
 async def tick() -> None:
-    global _poll_gap
+    global _poll_gap, _retry_poll_at
     st = state()
-    if st.get("paused") or risk_block():
+    if st.get("paused") or risk_block() or _online_since is None:
         return
+    if time.time() - _online_since < cfg.qzone_startup_grace_minutes * 60:
+        return                       # 刚上线：半小时内空间一概不碰（读也不读）
     now = _now()
     minute = now.hour * 60 + now.minute
     window = peak.parse_ranges(cfg.qzone_post_window)
@@ -836,6 +886,9 @@ async def tick() -> None:
         logger.info(f"QQ 空间：日结完成，整理了 {n} 个会话")
 
     if not st["posted"] and _hm(st["post_at"]) <= minute < end + 60 and st.get("post_tries", 0) < 3:
+        if write_block():
+            await _warm_cookie()
+            return                   # 到点了但现在还不能写：过几分钟再来，不算失败次数
         st["post_tries"] = st.get("post_tries", 0) + 1
         save_state(st)
         if not st["summary_done"]:
@@ -848,8 +901,13 @@ async def tick() -> None:
             st["posted"] = True
             save_state(st)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"QQ 空间：第 {st['post_tries']} 次发说说失败：{e}")
             st = state()
+            if isinstance(e, QzoneError) and e.kind == "hold":
+                st["post_tries"] = max(0, st.get("post_tries", 1) - 1)     # 被闸门挡住不算失败
+                save_state(st)
+                logger.info(f"QQ 空间：说说先不发（{e.msg}）")
+                return
+            logger.warning(f"QQ 空间：第 {st['post_tries']} 次发说说失败：{e}")
             # 10 分钟后再试（最多 3 次）
             later = min(end + 59, minute + 10)
             st["post_at"] = f"{later // 60:02d}:{later % 60:02d}"
@@ -860,15 +918,23 @@ async def tick() -> None:
     if cfg.qzone_comment_reply and not in_peak() and not _in_ranges(cfg.qzone_comment_quiet, minute):
         if not _poll_gap:
             _poll_gap = cfg.qzone_comment_poll_minutes * 60 * random.uniform(0.85, 1.15)
-        if time.time() - float(st.get("last_poll") or 0) >= _poll_gap:
+        due = time.time() - float(st.get("last_poll") or 0) >= _poll_gap
+        retry = _retry_poll_at and time.time() >= _retry_poll_at
+        if due or retry:
             _poll_gap = 0.0
+            _retry_poll_at = 0.0
             try:
                 logger.info("QQ 空间：" + await poll_all())
             except QzoneError as e:
-                logger.warning(f"QQ 空间：查评论失败：{e}")
                 st = state()
                 st["last_poll"] = time.time()
                 save_state(st)
+                if e.kind == "hold":
+                    if _online_since is not None:          # 只是刚要到凭证：到点再查一次，把没回的回掉
+                        _retry_poll_at = write_ready_at() + random.uniform(30, 120)
+                    logger.info(f"QQ 空间：这一轮先不回复（{e.msg}）")
+                    return
+                logger.warning(f"QQ 空间：查评论失败：{e}")
                 await _alert(e, "查评论")
 
 
@@ -940,6 +1006,10 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         elif cmd == "发预览":
             if not _last_draft or time.time() - _last_draft["at"] > 7200:
                 await diary_cmd.finish("（没有两小时内的预览，先 /说说 预览）")
+            why = write_block()
+            if why:
+                await _warm_cookie()
+                await diary_cmd.finish(f"（先不发：{write_block() or why}。预览还留着，过会儿再发 /说说 发预览）")
             tid = await publish(_last_draft)
             _last_draft = None
             st = state()
@@ -947,6 +1017,10 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             save_state(st)
             await diary_cmd.finish(f"（发出去了 tid={tid}，今天不再定时发）")
         elif cmd == "立即发":
+            why = write_block()
+            if why:
+                await _warm_cookie()
+                await diary_cmd.finish(f"（先不发：{write_block() or why}）")
             d = await make_post()
             tid = await publish(d)
             st = state()
@@ -969,6 +1043,9 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
                      f"｜{'⏸ 已暂停' if st.get('paused') else ('自动运行中' if cfg.qzone_enabled else '总开关没开')}）"]
             if blocked:
                 lines.append(f"⚠️ 空间功能{blocked}")
+            wb = write_block()
+            if wb:
+                lines.append(f"⏳ 现在不写空间：{wb}")
             lines.append(f"今日见闻 {len(ms)} 件：" if ms else "今日见闻：还没有")
             for m in ms[-12:]:
                 who = ltm.get_user(int(m["qq"])).get("name") or m["qq"]
@@ -994,6 +1071,8 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         else:
             await diary_cmd.finish(USAGE)
     except QzoneError as e:
+        if e.kind == "hold":
+            await diary_cmd.finish(f"（先不动空间：{e.msg}）")
         await diary_cmd.finish(f"（QQ 空间接口出错：{e}。详细记录在 data\\qzone\\qzone.log）")
     except RuntimeError as e:
         await diary_cmd.finish(f"（没成：{e}）")
@@ -1012,13 +1091,24 @@ def _context_line() -> str:
     return f"最近一小时回复 {replies} 条｜{last}｜空间功能{'开' if cfg.qzone_enabled else '关'}"
 
 
+def _go_offline(note: str) -> None:
+    global _online_since, _offline_note
+    _online_since = None
+    _offline_note = note
+    qz.forget_ctx()                  # 被踢那次登录的凭证别再用（9/26 被踢后程序还拿它回了一条评论）
+
+
 @get_driver().on_bot_connect
 async def _(bot: Bot):
-    log_event(f"机器人连上 NapCat（QQ {bot.self_id}）")
+    global _online_since
+    _online_since = time.time()
+    qz.forget_ctx()
+    log_event(f"机器人连上 NapCat（QQ {bot.self_id}）｜空间功能 {cfg.qzone_startup_grace_minutes:g} 分钟后才开始动")
 
 
 @get_driver().on_bot_disconnect
 async def _(bot: Bot):
+    _go_offline("机器人和 NapCat 断开了")
     log_event(f"机器人和 NapCat 断开（QQ {bot.self_id}；可能是被下线，也可能是 NapCat 关了）｜{_context_line()}")
 
 
@@ -1032,5 +1122,22 @@ offline_notice = on_notice(rule=_is_offline_notice, priority=1, block=False)
 @offline_notice.handle()
 async def _(event: NoticeEvent):
     detail = {k: v for k, v in event.model_dump().items() if k not in ("time", "self_id", "post_type")}
-    log_event(f"NapCat 报告账号下线：{detail}｜{_context_line()}")
+    _go_offline("账号被下线了")
+    log_event(f"NapCat 报告账号下线：{detail}｜{_context_line()}｜空间功能已停，重新上线后再恢复")
     logger.warning(f"账号被下线：{detail}")
+
+
+# 下线后 NapCat 有时不断开连接、自己重新登录：又收到消息，就说明账号回来了，按“刚上线”重新计时
+async def _back_online(event: MessageEvent) -> bool:
+    return _online_since is None
+
+
+back_online = on_message(rule=_back_online, priority=0, block=False)
+
+
+@back_online.handle()
+async def _():
+    global _online_since
+    _online_since = time.time()
+    qz.forget_ctx()
+    log_event(f"下线后又收到消息，账号应该重新登录了｜空间功能 {cfg.qzone_startup_grace_minutes:g} 分钟后才开始动")

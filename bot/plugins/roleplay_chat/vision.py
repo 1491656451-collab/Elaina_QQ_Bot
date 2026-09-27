@@ -44,6 +44,9 @@ MAYBE_HINT = (
     "但画里也可能穿便服、不戴帽子）。请仔细看：发色、眼睛和整体样子都和她一致，描述就以“伊蕾娜本人的画像”开头；"
     "不像的话就正常描述，不要提伊蕾娜。"
 )
+NOT_SELF_NOTE = "（画的不是你）"
+# 描述里有这些词，说明画里有人。本机识别认过、结论是“不是伊蕾娜”时，给她补一句，免得她把随便一个画中少女认成自己
+_PERSON_RE = re.compile(r"画中|少女|少年|女孩|男孩|女生|男生|人物|女子|男子|姑娘")
 OTHER_HINT = "\n画中人物是{names}。描述里不要写出这个名字，只写外貌、动作和表情。"
 
 # 模型偶尔还是会写出这些词，统一换成伊蕾娜能理解的说法
@@ -198,7 +201,19 @@ class Vision:
 
     # ------------------------------------------------------------ 描述
     async def describe(self, data: dict) -> str | None:
-        """data 是 OneBot image 段的 data（含 url / file）。返回一句描述；失败返回 None"""
+        """data 是 OneBot image 段的 data（含 url / file）。返回一句描述；失败返回 None。
+        本机认过、确定画的不是伊蕾娜、画里又有人时，末尾加「（画的不是你）」"""
+        desc = await self._describe(data)
+        if not desc or SELF_NAME in desc:
+            return desc
+        key = self.cache_key(data)
+        entry = self._cache.get(key) if key else None
+        judged = bool(entry) and ("o" in entry or entry.get("t"))
+        if judged and not self.is_self(entry) and _PERSON_RE.search(desc):
+            return desc + NOT_SELF_NOTE
+        return desc
+
+    async def _describe(self, data: dict) -> str | None:
         key = self.cache_key(data)
         entry = self._cache.get(key) if key else None
         # 缓存里有描述，并且（已经认过人，或者现在也没法认人）就直接用
