@@ -7,8 +7,8 @@ if not exist "%~dp0server.txt" (
 )
 set /p SERVER=<"%~dp0server.txt"
 title 机器人（服务器）
-echo 正在连接服务器，显示机器人的实时日志……
+echo 正在连接服务器，显示机器人的实时输出（和以前 start.bat 窗口里的一样，过了半夜也会接着显示）……
 echo 关掉这个窗口、或者按 Ctrl+C，都只是不看了，机器人照常运行。
 echo.
-ssh -t %SERVER% "tail -n 60 -F ~/QQBot/bot/data/logs/bot_$(date +%%F).log"
+ssh -t %SERVER% "journalctl -fu qqbot -o cat -n 60"
 pause

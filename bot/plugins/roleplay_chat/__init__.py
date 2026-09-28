@@ -1005,8 +1005,26 @@ def quota_left(group_id: int | None, user_id: int | None = None) -> int:
     return left
 
 
-def rate_limited(user_id: int, group_id: int | None = None, private: bool = False) -> str | None:
-    """private=True：私聊，按这个人单独算每小时额度"""
+# 额度用完的那一轮，话还没说完（她在反问对方、或者对方还有话没回）：先不告别，给这个人最多再回 2 次，
+# 把话收个尾再走；10 分钟内对方没接话就算了
+WRAPUP_EXTRA = 2
+WRAPUP_MINUTES = 10
+_wrapup: dict[str, dict] = {}       # 会话 -> {"user": 在跟谁收尾, "left": 还能回几次, "at": 开始收尾的时间}
+
+
+def in_wrapup(target: str | None, user_id: int) -> bool:
+    w = _wrapup.get(target) if target else None
+    if not w:
+        return False
+    if time.time() - w["at"] > WRAPUP_MINUTES * 60:
+        _wrapup.pop(target, None)
+        return False
+    return w["user"] == user_id and w["left"] > 0
+
+
+def rate_limited(user_id: int, group_id: int | None = None, private: bool = False, target: str | None = None) -> str | None:
+    """private=True：私聊，按这个人单独算每小时额度。
+    target：这个会话正在“收尾”（额度用完、话还没说完）时，每小时额度用完了也再放行这个人几次"""
     now = time.monotonic()
     if now - _last_trigger.get(user_id, -1e9) < cfg.user_cooldown:
         return "cooldown"
@@ -1016,14 +1034,18 @@ def rate_limited(user_id: int, group_id: int | None = None, private: bool = Fals
         return "global"
     while _hour_window and now - _hour_window[0] > 3600:
         _hour_window.popleft()
-    if len(_hour_window) >= cfg.global_rate_per_hour:
-        return "hourly"
+    over = "hourly" if len(_hour_window) >= cfg.global_rate_per_hour else None
     gq, limit = _scope(group_id, user_id if private else None)
     if gq is not None:
         while gq and now - gq[0] > 3600:
             gq.popleft()
-        if len(gq) >= limit:
-            return "group_hourly" if group_id else "private_hourly"
+        if not over and len(gq) >= limit:
+            over = "group_hourly" if group_id else "private_hourly"
+    if over:
+        if not in_wrapup(target, user_id):
+            return over
+        _wrapup[target]["left"] -= 1          # 收尾：超出额度也再回这一次
+        logger.info(f"额度已经用完，给 {target} 收个尾（还能回 {_wrapup[target]['left']} 次）")
     _last_trigger[user_id] = now
     _global_window.append(now)
     _hour_window.append(now)
@@ -1888,7 +1910,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         logger.info(f"讨厌的人，不想理 user={event.user_id}")
         return
 
-    limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group)
+    limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group, target=_target_of(event))
     waited = 0.0
     while limited in ("cooldown", "global"):
         # 个人冷却 / 这一分钟回太多了：排队等一等再回，而不是直接丢掉
@@ -1903,7 +1925,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         waited += wait
         if _inbox_token.get(ik) != token:
             return
-        limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group)
+        limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group, target=_target_of(event))
     if limited:
         logger.info(f"限流跳过 user={event.user_id} reason={limited}")
         _take_inbox(ik)
@@ -1962,6 +1984,9 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         fam = familiarity_of(event.user_id)
         length_hint = short_hint(text) if mode == "short" else LENGTH_HINT[mode]
         time_memo = time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))
+        if in_wrapup(target, event.user_id) or (_wrapup.get(target) or {}).get("user") == event.user_id:
+            time_memo = "\n".join(x for x in (time_memo, "【该收尾了】你今天在这里已经说了很多，马上就要走了。这次把对方的话回完、把话题收个尾，"
+                                                            "别再反问、别再开新话题；可以顺便自然地说一句要走了（比如要赶路、要休息）。") if x)
         back = _away.pop(target, None)                # 她之前说要走、现在回来了
         if back:
             time_memo = "\n".join(x for x in (time_memo, f"【刚回来】你 {human_gap(time.time() - back['said'])}前说了要走（“{back['line'][:20]}”），现在才回来。"
@@ -2150,7 +2175,20 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         # 这一小时的限额用完了：补一句告别，让大家知道她接下来一段时间不会回（同一范围一小时只说一次）
         # 全局限额用完：最近在聊的群和私聊都告别一声；只是这个群的限额用完：只在这个群告别
         if cfg.farewell_on_limit and quota_left(gid_q, uid_q) <= 0:
-            farewell = await say_farewells(bot, event, target)
+            # 刚才这轮已经道别了（私聊里对方说了再见、她也回了再见；或者她自己说了要走）：这里就不再补一句告别
+            said = "\n".join(bubbles)
+            already_bye = bool(_LEAVE_RE.search(said)) or (not is_group and bool(_BYE_RE.search(text) or _BYE_RE.search(said)))
+            # 话还没说完（她最后在反问对方、或者对方又发来了还没回的消息）：先不告别，等收个尾
+            open_end = not already_bye and (she_asked([{"role": "assistant", "content": said}]) or bool(_inbox.get(ik)))
+            w = _wrapup.get(target)
+            if open_end and (w is None or (w["user"] == event.user_id and w["left"] > 0
+                                           and time.time() - w["at"] <= WRAPUP_MINUTES * 60)):
+                if w is None:
+                    _wrapup[target] = {"user": event.user_id, "left": WRAPUP_EXTRA, "at": time.time()}
+                logger.info(f"每小时额度用完了，但和 {event.user_id} 的话还没说完，先不告别，收个尾再走：{target}")
+            else:
+                _wrapup.pop(target, None)
+                farewell = await say_farewells(bot, event, target, already_bye=already_bye)
         mark_sent(target)
     if bubbles and cfg.knowledge_enabled:
         note_topic(key, "\n".join(bubbles))          # 她讲了哪段经历：对方接着追问时还记得
@@ -2180,8 +2218,9 @@ def _unrecord(key: str, record: str, keep: str = "") -> None:
 
 
 # ------------------------------------------------------------------ 限额用完：告别
-async def say_farewells(bot: Bot, event: MessageEvent, target: str) -> list[str]:
-    """（已经拿着 _hands）每小时限额用完时告别。返回告别过的会话"""
+async def say_farewells(bot: Bot, event: MessageEvent, target: str, already_bye: bool = False) -> list[str]:
+    """（已经拿着 _hands）每小时限额用完时告别。返回告别过的会话。
+    already_bye：这个会话刚才已经互相道别过了，不再补一句（但照样记下“告别过了”，之后不回）"""
     if quota_left(None) <= 0:
         scope = "global"
         now = time.monotonic()
@@ -2199,6 +2238,9 @@ async def say_farewells(bot: Bot, event: MessageEvent, target: str) -> list[str]
             continue                                   # 这个群刚因为本群限额告别过
         _farewell_at[t] = time.monotonic()
         private = t.startswith("private_")
+        if t == target and already_bye:
+            logger.info(f"每小时限额用完，但刚才已经道别过了，不再补告别：{t}")
+            continue
         line = peak.farewell_line(private=private, avoid=used)
         used.append(line)
         if i:
@@ -2222,7 +2264,7 @@ async def say_farewells(bot: Bot, event: MessageEvent, target: str) -> list[str]
         save_history(hist_key)
         done.append(t)
     if done:
-        logger.info(f"每小时限额用完（{'全局' if scope == 'global' else '本群'}），已告别：{'、'.join(done)}")
+        logger.info(f"每小时限额用完（{'全局' if scope == 'global' else ('本群' if scope.startswith('group_') else '这个私聊')}），已告别：{'、'.join(done)}")
     return done
 
 

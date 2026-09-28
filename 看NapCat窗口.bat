@@ -10,5 +10,7 @@ title NapCat（服务器）
 echo 正在连接服务器，显示 NapCat 的实时日志……
 echo 关掉这个窗口、或者按 Ctrl+C，都只是不看了，NapCat 照常运行。
 echo.
-ssh -t %SERVER% "tail -n 60 -F ~/napcat.log"
+echo （QQ 每次启动都会打印一堆 Bugly、CrashHandler 开头的崩溃上报信息，不代表崩溃，这里已经过滤掉；二维码的方块字符也过滤掉了）
+echo.
+ssh -t %SERVER% "tail -n 200 -F ~/napcat.log | grep --line-buffered -v -E 'Bugly|CrashHandler|crash_files|pub.key|StartWithOptions|PostDelayedTask|SetLogger|fatalSetup|GetDllPath|linux-bugly|█|▀|▄'"
 pause
