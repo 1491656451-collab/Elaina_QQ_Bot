@@ -481,7 +481,7 @@ class LongTermMemory:
             prof["gain_day"], prof["gain_today"] = today, 0
         c = self.affection_cfg
         if c["base_gain"] > 0 and score >= c["dislike"] and prof["gain_today"] < c["daily_cap"]:   # 被讨厌时光聊天不会回暖，得靠内容加分
-            score = min(100.0, score + c["base_gain"])
+            score = min(float(c.get("max", 150)), score + c["base_gain"])
             prof["gain_today"] += c["base_gain"]
         prof["score"] = score
         prof["last_talk"] = prof["last_msg"] = time.time()
