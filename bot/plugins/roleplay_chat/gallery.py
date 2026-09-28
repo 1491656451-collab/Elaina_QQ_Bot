@@ -23,9 +23,14 @@ from nonebot import logger
 from .vision import SELF_TAG, sanitize
 
 EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
-MAX_SIDE = 2048            # 上传用的图：长边上限
+# 上传用的图：按 QQ 空间自己的高清规格来（上传接口里写的是宽 ≤ 2048、高 ≤ 10000、质量 96）。
+# 以前是“长边 ≤ 2048”，竖图会被多缩一截（3000×4200 缩成 1463×2048，空间其实能留 2048×2867）
+UPLOAD_MAX_W = 2048
+UPLOAD_MAX_H = 10000
+UPLOAD_QUALITY = 95
 LOOK_SIDE = 1024           # 给模型看的图：再小一点，省 token
 UPLOAD_MAX_BYTES = 3 * 1024 * 1024
+COMPRESS_VERSION = 2       # 压缩规格改了就加一，已有的缓存图会按新规格重新压一遍（描述、认人结果保留）
 
 DESCRIBE_PROMPT = """这是一张画着伊蕾娜（灰色长发、黑色三角帽和长袍的旅行魔女）的画。它会用作她旅行日记的配图。
 请只输出 JSON，格式：
@@ -38,7 +43,7 @@ SEASON_OF_MONTH = {12: "冬", 1: "冬", 2: "冬", 3: "春", 4: "春", 5: "春", 
 
 
 def _to_jpeg(img, quality: int) -> bytes:
-    for q in (quality, 85, 78, 70):
+    for q in dict.fromkeys((quality, 90, 85, 78, 70)):
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=q, optimize=True)
         if buf.tell() <= UPLOAD_MAX_BYTES or q == 70:
@@ -46,15 +51,16 @@ def _to_jpeg(img, quality: int) -> bytes:
     return buf.getvalue()
 
 
-def _compress(src, side: int, quality: int = 90) -> bytes:
-    """src 是文件路径或图片字节。先缩小再处理（大原图整张解码很吃内存），再垫白底、转成 JPEG"""
+def _compress(src, box: tuple[int, int], quality: int = 90) -> bytes:
+    """src 是文件路径或图片字节；box 是 (最大宽, 最大高)，等比缩小、不放大。
+    先缩小再处理（大原图整张解码很吃内存），再垫白底、转成 JPEG"""
     from PIL import Image
 
     img = Image.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src)
     img.seek(0)
     if img.format == "JPEG":
-        img.draft("RGB", (side, side))         # JPEG 解码时直接按缩小后的尺寸解，省内存
-    img.thumbnail((side, side), Image.LANCZOS)  # 先缩小，后面的垫底、转色都在小图上做
+        img.draft("RGB", box)                  # JPEG 解码时直接按缩小后的尺寸解，省内存
+    img.thumbnail(box, Image.LANCZOS)           # 先缩小，后面的垫底、转色都在小图上做
     if img.mode in ("RGBA", "LA", "P"):
         img = img.convert("RGBA")
         bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
@@ -99,6 +105,7 @@ class Gallery:
         it = self.items.get(f.name)
         return not it or it.get("size") != f.stat().st_size or not it.get("desc") or \
             not it.get("cache") or not (self.cache_dir / it["cache"]).exists() or \
+            it.get("cv") != COMPRESS_VERSION or \
             (it.get("self") is None and self.tagger is not None and self.tagger.ready)
 
     async def prepare(self, limit: int | None = None) -> int:
@@ -128,18 +135,20 @@ class Gallery:
         it = {"file": f.name, "size": f.stat().st_size, "used": old.get("used", []),
               "disabled": old.get("disabled", False)}
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        up = await asyncio.to_thread(_compress, f, MAX_SIDE)
+        up = await asyncio.to_thread(_compress, f, (UPLOAD_MAX_W, UPLOAD_MAX_H), UPLOAD_QUALITY)
         cache = self.cache_dir / (f.name + ".jpg")      # 带上原扩展名：a.png 和 a.jpg 不会共用一个缓存
         cache.write_bytes(up)
         old_cache = old.get("cache")
         if old_cache and old_cache != cache.name and (self.cache_dir / old_cache).exists():
             (self.cache_dir / old_cache).unlink(missing_ok=True)
         it["cache"] = cache.name
-        look = await asyncio.to_thread(_compress, up, LOOK_SIDE, 85)    # 给模型看的小图从压好的上传图生成，不再解码原图
+        it["cv"] = COMPRESS_VERSION
+        look = await asyncio.to_thread(_compress, up, (LOOK_SIDE, LOOK_SIDE), 85)    # 给模型看的小图从压好的上传图生成，不再解码原图
 
-        # 认人（本机，免费）
-        it["self"] = None
-        if self.tagger is not None and self.tagger.ready:
+        # 认人（本机，免费）。原图没换、以前认过（包括你在 gallery.json 里手动改过的）就沿用，不重新认
+        same_file = old.get("size") == it["size"]
+        it["self"] = old.get("self") if same_file else None
+        if it["self"] is None and self.tagger is not None and self.tagger.ready:
             found = await self.tagger.detect(look)
             if found is not None:
                 it["self"] = any(t == SELF_TAG for t, _ in found)

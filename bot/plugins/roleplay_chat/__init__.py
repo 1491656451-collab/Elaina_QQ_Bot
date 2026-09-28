@@ -166,7 +166,9 @@ RECALL_RULES = (
     "- 标注“角色资料”的是这个人的确切资料（外貌、喜好等以它为准）；“摘要”是整段经历的梗概；“原文”是当时的片段；"
     "“刚才聊到的”是你们刚才在聊的那段经历。\n"
     "- 对方说起这段经历里的细节、别人说过的话，而片段里没有写：别断然否认，也别编一个结局，说记不太清、或者问对方是谁说的。\n"
-    "- 这些都是你以前旅途里的事，不是今天发生的；别把它们说成今天的经历，也别和今天的日记混在一起。"
+    "- 这些都是你以前旅途里的事，不是今天发生的；别把它们说成今天的经历，也别和今天的日记混在一起。\n"
+    "- 对方只是在闲聊、没问起往事时，一般用不上这些片段；真要提，得先讲清楚是哪件事，"
+    "别像对方早就知道一样突然冒出片段里的细节（比如没头没脑地说“我又没拿那张券……”）。"
 )
 
 
@@ -197,6 +199,17 @@ RECALL_CARRY_TURNS = 3         # 最多再带几轮（话题早换了就别再�
 _last_recall: dict[str, dict] = {}   # 会话 -> {"at": 时间, "picks": [(标题, 类型, 内容)], "left": 还能带几轮}
 
 
+def _strip_her_names(text: str) -> str:
+    """去掉话里叫她的名字（伊蕾娜小姐、魔女小姐、昵称……），剩下的才是话题"""
+    names = sorted({n for n in _her_names() + ["伊蕾娜小姐", "伊蕾娜大人", "伊雷娜"] if n}, key=len, reverse=True)
+    for n in names:
+        if "之魔女" in n:                 # “灰之魔女”这种称号也可能是话题（“你考灰之魔女那次”），只去掉开头叫人的那种
+            text = re.sub(rf"^\s*{re.escape(n)}[，,、!！\s]*", " ", text)
+        else:
+            text = text.replace(n, " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def recall(query: str, extra: str = "", key: str | None = None) -> str:
     """根据对方的话检索回忆；没有足够相关的就返回空字符串
 
@@ -220,18 +233,24 @@ def recall(query: str, extra: str = "", key: str | None = None) -> str:
 
     # 2) 摘要 + 原文：BM25 检索。先用这句话本身查；像是在追问、而这句话本身查到的都不太像时，带上上文再查一次，
     #    结果接在后面（“后来发生了什么”单独查，只会查到些不相干的；但这句话里有新线索时，以它为准）
+    # 叫她的名字（“伊蕾娜小姐……”）不算话题：小说里到处都是她的名字，带着它查，闲聊也会查到不相干的片段
+    q_topic = _strip_her_names(query)
+    x_topic = _strip_her_names(extra)
+    # 很短的一句（“哇暴露本性了”“真的假的”）没多少线索，原文片段要更像才带
+    chunk_min = cfg.knowledge_min_chunk_score * (1.25 if len(q_topic) < 10 and not followup else 1.0)
+
     def search(q: str) -> list[tuple[float, tuple[str, str, str]]]:
         out = [(s / cfg.knowledge_min_summary_score, (d.label, "摘要", d.content[: cfg.knowledge_summary_chars]))
                for s, d in _kb.search(q, "summary", cfg.knowledge_top_summaries) if s >= cfg.knowledge_min_summary_score]
-        out += [(s / cfg.knowledge_min_chunk_score * 0.8, (d.label, "原文", d.content[: cfg.knowledge_chunk_chars]))
-                for s, d in _kb.search(q, "text", cfg.knowledge_top_chunks) if s >= cfg.knowledge_min_chunk_score]
+        out += [(s / chunk_min * 0.8, (d.label, "原文", d.content[: cfg.knowledge_chunk_chars]))
+                for s, d in _kb.search(q, "text", cfg.knowledge_top_chunks) if s >= chunk_min]
         return out
 
-    direct = search(query) if len(query) >= 3 else []
+    direct = search(q_topic) if len(q_topic) >= 3 else []
     picks = [pk for _, pk in direct]
     if followup and max([sc for sc, _ in direct] + [0.0]) < 1.3:
         have = {(p[0], p[1]) for p in picks}
-        more = [pk for _, pk in sorted(search(f"{extra} {query}"), key=lambda x: -x[0]) if (pk[0], pk[1]) not in have]
+        more = [pk for _, pk in sorted(search(f"{x_topic} {q_topic}"), key=lambda x: -x[0]) if (pk[0], pk[1]) not in have]
         picks += more[:2]
     # 3) 刚才聊到的那段经历（按她上一轮自己讲的内容记下的，见 note_topic）：
     #    追问时放在最前面；这句话本身什么都没查到（“还真是”“哈哈”），放在后面备用；别的时候不带
