@@ -14,13 +14,14 @@
 - 表情包：有一定概率用小号收藏表情里的伊蕾娜表情表达情绪（跟在文字后面，或者只发一张），见 stickers.py
 """
 import asyncio
+import contextlib
 import json
 import os
 import random
 import re
 import time
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from nonebot import get_bots, get_driver, get_plugin_config, logger, on_command, on_message, on_notice, on_request
@@ -39,7 +40,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule, to_me
 from openai import AsyncOpenAI
 
-from . import knowledge, peak
+from . import budget, knowledge, peak
 from .memory import LongTermMemory
 from .stickers import EMOTIONS, StickerStore
 from .stickers import normalize as sticker_normalize
@@ -50,7 +51,7 @@ from .config import Config
 __plugin_meta__ = PluginMetadata(
     name="角色扮演聊天",
     description="DeepSeek 驱动、带人设和上下文记忆的聊天机器人",
-    usage="群里 @机器人 说话；/重置 清空短期记忆；管理员：/重载人设、/记忆、/忘记、/好感、/写信、/说说、/表情",
+    usage="群里 @机器人 说话；/重置 清空短期记忆；管理员：/重载人设、/记忆、/忘记、/好感、/花费、/写信、/说说、/表情",
     config=Config,
 )
 
@@ -73,6 +74,13 @@ client = AsyncOpenAI(
     timeout=cfg.llm_timeout,
 )
 
+spend = budget.setup(budget.Budget(
+    BOT_DIR / "data" / "usage", enabled=cfg.budget_enabled, total=cfg.budget_daily_total, reserve=cfg.budget_reserve,
+    user_share=cfg.budget_user_share, group_share=cfg.budget_group_share, reset_hour=cfg.budget_reset_hour,
+    price=dict(cfg.budget_price), peak_multiplier=cfg.budget_peak_multiplier, peak_ranges=cfg.budget_peak_ranges,
+    holidays=peak.HOLIDAYS_2026 + list(cfg.peak_holidays),
+))
+
 tagger = Tagger(
     BOT_DIR / cfg.vision_tagger_dir, cfg.vision_tagger_repo, list(cfg.vision_tagger_mirrors),
     threshold=cfg.vision_tagger_threshold, threads=cfg.vision_tagger_threads,
@@ -87,10 +95,18 @@ def in_peak() -> bool:
     return cfg.peak_enabled and peak.is_peak(cfg.peak_ranges, peak.HOLIDAYS_2026 + list(cfg.peak_holidays))
 
 
+if (cfg.affection_dislike, cfg.affection_acquaintance, cfg.affection_close) == (-20, 30, 70):
+    # 9/29 分数范围从 -100～100 换成 -50～150；.env 里还是照旧版 .env.example 抄的档位，按新档位来，不然换算后的分数全对不上
+    logger.warning("好感：.env 里的 AFFECTION_DISLIKE/ACQUAINTANCE/CLOSE 还是旧的 -20/30/70，已按新档位 0/90/130 处理，"
+                   "请把这三行删掉或改成新值（见 .env.example）")
+    cfg.affection_dislike, cfg.affection_acquaintance, cfg.affection_close = 0, 90, 130
 ltm_affection = {
     "base_gain": cfg.affection_chat_gain, "daily_cap": cfg.affection_daily_cap,
     "decay_after_days": cfg.affection_decay_after_days, "decay_per_day": cfg.affection_decay_per_day,
-    "dislike": cfg.affection_dislike, "acquaintance": cfg.affection_acquaintance, "close": cfg.affection_close,
+    "min": cfg.affection_min, "max": cfg.affection_max, "start": cfg.affection_start,
+    "dislike": cfg.affection_dislike, "friend": cfg.affection_friend,
+    "acquaintance": cfg.affection_acquaintance, "close": cfg.affection_close,
+    "summary_daily_cap": cfg.affection_summary_daily_cap,
 }
 ltm = LongTermMemory(
     BOT_DIR / cfg.memory_dir,
@@ -701,6 +717,7 @@ _STICKER_RE = re.compile(r"[\[【［]\s*(?:发了|甩了)?\s*表情\s*[:：]\s*(
 TIER_EMOTIONS = {
     "disliked": {"嫌弃", "无语", "敷衍"},
     "stranger": set(EMOTIONS) - {"害羞", "委屈"},
+    "friend": set(EMOTIONS) - {"委屈"},
 }
 _last_sticker: dict[str, float] = {}                  # 会话 -> 上次发表情的时间
 _recent_stickers: dict[str, deque] = defaultdict(lambda: deque(maxlen=max(cfg.sticker_recent_avoid, 1)))
@@ -718,7 +735,7 @@ def sticker_roll(target: str, fam: str, is_group: bool, group_id: int | None, se
         return False, allowed, emotions
     if quota_left(group_id if is_group else None, None if is_group else int(target.split("_")[1])) < 2:     # 限额只剩最后一条了：留给文字
         return False, allowed, emotions
-    p = cfg.sticker_self_react_prob if self_image else cfg.sticker_prob * cfg.sticker_tier_multiplier.get(fam, 1.0)
+    p = cfg.sticker_self_react_prob if self_image else cfg.sticker_prob * tier_value(cfg.sticker_tier_multiplier, fam, 1.0)
     return random.random() < p, allowed, emotions
 
 
@@ -765,6 +782,9 @@ FAMILIARITY_HINT = {
                 "对方胡搅蛮缠、说荒唐话时，可以礼貌地损一句（“我可以回去了吗？”），但不骂人。"
                 "只有对方越界（一上来就告白、调情、叫你宝宝老婆、说过分亲昵的话）时，才冷下来拒绝，比如“……我们才刚认识吧。”“请不要说这种奇怪的话。”；"
                 "被骂、被恶意冒犯才毒舌回去。）",
+    "friend": "（对方是和你聊过一些、印象还不错的人：不用那么客气了，语气自然些，偶尔可以吐槽一句、开个小玩笑，"
+              "但还谈不上熟：不嘘寒问暖、不说亲昵的话，也不会主动问对方的私事。"
+              "对方告白、调情时，冷淡地挡回去，比如“……请不要开这种玩笑。”“我们没那么熟吧。”）",
     "acquaintance": "（对方是和你说过不少话的熟人：可以随意些，偶尔毒舌调侃，但保持距离感，不黏人、不嘘寒问暖。"
                     "对方告白、调情时，用嫌弃的玩笑挡回去，比如“我打飞你哦。”“少来。”）",
     "close": "（对方是你很熟、信任的人：可以放松些，毒舌里带点在意，偶尔流露关心，但嘴上不承认。"
@@ -774,6 +794,15 @@ FAMILIARITY_HINT = {
 
 def familiarity_of(qq: int) -> str:
     return ltm.familiarity(qq, cfg.close_friends)
+
+
+def tier_value(table: dict, fam: str, default: float = 1.0) -> float:
+    """按关系取配置里的数。9/29 新加了“普通朋友”，.env 里老的写法没有 friend：取陌生人和熟人的中间值"""
+    if fam in table:
+        return table[fam]
+    if fam == "friend" and "stranger" in table and "acquaintance" in table:
+        return (float(table["stranger"]) + float(table["acquaintance"])) / 2
+    return default
 
 
 def max_tokens_for(mode: str) -> int:
@@ -1014,13 +1043,31 @@ def _scope(group_id: int | None, user_id: int | None) -> "tuple[deque, int] | tu
     return None, None
 
 
+_NO_LIMIT = 10 ** 6
+
+
+def _rounds(money: float) -> int:
+    """剩下的钱大约还够回几轮"""
+    if money == float("inf"):
+        return _NO_LIMIT
+    return int(money / max(cfg.budget_round_estimate, 1e-6)) if money > 0 else 0
+
+
 def quota_left(group_id: int | None, user_id: int | None = None) -> int:
-    """这一小时里还能回几条（全局和这个群 / 这个人的私聊取小的）；两个都不给就只看全局"""
+    """还能回几轮：今天剩下的钱（和这个群 / 这个人私聊的份额）大约够几轮，再和每小时条数限额（开了的话）取小的"""
+    if asleep():
+        return 0                                          # 休息时间
     now = time.monotonic()
-    left = cfg.global_rate_per_hour - sum(1 for t in _hour_window if now - t <= 3600)
+    left = _rounds(spend.chat_left())
+    if cfg.global_rate_per_hour > 0:
+        left = min(left, cfg.global_rate_per_hour - sum(1 for t in _hour_window if now - t <= 3600))
     q, limit = _scope(group_id, user_id)
-    if q is not None:
+    if q is not None and limit > 0:
         left = min(left, limit - sum(1 for t in q if now - t <= 3600))
+    if group_id:
+        left = min(left, _rounds(spend.group_left(group_id)))
+    elif user_id:
+        left = min(left, _rounds(spend.user_left(user_id)))
     return left
 
 
@@ -1053,18 +1100,29 @@ def rate_limited(user_id: int, group_id: int | None = None, private: bool = Fals
         return "global"
     while _hour_window and now - _hour_window[0] > 3600:
         _hour_window.popleft()
-    over = "hourly" if len(_hour_window) >= cfg.global_rate_per_hour else None
+    over = None
+    if asleep():
+        over = "sleep"                                # 休息时间
+        _sleep_wrapup(target, user_id)
+    elif spend.chat_left() <= 0:
+        over = "budget"                               # 今天的钱花完了
+    elif group_id and spend.group_left(group_id) <= 0:
+        over = "budget_group"                         # 这个群今天的份额用完了
+    elif spend.user_left(user_id) <= 0:
+        over = "budget_user"                          # 这个人今天的份额用完了（群聊私聊合计）
+    elif cfg.global_rate_per_hour > 0 and len(_hour_window) >= cfg.global_rate_per_hour:
+        over = "hourly"
     gq, limit = _scope(group_id, user_id if private else None)
     if gq is not None:
         while gq and now - gq[0] > 3600:
             gq.popleft()
-        if not over and len(gq) >= limit:
+        if not over and limit > 0 and len(gq) >= limit:
             over = "group_hourly" if group_id else "private_hourly"
     if over:
         if not in_wrapup(target, user_id):
             return over
         _wrapup[target]["left"] -= 1          # 收尾：超出额度也再回这一次
-        logger.info(f"额度已经用完，给 {target} 收个尾（还能回 {_wrapup[target]['left']} 次）")
+        logger.info(f"额度已经用完（{over}），给 {target} 收个尾（还能回 {_wrapup[target]['left']} 次）")
     _last_trigger[user_id] = now
     _global_window.append(now)
     _hour_window.append(now)
@@ -1153,6 +1211,7 @@ async def switch_pause(target: str) -> None:
 
 def mark_sent(target: str) -> None:
     _last_sent["target"], _last_sent["at"] = target, time.monotonic()
+    _chat_seq[target] += 1              # 她在这里说了话：之后再回更早的消息，就要引用原句
 
 
 # ------------------------------------------------------------------ 触发规则
@@ -1180,7 +1239,7 @@ async def _is_group_not_to_me(event: MessageEvent) -> bool:
 # ------------------------------------------------------------------ 命令
 # 所有指令都只有管理员能用；别人发指令她当没看见（不回、不当成聊天）
 ADMIN_COMMANDS = ("重置", "清空记忆", "reset", "重载人设", "认图", "表情", "表情包", "记忆", "查看记忆",
-                  "好感", "好感度", "性别", "忘记", "删除记忆", "写信", "说说", "插话", "冒泡", "搭话")
+                  "好感", "好感度", "性别", "忘记", "删除记忆", "写信", "说说", "插话", "冒泡", "搭话", "花费", "花销")
 
 
 def is_admin_command(text: str, command_start) -> bool:
@@ -1393,7 +1452,7 @@ aff_cmd = on_command("好感", aliases={"好感度"}, rule=to_me(), permission=S
 
 @aff_cmd.handle()
 async def _(event: MessageEvent, arg: Message = CommandArg()):
-    """/好感 @某人 查看；/好感 @某人 +10 / -10 / =50 调整（也可以用 QQ号 或 我）"""
+    """/好感 @某人 查看；/好感 @某人 +10 / -10 / =50 / =-20 调整（也可以用 QQ号 或 我）"""
     text = arg.extract_plain_text().strip()
     ats = [seg for seg in arg if seg.type == "at" and str(seg.data.get("qq", "")).isdigit()]
     qq, rest = None, text
@@ -1406,15 +1465,32 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
         elif first in ("我", "自己"):
             qq = event.user_id
     if qq is None:
-        await aff_cmd.finish("用法：/好感 @某人（或 QQ号、我）查看；后面加 +10、-10 或 =50 调整")
-    m = re.match(r"\s*([+\-=])\s*(\d+(?:\.\d+)?)", rest)
-    if m:
+        await aff_cmd.finish(f"用法：/好感 @某人（或 QQ号、我）查看；后面加 +10、-10 或 =50 调整（分数 {cfg.affection_min}～{cfg.affection_max}：讨厌 <{cfg.affection_dislike}｜普通朋友 ≥{cfg.affection_friend}｜熟人 ≥{cfg.affection_acquaintance}｜很熟 ≥{cfg.affection_close}）")
+    m = re.match(r"\s*([+\-=])\s*(-?\d+(?:\.\d+)?)", rest)
+    if m and (m.group(1) == "=" or not m.group(2).startswith("-")):
         op, num = m.group(1), float(m.group(2))
         if op == "=":
             ltm.adjust(qq, set_to=num)
         else:
             ltm.adjust(qq, delta=num if op == "+" else -num)
     await aff_cmd.finish(ltm.describe_affection(qq, cfg.close_friends))
+
+
+cost_cmd = on_command("花费", aliases={"花销"}, rule=to_me(), permission=SUPERUSER, priority=5, block=True)
+
+
+@cost_cmd.handle()
+async def _():
+    """/花费：今天（从凌晨 BUDGET_RESET_HOUR 点算起）花了多少、花在哪、谁花得最多，本月合计"""
+    names = {}
+    d = spend.today()
+    for q in list(d["users"])[:50]:
+        with contextlib.suppress(Exception):
+            names[int(q)] = ltm.get_user(int(q)).get("name") or q
+    text = spend.report(names)
+    if spend.enabled and spend.chat_left() <= 0:
+        text += f"\n今天的钱已经花完了，{spend.next_reset():%H:%M} 以后恢复"
+    await cost_cmd.finish(text)
 
 
 gender_cmd = on_command("性别", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
@@ -1456,9 +1532,20 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
     await mem_forget.finish(f"（已删除关于 {tid} 的长期记忆）" if ok else f"（关于 {tid} 本来就没有长期记忆）")
 
 
-# ------------------------------------------------------------------ 群消息计数（决定要不要用“回复”形式）
-# 每个群收到的消息都 +1；机器人发送前比较一下：触发之后如果有人插话，就引用原消息回复，否则直接发
-_group_seq: dict[int, int] = defaultdict(int)
+# ------------------------------------------------------------------ 消息计数（决定要不要用“回复”形式引用原句）
+# 每个会话（群 / 私聊）里：收到一条消息 +1，她自己发完一轮也 +1。
+# 她回某条消息时比较一下：这条消息到了以后，中间有别人插话、或者她自己先发了别的话（比如还在回上一个人），
+# 就引用原句回复，免得大家不知道她在回哪句；否则直接发
+_chat_seq: dict[str, int] = defaultdict(int)
+_arrival_seq: dict[tuple[str, int], int] = {}      # (会话, 消息 id) -> 这条消息到的时候的计数
+
+
+def note_arrival(target: str, message_id: int) -> None:
+    _chat_seq[target] += 1
+    _arrival_seq[(target, int(message_id))] = _chat_seq[target]
+    if len(_arrival_seq) > 2000:                    # 只留最近的
+        for k in list(_arrival_seq)[:1000]:
+            del _arrival_seq[k]
 
 
 async def _is_group(event: MessageEvent) -> bool:
@@ -1478,7 +1565,7 @@ def others_spoke_since(gid: int, uid: int, since: float) -> bool:
 
 @counter.handle()
 async def _(event: GroupMessageEvent):
-    _group_seq[event.group_id] += 1
+    note_arrival(f"group_{event.group_id}", event.message_id)
     _speakers[event.group_id].append((time.monotonic(), event.user_id))
     ltm.note_name(event.group_id, event.user_id, sender_label(event))
 
@@ -1556,6 +1643,7 @@ async def _judge(event: GroupMessageEvent, line: str) -> bool:
             max_tokens=2,
             extra_body={"thinking": {"type": "disabled"}},
         )
+        budget.track(r, "judge", user=event.user_id, group=event.group_id)
         ok = (r.choices[0].message.content or "").strip().startswith("是")
         if not ok:
             logger.info(f"判断：不是在跟她说话 群{event.group_id} {line[:40]}")
@@ -1627,6 +1715,10 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
     if not (mentioned or continuing):
         return False                     # 大部分群消息在这里就结束了，不花 token
     line = speaker_head(event, you="伊蕾娜") + clean_body(message_to_text(event.get_message(), drop_at=True))
+    if asleep():
+        _sleep_wrapup(f"group_{gid}", event.user_id)     # 刚到休息时间、正在跟她聊的人接着说：先收个尾
+    if cfg.smart_judge and quota_left(gid, event.user_id) <= 0 and not in_wrapup(f"group_{gid}", event.user_id):
+        return False                     # 今天的钱花完了（或这个群、这个人的份额用完了）：反正不会回，也不用判断
     ok = await _judge(event, line) if cfg.smart_judge else mentioned
     if ok:
         _last_smart[gid] = now
@@ -1799,6 +1891,7 @@ async def _(bot: Bot, event: MessageEvent):
 async def converse(bot: Bot, event: MessageEvent, catchup_age: float | None = None) -> None:
     """回复一条（或连着的几条）消息。catchup_age 不为空时，表示这是上线后补回的未读消息，值是最早那条过去了几秒"""
     ik = (session_key(event), event.user_id)
+    budget.actor.set((event.user_id, event.group_id if isinstance(event, GroupMessageEvent) else None))   # 看图这些花的钱也算到这个人 / 这个群头上
     try:
         await _converse(bot, event, catchup_age)
     finally:
@@ -1876,7 +1969,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
     if cfg.skip_filler and pending and all(is_filler(t) for t in pending):
         async with _locks[key]:
             history = get_history(key)
-            if not she_asked(history) and random.random() < cfg.skip_filler_prob.get(familiarity_of(event.user_id), 0.5):
+            if not she_asked(history) and random.random() < tier_value(cfg.skip_filler_prob, familiarity_of(event.user_id), 0.5):
                 texts = _take_inbox(ik)
                 name = sender_label(event)
                 joined = clip_input("\n".join(texts))
@@ -1948,6 +2041,8 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
     if limited:
         logger.info(f"限流跳过 user={event.user_id} reason={limited}")
         _take_inbox(ik)
+        if limited.startswith("budget") and not is_group:
+            await say_tired(bot, event)
         return
     admitted_at = time.monotonic()           # 这条从这时开始算“要回”；之后如果已经告别了，就不发了
     stamp = _hour_window[-1] if _hour_window else admitted_at      # 这次占用的额度（最后没发出去就退回）
@@ -1962,7 +2057,8 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             return
         _reply_started[ik] = time.monotonic()
         text = clip_input("\n".join(texts))
-        seq_at_trigger = _group_seq[event.group_id] if is_group else 0
+        # 这条消息到的时候的计数（之后有人插话、或者她先说了别的，就引用原句）
+        seq_at_trigger = _arrival_seq.pop((_target_of(event), int(event.message_id)), _chat_seq[_target_of(event)])
         history = get_history(key)
         new_entries: list[dict] = []
 
@@ -2004,8 +2100,9 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         length_hint = short_hint(text) if mode == "short" else LENGTH_HINT[mode]
         time_memo = time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))
         if in_wrapup(target, event.user_id) or (_wrapup.get(target) or {}).get("user") == event.user_id:
-            time_memo = "\n".join(x for x in (time_memo, "【该收尾了】你今天在这里已经说了很多，马上就要走了。这次把对方的话回完、把话题收个尾，"
-                                                            "别再反问、别再开新话题；可以顺便自然地说一句要走了（比如要赶路、要休息）。") if x)
+            time_memo = "\n".join(x for x in (time_memo, WRAPUP_SLEEP_HINT if asleep() else WRAPUP_HINT) if x)
+        else:
+            time_memo = "\n".join(x for x in (time_memo, winddown_hint(event.group_id if is_group else None, event.user_id)) if x)
         back = _away.pop(target, None)                # 她之前说要走、现在回来了
         if back:
             time_memo = "\n".join(x for x in (time_memo, f"【刚回来】你 {human_gap(time.time() - back['said'])}前说了要走（“{back['line'][:20]}”），现在才回来。"
@@ -2052,6 +2149,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 max_tokens=max_tokens_for(mode),
                 extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
             )
+            budget.track(resp, "chat", user=event.user_id, group=gid_q)
             choice = resp.choices[0]
             reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
             bad = ooc_words(reply, text)
@@ -2068,6 +2166,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                     max_tokens=max_tokens_for(mode),
                     extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
                 )
+                budget.track(resp, "chat", user=event.user_id, group=gid_q)
                 choice = resp.choices[0]
                 reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
                 if ooc_words(reply, text):
@@ -2116,7 +2215,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         ltm.bump_talk(event.user_id, name)
         hit = next((w for w in cfg.taboo_words if w in text), None)
         if hit:
-            k = cfg.taboo_tier_multiplier.get(tier_now, 1.0)
+            k = tier_value(cfg.taboo_tier_multiplier, tier_now, 1.0)
             if k > 0:
                 ltm.taboo_penalty(event.user_id, cfg.taboo_penalty * k, cfg.taboo_daily_max * k,
                                   f"说她{hit}（{ltm.TIER_NAMES.get(tier_now, tier_now)}）")
@@ -2142,8 +2241,8 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 await asyncio.sleep(bubble_gap(bubble))            # 后面几条：像在接着打字
                 _count_sent(gid_q, uid_q)                          # 多发的每条都算进限额
             msg = bubble
-            if i == 0 and is_group and _group_seq[event.group_id] > seq_at_trigger:
-                # 中间有别人说话了（包括她排队的时候）：第一条引用原消息，免得大家不知道她在回谁
+            if i == 0 and _chat_seq[target] > seq_at_trigger:
+                # 这条消息之后有别人说话了、或者她自己先说了别的（包括她排队的时候）：第一条引用原消息，免得大家不知道她在回哪句
                 msg = MessageSegment.reply(event.message_id) + bubble
             try:
                 await bot.send(event, msg)
@@ -2167,7 +2266,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 _count_sent(gid_q, uid_q)
             try:
                 seg = stickers.segment(sticker, cfg.sticker_sub_type)
-                if not bubbles and is_group and _group_seq[event.group_id] > seq_at_trigger:
+                if not bubbles and _chat_seq[target] > seq_at_trigger:
                     seg = MessageSegment.reply(event.message_id) + seg
                 await bot.send(event, seg)
                 _last_sticker[target] = time.monotonic()
@@ -2204,7 +2303,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                                            and time.time() - w["at"] <= WRAPUP_MINUTES * 60)):
                 if w is None:
                     _wrapup[target] = {"user": event.user_id, "left": WRAPUP_EXTRA, "at": time.time()}
-                logger.info(f"每小时额度用完了，但和 {event.user_id} 的话还没说完，先不告别，收个尾再走：{target}")
+                logger.info(f"额度用完了，但和 {event.user_id} 的话还没说完，先不告别，收个尾再走：{target}")
             else:
                 _wrapup.pop(target, None)
                 farewell = await say_farewells(bot, event, target, already_bye=already_bye)
@@ -2237,36 +2336,78 @@ def _unrecord(key: str, record: str, keep: str = "") -> None:
 
 
 # ------------------------------------------------------------------ 限额用完：告别
-async def say_farewells(bot: Bot, event: MessageEvent, target: str, already_bye: bool = False) -> list[str]:
-    """（已经拿着 _hands）每小时限额用完时告别。返回告别过的会话。
-    already_bye：这个会话刚才已经互相道别过了，不再补一句（但照样记下“告别过了”，之后不回）"""
+TIRED_LINES = peak.TIRED_TIERS          # 台词按关系分档，在 peak.py 里
+_tired_sent: dict[int, str] = {}          # QQ -> 哪一天（按花费的“一天”）已经回过“今天累了”
+
+
+async def say_tired(bot: Bot, event: MessageEvent) -> None:
+    """今天的钱花完了之后才来私聊的人：回一句固定的“今天累了”（每人每天一次；已经告别过的不再说），不调用模型"""
+    if not cfg.budget_tired_reply:
+        return
+    target = _target_of(event)
+    day = spend.day_key()
+    if _tired_sent.get(event.user_id) == day or time.monotonic() - _farewell_at.get(target, -1e9) <= 3600:
+        return
+    _tired_sent[event.user_id] = day
+    line = peak.tired_line(familiarity_of(event.user_id))
+    async with _hands:
+        await switch_pause(target)
+        await asyncio.sleep(typing_delay(line))
+        try:
+            await bot.send(event, line)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"“今天累了”没发出去：{e}")
+            return
+        mark_sent(target)
+    _farewell_at[target] = time.monotonic()
+    key = session_key(event)
+    get_history(key).append({"role": "assistant", "content": line, "ts": time.time()})
+    save_history(key)
+    logger.info(f"今天的额度用完了，对 {event.user_id} 说了句“今天累了”")
+
+
+async def say_farewells(bot: Bot, event: MessageEvent | None, target: str | None, already_bye: bool = False,
+                        skip=()) -> list[str]:
+    """（已经拿着 _hands）限额用完或到了休息时间时告别。返回告别过的会话。
+    - 今天的钱花完了 / 到了休息时间：对最近在聊的群和私聊都说一声（休息时说的是“要睡了”）；
+      只是这个群 / 这个人的份额用完了：只对这里说。
+    - already_bye：target 这个会话刚才已经互相道别过了，不再补一句（但照样记下“告别过了”，之后不回）
+    - target 为 None：不是因为某条消息触发的（到点了，后台道晚安），只对最近在聊的说；skip 里的会话跳过"""
+    sleeping = asleep()
+    night = night_key()
     if quota_left(None) <= 0:
         scope = "global"
         now = time.monotonic()
         targets = [t for t, a in _active_chats.items()
-                   if now - a["at"] <= cfg.farewell_active_minutes * 60 and t != target]
-        targets = [target] + sorted(targets, key=lambda t: -_active_chats[t]["at"])
+                   if now - a["at"] <= cfg.farewell_active_minutes * 60 and t != target and t not in skip]
+        targets = ([target] if target else []) + sorted(targets, key=lambda t: -_active_chats[t]["at"])
     else:
         scope, targets = target, [target]
-    if time.monotonic() - _farewell_at.get(scope, -1e9) <= 3600:
-        return []
-    _farewell_at[scope] = time.monotonic()
-    done, used = [], []
-    for i, t in enumerate(targets):
-        if scope == "global" and time.monotonic() - _farewell_at.get(t, -1e9) <= 3600:
+    if not sleeping:
+        if time.monotonic() - _farewell_at.get(scope, -1e9) <= 3600:
+            return []
+        _farewell_at[scope] = time.monotonic()
+    done, used, sent_any = [], [], False
+    for t in targets:
+        if sleeping:
+            if _goodnight.get(t) == night:
+                continue                               # 今晚已经道过晚安了
+            _goodnight[t] = night
+        elif scope == "global" and time.monotonic() - _farewell_at.get(t, -1e9) <= 3600:
             continue                                   # 这个群刚因为本群限额告别过
         _farewell_at[t] = time.monotonic()
         private = t.startswith("private_")
         if t == target and already_bye:
-            logger.info(f"每小时限额用完，但刚才已经道别过了，不再补告别：{t}")
+            logger.info(f"{'要休息了' if sleeping else '额度用完'}，但刚才已经道别过了，不再补一句：{t}")
             continue
-        line = peak.farewell_line(private=private, avoid=used)
+        fam = familiarity_of(_active_chats[t]["user_id"]) if private and _active_chats.get(t) else None
+        line = (peak.sleep_line if sleeping else peak.farewell_line)(private=private, avoid=used, fam=fam)
         used.append(line)
-        if i:
+        if sent_any:
             await switch_pause(t)
-        await asyncio.sleep(bubble_gap(line) + (1 if i == 0 else 0))
+        await asyncio.sleep(bubble_gap(line) + (0 if sent_any else 1))
         try:
-            if t == target:
+            if t == target and event is not None:
                 await bot.send(event, line)
             elif private:
                 await bot.send_private_msg(user_id=_active_chats[t]["user_id"], message=line)
@@ -2275,6 +2416,7 @@ async def say_farewells(bot: Bot, event: MessageEvent, target: str, already_bye:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"告别没发出去（{t}）：{e}")
             continue
+        sent_any = True
         mark_sent(t)
         _count_sent(None if private else _active_chats[t]["group_id"], _active_chats[t]["user_id"] if private else None)    # 告别也算一条
         # 记进这个会话的短期记忆（不去拿会话锁：这时拿着 _hands，别人可能拿着会话锁在等 _hands）
@@ -2283,8 +2425,133 @@ async def say_farewells(bot: Bot, event: MessageEvent, target: str, already_bye:
         save_history(hist_key)
         done.append(t)
     if done:
-        logger.info(f"每小时限额用完（{'全局' if scope == 'global' else ('本群' if scope.startswith('group_') else '这个私聊')}），已告别：{'、'.join(done)}")
+        why = "到了休息时间" if sleeping else ("今天的钱花完了" if scope == "global" else
+                                          ("本群的份额用完" if scope.startswith("group_") else "这个人的份额用完"))
+        logger.info(f"{why}，已告别：{'、'.join(done)}")
     return done
+
+
+# ------------------------------------------------------------------ 晚上休息（9/29）
+# 23:30～7:30（SLEEP_HOURS）不回消息、不插话冒泡写信搭话；到点时对正在聊的道声晚安（和限额用完的告别同一套：
+# 话没说完先收尾，最多再回 2 次；刚互相道过别的不补）。休息时才来找她的，不回，像睡着了
+_goodnight: dict[str, str] = {}       # 会话 -> 哪天晚上已经道过晚安
+_sleep_task: "asyncio.Task | None" = None
+
+
+def night_key(now: datetime | None = None) -> str:
+    """这是哪天晚上（中午 12 点到第二天中午 12 点算一晚，凌晨算前一天晚上）"""
+    now = (now or datetime.now(peak.BEIJING)).astimezone(peak.BEIJING)
+    return (now - timedelta(hours=12)).strftime("%Y-%m-%d")
+
+
+def sleep_window(night: str) -> tuple[datetime, datetime] | None:
+    """这天晚上几点睡、几点起：在 SLEEP_HOURS 的基础上各自前后浮动 SLEEP_JITTER_MINUTES 分钟。
+    按日期抽签，同一晚重启也不变"""
+    ranges = peak.parse_ranges(cfg.sleep_hours)
+    if not ranges:
+        return None
+    a, b = ranges[0]
+    noon = datetime.strptime(night, "%Y-%m-%d").replace(hour=12, tzinfo=peak.BEIJING)
+    start = noon + timedelta(minutes=(a - 720) % 1440)
+    end = start + timedelta(minutes=(b - a) % 1440)
+    j = max(0.0, cfg.sleep_jitter_minutes)
+    rnd = random.Random(f"{night}|{cfg.sleep_hours}")
+    start += timedelta(minutes=rnd.uniform(-j, j))
+    end += timedelta(minutes=rnd.uniform(-j, j))
+    return start, end
+
+
+def asleep(now: datetime | None = None) -> bool:
+    if not cfg.sleep_enabled:
+        return False
+    now = (now or datetime.now(peak.BEIJING)).astimezone(peak.BEIJING)
+    w = sleep_window(night_key(now))
+    return bool(w) and w[0] <= now < w[1]
+
+
+# 快到限额、快到睡觉时：让话题慢慢往收尾靠，免得告别来得突兀（大概的写法，台词细节以后再打磨）
+WINDDOWN_SLEEP_HINT = ("【快到休息时间了】现在快 {at} 了，你开始犯困。可以不经意地流露一点困意，但不用每句都提："
+                       "怎么表现自己想（回得慢半拍、打个哈欠、说一句有点困了、吐槽自己居然困了……这些只是举例，别照搬），每次换个说法。"
+                       "话题慢慢往收尾靠，别再开新的长话题；但这次还不用道晚安，对方的话照常好好回。")
+WINDDOWN_TIRED_HINT = ("【有点累了】你今天已经聊了很久，有点累了。话题慢慢往收尾靠：少反问、别开新话题，回得可以比平时短一点。"
+                       "可以不经意地带一句理由，理由自己想，每次换一个（赶路、天黑、找旅馆、面包已经用得太多了，少用）；"
+                       "但这次还不用说再见，对方的话照常好好回。")
+WRAPUP_HINT = ("【该收尾了】你今天在这里已经说了很多，马上就要走了。这次把对方的话回完、把话题收个尾，别再反问、别再开新话题；"
+               "最后顺口说一句要走了（比如“我先走了”“下次再聊”）。要不要说理由、说什么理由都随你，自己想一个贴合当下的；“赶路”“天黑前要到下一个镇子”“去买面包”已经用得太多了，尽量别用；但一定要让人听得出你要走了。"
+               "按你们的关系来：不熟的就客气一句；熟的可以嘴硬地流露一点不舍，但不承认。")
+WRAPUP_SLEEP_HINT = ("【该睡了】已经很晚了，你困得不行，马上要去睡了。这次把对方的话回完、把话题收个尾，别再反问、别再开新话题；"
+                     "最后顺口道一句晚安，或者说一句要去睡了。按你们的关系来：不熟的礼貌一句；熟的可以顺手叮嘱一句别熬夜，"
+                     "或者嘴硬地开个玩笑（比如嫌对方害你熬夜）。")
+
+
+def winddown_hint(group_id: int | None, user_id: int, now: datetime | None = None) -> str:
+    """快到睡觉时间、或者今天的钱（这个人 / 这个群的份额）快用完时，提示她把话题慢慢往收尾靠"""
+    now = (now or datetime.now(peak.BEIJING)).astimezone(peak.BEIJING)
+    if cfg.sleep_enabled and cfg.sleep_winddown_minutes > 0 and not asleep(now):
+        w = sleep_window(night_key(now))
+        if w and 0 < (w[0] - now).total_seconds() <= cfg.sleep_winddown_minutes * 60:
+            return WINDDOWN_SLEEP_HINT.format(at=f"{w[0].hour} 点 {w[0].minute} 分" if w[0].minute else f"{w[0].hour} 点")
+    if cfg.budget_winddown_rounds > 0:
+        left = min(quota_left(group_id, None if group_id else user_id), _rounds(spend.user_left(user_id)))
+        if 0 < left <= cfg.budget_winddown_rounds:
+            return WINDDOWN_TIRED_HINT
+    return ""
+
+
+def _sleep_wrapup(target: str | None, user_id: int) -> None:
+    """刚到休息时间，正在跟她聊的人又说话了：给他收个尾（最多再回 2 次），说完再道晚安"""
+    if not target or target in _wrapup or _goodnight.get(target) == night_key():
+        return
+    a = _active_chats.get(target)
+    if a and a.get("user_id") == user_id and time.monotonic() - a["at"] <= cfg.farewell_active_minutes * 60:
+        _wrapup[target] = {"user": user_id, "left": WRAPUP_EXTRA, "at": time.time()}
+        logger.info(f"到休息时间了，{user_id} 还在跟她聊：先把话说完再道晚安（{target}）")
+
+
+def _said_bye_last(t: str) -> bool:
+    """这个会话里她最后一句已经在道别了（说了再见、要走了）"""
+    a = _active_chats.get(t) or {}
+    hist_key = t if t.startswith("private_") or cfg.group_shared_memory else f"{t}_{a.get('user_id')}"
+    last = next((h for h in reversed(get_history(hist_key)) if h.get("role") == "assistant"), None)
+    return bool(last) and bool(_LEAVE_RE.search(last["content"]) or _BYE_RE.search(last["content"]))
+
+
+async def goodnight_now() -> list[str]:
+    """到了休息时间：给最近在聊、又没在收尾、也没刚道过别的会话道声晚安"""
+    bots = list(get_bots().values())
+    if not bots or not cfg.farewell_on_limit:
+        return []
+    now = time.monotonic()
+    skip = set()
+    for t, a in _active_chats.items():
+        if now - a["at"] > cfg.farewell_active_minutes * 60:
+            continue
+        pending = any(k[0] == (t if t.startswith("private_") or cfg.group_shared_memory else f"{t}_{a.get('user_id')}")
+                      and v for k, v in _inbox.items())
+        if t in _wrapup or pending:
+            skip.add(t)                        # 话还没说完：等对方这条回完再说晚安（见 _sleep_wrapup）
+        elif _said_bye_last(t):
+            _goodnight[t] = night_key()        # 刚道过别了，不再补
+            skip.add(t)
+    async with _hands:
+        return await say_farewells(bots[0], None, None, skip=skip)
+
+
+async def _sleep_loop() -> None:
+    done_night = None
+    told = None
+    while True:
+        await asyncio.sleep(30)
+        try:
+            night = night_key()
+            if told != night and (w := sleep_window(night)):
+                told = night
+                logger.info(f"今晚 {w[0]:%H:%M} 睡，明早 {w[1]:%H:%M} 起（SLEEP_HOURS {cfg.sleep_hours}，前后浮动 {cfg.sleep_jitter_minutes:g} 分钟）")
+            if asleep() and done_night != night:
+                done_night = night
+                await goodnight_now()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"道晚安出错：{e}")
 
 
 # ------------------------------------------------------------------ 掉线提醒：重新上线后私信管理员
@@ -2491,7 +2758,7 @@ def interject_blocker(gid: int, text: str = "") -> str | None:
 
 
 def _take_group_quota(gid: int) -> bool:
-    """插话也算进每分钟、每小时、每群的限额（不算个人冷却）"""
+    """插话也算进每分钟的限额、今天的钱和这个群的份额（开了每小时条数限额的话也算；不算个人冷却）"""
     now = time.monotonic()
     while _global_window and now - _global_window[0] > 60:
         _global_window.popleft()
@@ -2500,8 +2767,10 @@ def _take_group_quota(gid: int) -> bool:
     gq = _group_hour[gid]
     while gq and now - gq[0] > 3600:
         gq.popleft()
-    if (len(_global_window) >= cfg.global_rate_per_minute or len(_hour_window) >= cfg.global_rate_per_hour
-            or len(gq) >= cfg.group_rate_per_hour):
+    if (len(_global_window) >= cfg.global_rate_per_minute
+            or 0 < cfg.global_rate_per_hour <= len(_hour_window)
+            or 0 < cfg.group_rate_per_hour <= len(gq)
+            or quota_left(gid) <= 0):
         return False
     _global_window.append(now)
     _hour_window.append(now)
@@ -2551,6 +2820,7 @@ async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
                 model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
                 max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
             )
+            budget.track(resp, "interject", group=gid)
             choice = resp.choices[0]
             reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
         except Exception as e:  # noqa: BLE001
@@ -2628,7 +2898,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
 
 # ------------------------------------------------------------------ 冒泡：群里很久没人说话时，她偶尔自己说一句
 BUBBLE_PROMPT = """【冒泡】现在是{now}，这个群已经{gap}没人说话了。你正好有空，随口在群里说一句：
-- 可以是旅途中刚遇到的小事、看到的风景、吃到的面包、遇到的怪人，或者吐槽一下天气，也可以随口问大家一句。要符合现在的时间（早上、下午、晚上）。
+- 可以是旅途中刚遇到的小事、看到的风景、吃到的东西、遇到的怪人、接到的奇怪委托，或者吐槽一下天气，也可以随口问大家一句。别每次都说面包。要符合现在的时间（早上、下午、晚上）。
 - 10～30 字，像随手发的一条群消息。不要说“大家好”“有人吗”“好安静啊”，也不要提“冒泡”“好久没人说话”。
 - 不要搬出书里有名有姓的人物和事件，随手编一件小事就好。
 - 不想说就只输出「[不说]」。"""
@@ -2711,6 +2981,7 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
                     model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
                     max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
                 )
+                budget.track(resp, "bubble", group=gid)
                 choice = resp.choices[0]
                 reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
             except Exception as e:  # noqa: BLE001
@@ -2870,6 +3141,7 @@ async def write_letter(bot: Bot, qq: int) -> str | None:
                 max_tokens=cfg.letter_max_tokens,
                 extra_body={"thinking": {"type": "disabled"}},
             )
+            budget.track(resp, "letter", user=qq)
             choice = resp.choices[0]
             letter = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
         except Exception as e:  # noqa: BLE001
@@ -2964,7 +3236,7 @@ def arm_nudge(qq: int, user_text: str = "") -> bool:
         return False
     if _BYE_RE.search(user_text or ""):        # 对方在道别：不搭
         return False
-    if random.random() >= cfg.nudge_prob.get(familiarity_of(qq), 0.0):
+    if random.random() >= tier_value(cfg.nudge_prob, familiarity_of(qq), 0.0):
         return False
     lo, hi = sorted((cfg.nudge_delay_min, cfg.nudge_delay_max))
     _nudge_due[qq] = {"at": time.time() + random.uniform(lo, hi) * 60, "armed": time.time()}
@@ -3014,6 +3286,7 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
                 model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
                 max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
             )
+            budget.track(resp, "nudge", user=qq)
             choice = resp.choices[0]
             reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
         except Exception as e:  # noqa: BLE001
@@ -3151,7 +3424,7 @@ def _spawn_labeling() -> None:
         return
 
     async def run():
-        n = await stickers.label_pending(can_run=lambda: not in_peak())
+        n = await stickers.label_pending(can_run=lambda: not in_peak() and budget.can_background())
         if n:
             logger.info(f"表情：打好了 {n} 张的标签（{stickers.summary()}）")
 
@@ -3289,6 +3562,7 @@ seen_private = on_message(rule=Rule(_is_private), priority=1, block=False)
 
 @seen_private.handle()
 async def _(event: PrivateMessageEvent):
+    note_arrival(f"private_{event.user_id}", event.message_id)
     if quiet_left() > 0:        # 安静期间收到的私聊不算“看过”，安静完了会补回
         return
     _seen_ids.append(int(event.message_id))
@@ -3475,7 +3749,7 @@ async def _memory_retry_loop() -> None:
 
 @get_driver().on_shutdown
 async def _():
-    for t in (_letter_task, _heartbeat_task, _catchup_task, _sticker_task, _label_task, _bubble_task, _memory_task, _nudge_task):
+    for t in (_letter_task, _heartbeat_task, _catchup_task, _sticker_task, _label_task, _bubble_task, _memory_task, _nudge_task, _sleep_task):
         if t:
             t.cancel()
 
@@ -3483,7 +3757,9 @@ async def _():
 
 @get_driver().on_startup
 async def _():
-    global _kb, _letter_task, _bubble_task, _memory_task, _nudge_task
+    global _kb, _letter_task, _bubble_task, _memory_task, _nudge_task, _sleep_task
+    if cfg.sleep_enabled:
+        _sleep_task = asyncio.create_task(_sleep_loop())
     if cfg.nudge_enabled and cfg.enable_private:
         _nudge_task = asyncio.create_task(_nudge_loop())
     if cfg.memory_enabled and cfg.memory_retry_minutes > 0 and cfg.deepseek_api_key:

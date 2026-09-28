@@ -26,6 +26,8 @@ from pathlib import Path
 
 from nonebot import logger
 
+from . import budget
+
 
 _DUP_MARK_RE = re.compile(r"#\d{1,2}$")     # 群里重名的记号（“小明#2”）
 _PID = itertools.count(time.time_ns())      # 待整理消息的编号（启动时从当前时间起，重启后也不会重复）
@@ -75,14 +77,18 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 4. 不要记：密码、手机号、身份证号、住址、银行卡等隐私；健康、疾病、政治、宗教等敏感信息；寒暄客套；伊蕾娜自己讲的小说故事。
 5. 只根据聊天记录，不猜测、不编造。人和 QQ 号的对应以“已有的人物档案”里的列表为准，列表里没有的人不要写。
 6. 好感变化 affection：站在伊蕾娜（自恋、爱钱、爱面包、讨厌蘑菇、嘴毒但重情、讨厌被冒犯）的角度，评价这段记录里每个人给她的感受，给一个整数。
-   先看档案里标的【关系】——同样的话，关系不同感受完全不同：
+   先看档案里标的【关系】——同样的话，关系不同感受完全不同。
+   再分清是“玩笑”还是“恶意”：
+     - 玩笑：调侃、互损、斗嘴、起外号、拿她的自恋 / 爱钱 / 贪吃 / 身材开玩笑、故意逗她生气。越熟越是日常，普通朋友扣得少，熟人、很熟之间基本不扣。
+     - 恶意：辱骂、人身攻击、性骚扰、明知她在意还反复戳痛处、带着恶意的嘲讽和贬低。恶意不看关系，一律按陌生人的标准扣；很熟的人这样做，她反而更受伤，可以扣得更重。
    ● 陌生人（基准）：
      - +1～+5：聊得投机、有趣、尊重她、真诚关心她、夸得她心里舒服、陪她聊她感兴趣的事
      - 0：普通寒暄、没什么感觉
      - -1～-5：无聊纠缠、刷屏、硬要她做不想做的事、一上来就告白/叫老婆/强加关系、提蘑菇之类让她烦的事
      - -6～-15：辱骂、人身攻击、性骚扰、恶意冒犯
-   ● 熟人：轻度调侃、互损、开玩笑算正常打闹，0～-2；告白、撒娇不算冒犯，看她心情 0～+2；真正的恶意照样按基准扣
-   ● 很熟：互损、开玩笑基本不扣（最多 -1），这是他们之间的相处方式；真心关心、陪伴、记得她的喜好可以多加 +2～+5；只有真正伤人的话才扣
+   ● 普通朋友：聊过一些、印象不坏。轻度调侃、开玩笑算正常，0～-1；告白、强加关系还是有点冒犯，-1～-3；恶意照样按基准扣
+   ● 熟人：调侃、互损、开玩笑算正常打闹，基本不扣（0，过火了最多 -1）；告白、撒娇不算冒犯，看她心情 0～+2；恶意照样按基准扣
+   ● 很熟：互损、开玩笑一律不扣（0），这是他们之间的相处方式；真心关心、陪伴、记得她的喜好可以多加 +2～+5；恶意按基准扣，可以更重
    ● 讨厌：她本来就烦这个人，冒犯按基准再重一些；想加分很难，只有特别真诚、明显改过的表现才给 +1～+2
    ● 身材梗不在这里算分：拿她的身材开玩笑（平胸、飞机场、洗衣板等）已经由系统当场按关系扣过，这里不因此再扣；只有同时还有别的恶意（辱骂、骚扰等）才按那部分扣。
    ● 送东西不在这里算分：说送面包、给钱（包括「[给面包]」「[给钱]」「转账」这类写法）已经由系统单独算过，这里不因此加分；付给她合理的报酬不加不减；拿钱引诱、无缘无故撒钱、用她不认识的钱糊弄她，不加分。
@@ -130,7 +136,15 @@ class LongTermMemory:
         return self.root / "pending" / f"{key}.json"
 
     def get_user(self, qq: int) -> dict:
-        return _read(self._user_path(qq), {"qq": qq, "name": "", "facts": [], "score": 0.0})
+        prof = _read(self._user_path(qq), None)
+        if prof is None:
+            start = float(self.affection_cfg.get("start", 0))
+            return {"qq": qq, "name": "", "facts": [], "score": start, "score_v": self.SCORE_VERSION}
+        if prof.get("score_v") != self.SCORE_VERSION:      # 旧档案：分数按新范围换算一次（存盘时带上版本号）
+            if "score" in prof:
+                prof["score"] = self.migrate_score(prof["score"])
+            prof["score_v"] = self.SCORE_VERSION
+        return prof
 
     def save_user(self, prof: dict) -> None:
         prof["updated"] = int(time.time())
@@ -284,6 +298,9 @@ class LongTermMemory:
             max_facts=self.max_facts,
             max_events=self.max_events,
         )
+        if not budget.can_background():
+            logger.info(f"长期记忆：今天的钱花完了，{key} 先不整理，留到明天（待整理的消息都留着）")
+            return
         try:
             api = self.summary_client or self.client     # 整理单独用更长的超时，出错不自动重试（每次重试都计费）
             resp = await api.chat.completions.create(
@@ -294,6 +311,7 @@ class LongTermMemory:
                 response_format={"type": "json_object"},
                 extra_body={"thinking": {"type": "disabled"}},
             )
+            budget.track(resp, "memory", user=None, group=None)
             usage = getattr(resp, "usage", None)
             used = getattr(usage, "completion_tokens", None)
             if resp.choices[0].finish_reason == "length":
@@ -345,6 +363,16 @@ class LongTermMemory:
             done_batches = prof.get("batches") or []
             if batch_id is not None and batch_id in done_batches:
                 delta = 0                                # 这一批上次已经算过好感（上次写到一半出错了）
+            cap = self.affection_cfg.get("summary_daily_cap", 0)
+            if delta > 0 and cap:                    # 每人每天靠整理最多加这么多（聊得再多也不会一天就熟起来）
+                today = self._today()
+                if prof.get("sum_gain_day") != today:
+                    prof["sum_gain_day"], prof["sum_gain_today"] = today, 0
+                room = max(0, cap - int(prof.get("sum_gain_today", 0)))
+                if delta > room:
+                    logger.info(f"长期记忆：{qq} 今天靠聊天已经涨了 {prof.get('sum_gain_today', 0)} 分，这次 +{delta} 只算 +{room}")
+                    delta = room
+                prof["sum_gain_today"] = int(prof.get("sum_gain_today", 0)) + delta
             if delta:
                 self._apply_affection(prof, delta, str(p.get("reason", ""))[:30])
             if batch_id is not None:
@@ -381,8 +409,8 @@ class LongTermMemory:
         logger.info(f"长期记忆已整理：{key}，更新了 {len(changed)} 人的档案")
 
     # -------------------------------------------------------------- 好感度
-    # 分数 -100～100。来源：① 正常聊天（默认不加分，可在配置里开）；② 长期记忆整理时按对话内容加减分；
-    # ③ 管理员手动调整。很久不聊会慢慢回落到 0（好感和讨厌都会淡去）。
+    # 分数 -50～150（讨厌 <0｜陌生人 0～39｜普通朋友 40～89｜熟人 90～129｜很熟 130+）。来源：① 正常聊天（默认不加分，可在配置里开）；② 长期记忆整理时按对话内容加减分；
+    # ③ 管理员手动调整。新人从 20 起步；很久不聊会慢慢回落到 20（好感和讨厌都会淡去）。
     close_friends: tuple = ()
     summary_max_tokens: int = 4000           # 整理时模型最多写多少（要把每个人的整份档案重写一遍）
     summary_client = None                    # 整理专用的客户端（超时更长、不自动重试）；没设就用聊天那个
@@ -390,31 +418,52 @@ class LongTermMemory:
     affection_cfg = {
         "base_gain": 0, "daily_cap": 5,
         "decay_after_days": 7, "decay_per_day": 2,
-        "dislike": -20, "acquaintance": 30, "close": 70,
+        "min": -50, "max": 150,
+        "start": 20, "dislike": 0, "friend": 40, "acquaintance": 90, "close": 130,
+        "summary_daily_cap": 10,
     }
+    SCORE_VERSION = 2          # 9/29 换了分数范围：旧档案（-100～100）读的时候换算过来
+
+    @staticmethod
+    def migrate_score(old: float) -> float:
+        """旧分数（-100～100：讨厌 <-20｜陌生人 -20～29｜熟人 30～69｜很熟 70+，新人 0）换成新分数，档位不变：
+        讨厌 -50～0｜陌生人 0～40（新人 20）｜熟人 90～130｜很熟 130～150（新加的“普通朋友”40～90 以后慢慢聊出来）"""
+        old = max(-100.0, min(100.0, float(old)))
+        if old < -20:
+            return round((old + 20) * 50 / 80, 1)
+        if old < 0:
+            return round(old + 20, 1)
+        if old < 30:
+            return round(20 + old * 20 / 30, 1)
+        if old < 70:
+            return round(90 + (old - 30), 1)
+        return round(130 + (old - 70) * 20 / 30, 1)
 
     @staticmethod
     def _today() -> str:
         return datetime.now().strftime("%Y-%m-%d")
 
     def effective_score(self, prof: dict) -> float:
-        """计算衰减后的好感：超过 decay_after_days 天没说话，每天向 0 靠拢 decay_per_day"""
+        """计算衰减后的好感：超过 decay_after_days 天没说话，每天向新人的起始分靠拢 decay_per_day（好感和讨厌都会淡去）"""
         c = self.affection_cfg
         if "score" not in prof:                 # 旧版数据：按说话次数给个初始值
-            prof["score"] = float(min(int(prof.get("talks", 0)), 25))
+            prof["score"] = self.migrate_score(min(int(prof.get("talks", 0)), 25))
         score = float(prof["score"])
         last = prof.get("last_talk")
         if last:
             idle_days = (time.time() - float(last)) / 86400 - c["decay_after_days"]
             if idle_days > 0:
                 dec = idle_days * c["decay_per_day"]
-                score = max(0.0, score - dec) if score > 0 else min(0.0, score + dec)
+                start = float(c.get("start", 0))
+                score = max(start, score - dec) if score > start else min(start, score + dec)
         if self.gender_cap and prof.get("gender") != "female":
             score = min(score, c["close"] - 1)   # 男生、没确认性别的人：最高到熟人
+        score = max(float(c.get("min", -50)), min(float(c.get("max", 150)), score))
         return round(score, 1)
 
     def _apply_affection(self, prof: dict, delta: float, reason: str = "") -> None:
-        prof["score"] = max(-100.0, min(100.0, self.effective_score(prof) + delta))
+        c = self.affection_cfg
+        prof["score"] = max(float(c.get("min", -50)), min(float(c.get("max", 150)), self.effective_score(prof) + delta))
         prof["last_talk"] = prof.get("last_talk") or time.time()
         log = prof.setdefault("affection_log", [])
         log.append(f"{self._today()} {'+' if delta > 0 else ''}{delta:g} {reason}".strip())
@@ -498,7 +547,7 @@ class LongTermMemory:
             prof["taboo_today"] += cut
             self._apply_affection(prof, -cut, reason)
             self.save_user(prof)
-        return prof.get("score", 0.0)
+        return prof.get("score", float(self.affection_cfg.get("start", 0)))
 
     def adjust(self, qq: int, delta: float | None = None, set_to: float | None = None, reason: str = "管理员调整") -> float:
         prof = self.get_user(qq)
@@ -520,6 +569,8 @@ class LongTermMemory:
             return "close"
         if score >= c["acquaintance"]:
             return "acquaintance"
+        if score >= c.get("friend", c["acquaintance"]):
+            return "friend"
         return "stranger"
 
     # -------------------------------------------------------------- 读取：给模型的提示
@@ -547,7 +598,7 @@ class LongTermMemory:
         )
 
     # -------------------------------------------------------------- 给管理员看
-    TIER_NAMES = {"disliked": "讨厌", "stranger": "陌生人", "acquaintance": "熟人", "close": "很熟"}
+    TIER_NAMES = {"disliked": "讨厌", "stranger": "陌生人", "friend": "普通朋友", "acquaintance": "熟人", "close": "很熟"}
 
     def describe_affection(self, qq: int, close_friends=()) -> str:
         prof = self.get_user(qq)

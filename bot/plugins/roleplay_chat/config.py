@@ -48,7 +48,7 @@ class Config(BaseModel):
     sticker_private: bool = True          # 私聊也发
     sticker_sub_type: int = 1             # 1 = 显示成表情样式（小图）；发出来不对就改成 -1，按普通图片发
     sticker_dir: str = "data/stickers"
-    sticker_tier_multiplier: dict[str, float] = {"disliked": 0.5, "stranger": 0.7, "acquaintance": 1.0, "close": 1.3}
+    sticker_tier_multiplier: dict[str, float] = {"disliked": 0.5, "stranger": 0.7, "friend": 0.85, "acquaintance": 1.1, "close": 1.4}
 
     # ---- 小说知识库（摘要 + 原文检索）----
     knowledge_enabled: bool = True
@@ -84,11 +84,17 @@ class Config(BaseModel):
     memory_retry_minutes: float = 15.0    # 每隔多久检查一次有没有攒够一批却没整理的（开机时也查一次）；0 = 不查
 
     # ---- 好感度（决定她对人冷淡还是随意）----
-    # 分数 -100～100：长期记忆整理时按对话内容 +5～-15；踩雷立刻扣分；很久不聊慢慢回落到 0
+    # 分数 -50～150（9/29 起）：讨厌 -50～0｜陌生人 0～40｜普通朋友 40～90｜熟人 90～130｜很熟 130～150
+    # 长期记忆整理时按对话内容 +5～-15（每人每天加分合计最多 +10）；送面包 +2；踩雷立刻扣分；很久不聊慢慢回落到 0
     affection_chat_gain: int = 0          # 每条正常聊天加几分；0 = 光聊天不加好感，只看聊了什么
-    affection_dislike: int = -20          # 低于这个分：讨厌（爱答不理）
-    affection_acquaintance: int = 30      # 达到这个分：熟人
-    affection_close: int = 70             # 达到这个分：很熟
+    affection_min: int = -50              # 最低分
+    affection_max: int = 150              # 最高分
+    affection_start: int = 20             # 新认识的人从几分起步（很久不聊也会慢慢回到这个分）
+    affection_dislike: int = 0            # 低于这个分：讨厌（爱答不理）
+    affection_friend: int = 40            # 达到这个分：普通朋友
+    affection_acquaintance: int = 90      # 达到这个分：熟人
+    affection_close: int = 130            # 达到这个分：很熟
+    affection_summary_daily_cap: int = 10 # 长期记忆整理时，每人每天合计最多加几分（扣分不限）；0 = 不限
     affection_daily_cap: int = 5          # 靠“正常聊天”每天最多涨几分（AFFECTION_CHAT_GAIN 为 0 时没用）
     affection_decay_after_days: int = 7   # 多少天没聊开始回落
     affection_decay_per_day: float = 2.0  # 之后每天回落几分
@@ -103,7 +109,7 @@ class Config(BaseModel):
     taboo_penalty: float = 4.0            # 每次扣几分
     taboo_daily_max: float = 16.0         # 每人每天因此最多扣几分（陌生人的标准）
     # 按关系远近打折：越熟越当成打闹，扣得越少（每次扣分和每日上限都乘这个倍数）
-    taboo_tier_multiplier: dict[str, float] = {"disliked": 1.5, "stranger": 1.0, "acquaintance": 0.5, "close": 0.25}
+    taboo_tier_multiplier: dict[str, float] = {"disliked": 1.5, "stranger": 1.0, "friend": 0.5, "acquaintance": 0.25, "close": 0.0}   # 越熟越是调侃：普通朋友扣一半，熟人只扣一点，很熟不扣
 
     # ---- 时间感：知道隔了多久没聊 ----
     gap_notice_hours: float = 6.0         # 对方隔了这么久才来找她，就告诉她隔了多久（她会按关系远近决定提不提）
@@ -121,7 +127,7 @@ class Config(BaseModel):
 
     # ---- 私聊冷场后主动搭话：她回完以后对方一阵子没回，她有几率自己再说一句 ----
     nudge_enabled: bool = True
-    nudge_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.05, "acquaintance": 0.15, "close": 0.35}   # 每次冷场时搭话的概率，关系越好越高
+    nudge_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.05, "friend": 0.1, "acquaintance": 0.2, "close": 0.45}   # 每次冷场时搭话的概率，关系越好越高
     nudge_delay_min: float = 5.0          # 对方多少分钟没回，才可能搭话（在这两个数之间随机）
     nudge_delay_max: float = 30.0
     nudge_hours: str = "09:00-23:30"      # 只在这段时间搭话（北京时间）；高峰时段也不搭
@@ -143,7 +149,7 @@ class Config(BaseModel):
     qzone_comment_poll_minutes: float = 120.0   # 每隔多久查一次评论（空间没有评论推送，只能定时查；查太勤容易被风控）
     qzone_comment_quiet: str = "01:00-09:00"   # 这段时间不查也不回（像在睡觉）
     qzone_comment_days: int = 7           # 只管最近几天发的说说
-    qzone_comment_daily_max: int = 10     # 每天最多回几条（自己说说下的评论 + 别人空间里的 @ 合计）
+    qzone_comment_daily_max: int = 30     # 每天最多回几条（自己说说下的评论 + 别人空间里的 @ 合计；9/29 从 10 调到 30，钱另按 BUDGET_* 算）
     qzone_comment_max_rounds: int = 3     # 同一个人在同一条说说下最多来回几轮
     qzone_comment_max_age_hours: float = 24.0  # 太久以前的评论不补回（刚开功能时，旧评论不会被翻出来回一遍）
     qzone_max_replies_per_poll: int = 2   # 每一轮最多回几条（评论和 @ 合计），剩下的留到下一轮
@@ -157,8 +163,8 @@ class Config(BaseModel):
     qzone_mention_reply: bool = True      # 别人在自己的说说里 @ 她、在别人说说下 @ 她或回她：也按聊天规则回（查评论时顺便读“与我相关”）
     # ---- 刷好友动态：看到好友发的说说，有几率评论一句（查评论时顺便刷一次；去别人空间写评论是风险最高的写操作，所以量压得很低）----
     qzone_friend_comment: bool = True     # 总开关
-    qzone_friend_comment_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.03, "acquaintance": 0.15, "close": 0.35}   # 每条说说被评论的概率，关系越好越高
-    qzone_friend_comment_daily_max: int = 2    # 每天最多评论几条好友的说说（单独算，不占上面回评论的 10 条）
+    qzone_friend_comment_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.03, "friend": 0.08, "acquaintance": 0.2, "close": 0.45}   # 每条说说被评论的概率，关系越好越高
+    qzone_friend_comment_daily_max: int = 5    # 每天最多评论几条好友的说说（单独算，不占上面回评论的条数；9/29 从 2 调到 5）
     qzone_friend_post_max_age_hours: float = 6.0   # 只评论这么多小时内发的说说（翻出几天前的去评论很怪）
 
     # ---- DeepSeek 高峰时段：伊蕾娜“很忙”，少回、短回 ----
@@ -198,7 +204,7 @@ class Config(BaseModel):
 
     # 不回水话：对方只说“哈哈”“嗯”“好的”或者话题自然结束时，她有时候不接话
     skip_filler: bool = True
-    skip_filler_prob: dict[str, float] = {"disliked": 0.9, "stranger": 0.7, "acquaintance": 0.5, "close": 0.3}   # 明显的水话，直接不回的概率（不调用模型）
+    skip_filler_prob: dict[str, float] = {"disliked": 0.9, "stranger": 0.7, "friend": 0.6, "acquaintance": 0.4, "close": 0.2}   # 明显的水话，直接不回的概率（不调用模型）
     skip_by_model: bool = True            # 短消息让她自己判断要不要接话（觉得没必要就不回）
 
     # ---- 主动插话：群里聊得正热时，她偶尔自己插一句（没人叫她）----
@@ -245,22 +251,40 @@ class Config(BaseModel):
     drop_period_prob: float = 0.7         # 每条消息末尾的句号去掉的概率（真人聊天很少打句号）
     bubble_gap_min: float = 1.5           # 两条消息之间先停顿一下（秒），再按下一条的字数算打字时间
     bubble_gap_max: float = 3.5
-    bubble_gap_cap: float = 12.0          # 两条之间最长隔多久
+    bubble_gap_cap: float = 18.0          # 两条之间最长隔多久（9/29 从 12 调到 18）
 
     # ---- 风控 / 拟人节奏 ----
     user_cooldown: float = 5.0            # 同一人两次触发的最小间隔（秒）
     global_rate_per_minute: int = 20      # 全局每分钟最多回复几次（所有群、私聊合计；9/28 从 12 调到 20）
-    global_rate_per_hour: int = 150       # 全局每小时最多发几条（所有群、私聊合计，兜底防风控；9/28 从 60 调到 150）
-    group_rate_per_hour: int = 40         # 每个群每小时最多发几条（各群分开算）
-    private_rate_per_hour: int = 30       # 每个人私聊每小时最多发几条（各人分开算；9/28 新增）
+    # 9/29 起按钱限额（见下面 BUDGET_*），这三个按条数的每小时限额默认关掉；0 = 不限，想恢复就填个数
+    global_rate_per_hour: int = 0         # 全局每小时最多发几条（所有群、私聊合计）
+    group_rate_per_hour: int = 0          # 每个群每小时最多发几条（各群分开算）
+    private_rate_per_hour: int = 0        # 每个人私聊每小时最多发几条（各人分开算）
+    # ---- 按钱限额（9/29）：每次调模型都按 DeepSeek 返回的用量记账，data/usage/日期.json ----
+    budget_enabled: bool = True           # 关掉就只记账不拦
+    budget_daily_total: float = 1.0       # 每天最多花多少元（所有调用合计）
+    budget_reserve: float = 0.15          # 其中留给后台（长期记忆整理、写说说、给图写描述）的钱：聊天花到 总额 - 这个 就停
+    budget_user_share: float = 0.25       # 每个人每天最多占多少元（群聊私聊合计）；0 = 不限
+    budget_group_share: float = 0.5       # 每个群每天最多占多少元；0 = 不限
+    budget_reset_hour: int = 5            # 北京时间几点算新的一天（0～3 点常有人聊天，按 0 点重置她刚告别就又回来了）
+    budget_winddown_rounds: int = 8       # 今天的钱（或这个人、这个群的份额）只够这么多轮时，提示她有点累了、把话题往收尾靠；0 = 不提示
+    budget_round_estimate: float = 0.004  # 估一轮聊天大约多少元（只用来换算“还剩几轮”，比如剩最后一轮就不带表情）
+    budget_price: dict[str, float] = {"hit": 0.02, "miss": 1.0, "out": 4.0}   # 元 / 百万 token（空闲价）：输入命中缓存、输入没命中、输出；9/28 查的 deepseek-flash 官方价
+    budget_peak_multiplier: float = 2.0   # DeepSeek 高峰时段按几倍价
+    budget_peak_ranges: str = "09:00-12:00,14:00-18:00"   # DeepSeek 的高峰时段（北京时间，工作日；节假日不算）
+    budget_tired_reply: bool = True       # 钱用完后，才来私聊找她的人：回一句固定的“今天累了”（每人每天一次，不花钱）
     leave_minutes_min: float = 20.0       # 她自己说了“我要去赶路了”“先走了”之后，这么多分钟内真的不在（在两个数之间随机）；0 = 不管
     leave_minutes_max: float = 60.0
-    farewell_on_limit: bool = True        # 每小时限额用完时，补一句“我要上路了”之类的告别（不调用模型）
-    farewell_active_minutes: float = 10.0 # 全局限额用完时，这么多分钟内她说过话的群和私聊都会收到告别
+    sleep_enabled: bool = True            # 晚上休息：这段时间不回消息、不插话冒泡写信搭话；开始时对正在聊的道声晚安（9/29）
+    sleep_hours: str = "23:30-07:30"      # 休息时段（北京时间，可以跨午夜）；只看第一段
+    sleep_winddown_minutes: float = 20.0  # 离睡觉还有这么多分钟时，提示她慢慢流露困意、把话题往收尾靠（不突然说再见）；0 = 不提示
+    sleep_jitter_minutes: float = 20.0    # 每天睡、起的时间在上面的基础上前后浮动几分钟（每晚随机一次，重启不变）
+    farewell_on_limit: bool = True        # 限额（今天的钱 / 这个人、这个群的份额）用完时，补一句“我要上路了”之类的告别（不调用模型）
+    farewell_active_minutes: float = 10.0 # 今天的钱用完时，这么多分钟内她说过话的群和私聊都会收到告别
     reply_delay_min: float = 1.5          # 回复前随机“打字”延迟（秒）
     reply_delay_max: float = 4.0
-    reply_delay_per_char: float = 0.25    # 打字速度：每个字多少秒（0.25 ≈ 每秒 4 个字，手机打字差不多这个速度）
-    reply_delay_cap: float = 20.0
+    reply_delay_per_char: float = 0.5     # 打字速度：每个字多少秒（0.5 ≈ 每分钟 120 字，打字快的人；9/29 从 0.25 改）
+    reply_delay_cap: float = 30.0         # 第一条最长等多久（9/29 从 20 调到 30）
     switch_gap_min: float = 2.0           # 刚回完一个人、接着回另一个人时，中间再停一下（秒）
     switch_gap_max: float = 5.0
     queue_max_wait: float = 90.0          # 每分钟限额满了时，最多排队等多久再回（秒）；等不到就不回

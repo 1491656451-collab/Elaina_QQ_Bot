@@ -24,6 +24,8 @@ from pathlib import Path
 
 from nonebot import logger
 
+from . import budget
+
 CACHE_VERSION = 2
 CACHE_MAX = 2000    # 缓存最多留多少张图；超了就丢最久没用过的，管理员 /认图 纠正过的一律保留
 SELF_TAG = "elaina_(majo_no_tabitabi)"
@@ -288,6 +290,7 @@ class Vision:
                 max_tokens=self.max_tokens,
                 extra_body={"thinking": {"type": "disabled"}},
             )
+            budget.track(resp, "vision")                 # 算到正在回的这个人 / 这个群头上
             desc = (resp.choices[0].message.content or "").strip().replace("\n", " ")[:70]
         except Exception as e:  # noqa: BLE001
             logger.warning(f"识图：调用模型失败：{e}")

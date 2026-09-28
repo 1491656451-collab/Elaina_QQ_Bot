@@ -23,6 +23,8 @@ from pathlib import Path
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
+from . import budget
+
 INDEX_VERSION = 1
 
 # 情绪词表（固定）：模型只能从这里选
@@ -263,6 +265,7 @@ class StickerStore:
             max_tokens=100,
             extra_body={"thinking": {"type": "disabled"}},
         )
+        budget.track(resp, "sticker", user=None, group=None)
         return resp.choices[0].message.content or ""
 
     async def label_one(self, it: dict) -> bool:

@@ -27,8 +27,9 @@ from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
 from nonebot.rule import to_me
 
+from . import budget
 from . import (
-    BOT_DIR, FAMILIARITY_HINT, alert_admins, api_messages, cfg, classify_error, clean_reply, client, clip_input,
+    BOT_DIR, FAMILIARITY_HINT, tier_value, alert_admins, api_messages, cfg, classify_error, clean_reply, client, clip_input,
     drop_ooc_sentences, familiarity_of, get_history, in_peak, ltm, ooc_words, peak, rate_limited, save_history,
     short_hint, system_prompt, tagger, vision, _hour_window, _locks,
 )
@@ -282,7 +283,7 @@ def today_moments() -> list[dict]:
     return _read(_day_file(_now().strftime("%Y-%m-%d")), [])
 
 
-TIER_WEIGHT = {"close": 5.0, "acquaintance": 3.0, "stranger": 1.0, "disliked": 0.6}
+TIER_WEIGHT = {"close": 5.0, "acquaintance": 3.0, "friend": 2.0, "stranger": 1.0, "disliked": 0.6}
 COUNT_WEIGHTS = [(0, 0.10), (1, 0.55), (2, 0.25), (3, 0.10)]
 
 
@@ -304,7 +305,7 @@ def choose_moments(moments: list[dict]) -> list[dict]:
     n = min(n, cfg.qzone_max_moments, len(pool))
     picked = []
     while pool and len(picked) < n:
-        weights = [TIER_WEIGHT[m["tier"]] for m in pool]
+        weights = [TIER_WEIGHT.get(m["tier"], 1.0) for m in pool]
         m = random.choices(pool, weights=weights)[0]
         pool = [x for x in pool if x is not m and x["qq"] != m["qq"]]    # 同一个人一天只写一件
         picked.append(m)
@@ -320,6 +321,8 @@ def _tier_hint(m: dict) -> str:
                 f"用对方的称呼{call}，或者写“某个老熟人”“那个总来烦我的家伙”之类。")
     if tier == "acquaintance":
         return "对方是熟人：随口一提，带点调侃，写成“一个熟人”“之前认识的某人”，不写名字。"
+    if tier == "friend":
+        return "对方是聊过几次的人：随口一提，写成“一个聊过几次的人”“最近常遇到的某人”，不写名字。"
     if tier == "stranger":
         return "对方是新认识的人：一笔带过，写成“新认识的人”“一个刚认识的人”，不写名字。"
     return "对方是你讨厌的家伙：只拿来吐槽一句，写成“那个烦人的家伙”，不写名字。"
@@ -399,10 +402,13 @@ async def make_post() -> dict:
     messages = [{"role": "system", "content": system_prompt()}, {"role": "system", "content": prompt}]
 
     async def ask(extra: list[dict]) -> str:
+        if not budget.can_background():
+            raise RuntimeError("今天的钱花完了（BUDGET_DAILY_TOTAL），这条说说先不写")
         resp = await client.chat.completions.create(
             model=cfg.deepseek_model, messages=messages + extra, temperature=cfg.llm_temperature,
             max_tokens=max(min(max_tokens, cfg.qzone_max_tokens), 60), extra_body={"thinking": {"type": "disabled"}},
         )
+        budget.track(resp, "qzone_post", user=None, group=None)
         ch = resp.choices[0]
         t = clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length")
         return re.sub(r"\n*\s*[—-]{1,2}\s*伊蕾娜\s*$", "", t).strip()
@@ -576,6 +582,7 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
         resp = await client.chat.completions.create(
             model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
             max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}})
+        budget.track(resp, "qzone_reply", user=uin, group=None)
         ch = resp.choices[0]
         reply = clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length")
         bad = ooc_words(reply, text)
@@ -586,6 +593,7 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
                 messages=messages + [{"role": "assistant", "content": reply}, {"role": "system", "content":
                     f"刚才的回复出戏了（出现了：{'、'.join(bad)}）。伊蕾娜不知道这些东西。请完全以伊蕾娜的身份重新回复，不要道歉，不要解释。"}],
                 extra_body={"thinking": {"type": "disabled"}})
+            budget.track(resp, "qzone_reply", user=uin, group=None)
             ch = resp.choices[0]
             reply = clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length")
             if ooc_words(reply, text):
@@ -614,7 +622,7 @@ def _remember(uin: int, nick: str, said: str, reply: str, where: str, taboo: boo
     ltm.bump_talk(uin, nick)
     hit = taboo and next((w for w in cfg.taboo_words if w in said), None)
     if hit:
-        k = cfg.taboo_tier_multiplier.get(tier_now, 1.0)
+        k = tier_value(cfg.taboo_tier_multiplier, tier_now, 1.0)
         if k > 0:
             ltm.taboo_penalty(uin, cfg.taboo_penalty * k, cfg.taboo_daily_max * k,
                               f"说她{hit}（{ltm.TIER_NAMES.get(tier_now, tier_now)}）")
@@ -987,7 +995,7 @@ async def poll_friends() -> str:
         if k in seen:
             continue
         fresh += 1
-        prob = cfg.qzone_friend_comment_prob.get(familiarity_of(it["owner"]), 0.0)
+        prob = tier_value(cfg.qzone_friend_comment_prob, familiarity_of(it["owner"]), 0.0)
         if it["owner"] in done_today or random.random() >= prob:
             seen[k] = int(time.time())                 # 没抽中：这条就当看过了，下次不再抽
         else:
@@ -1342,7 +1350,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
                 when = datetime.fromtimestamp(it["abstime"], BJ).strftime("%H:%M")
                 mark = "已看过" if _friend_key(it["owner"], it["tid"]) in seen else "还没抽"
                 lines.append(f"· {when} {it['nick'] or it['owner']}（{ltm.TIER_NAMES.get(fam, fam)}，"
-                             f"几率 {cfg.qzone_friend_comment_prob.get(fam, 0.0):.0%}，{mark}）")
+                             f"几率 {tier_value(cfg.qzone_friend_comment_prob, fam, 0.0):.0%}，{mark}）")
             await diary_cmd.finish("\n".join(lines))
         elif cmd == "日结":
             n = await daily_summary()

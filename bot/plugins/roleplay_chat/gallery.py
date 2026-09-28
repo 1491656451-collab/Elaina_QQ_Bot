@@ -20,6 +20,7 @@ from pathlib import Path
 
 from nonebot import logger
 
+from . import budget
 from .vision import SELF_TAG, sanitize
 
 EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -160,6 +161,8 @@ class Gallery:
             for k in ("desc", "tags", "season", "time", "weather"):
                 it[k] = old.get(k)
         else:
+            if not budget.can_background():
+                raise RuntimeError("今天的钱花完了，明天再看这张图")
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": [
@@ -170,6 +173,7 @@ class Gallery:
                 max_tokens=300,
                 extra_body={"thinking": {"type": "disabled"}},
             )
+            budget.track(resp, "gallery", user=None, group=None)
             data = _json_of(resp.choices[0].message.content or "")
             desc = sanitize(str(data.get("desc") or "").strip())[:80]
             if not desc:
