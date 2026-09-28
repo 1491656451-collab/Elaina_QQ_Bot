@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
+import time
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
@@ -23,6 +25,7 @@ from pathlib import Path
 from nonebot import logger
 
 CACHE_VERSION = 2
+CACHE_MAX = 2000    # 缓存最多留多少张图；超了就丢最久没用过的，管理员 /认图 纠正过的一律保留
 SELF_TAG = "elaina_(majo_no_tabitabi)"
 SELF_NAME = "伊蕾娜"
 # 认得出、并且她认识的人（Tagger v3 的词表里，《魔女之旅》只有伊蕾娜一个人）
@@ -105,16 +108,38 @@ class Vision:
                 self._cache = data.get("items", {})
             else:
                 logger.info("识图：旧版缓存作废（以前的描述认不出人物），图片会重新看一遍")
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
             pass
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            # 文件坏了（比如写到一半断电）：改名留底，别悄悄清空，里面可能有 /认图 的手动纠正
+            bad = cache_file.with_name(f"{cache_file.stem}.bad-{time.strftime('%Y%m%d-%H%M%S')}{cache_file.suffix}")
+            try:
+                cache_file.replace(bad)
+                logger.warning(f"识图：缓存文件读不了（{e}），已改名为 {bad.name} 留底，这次从空缓存开始")
+            except OSError:
+                logger.warning(f"识图：缓存文件读不了（{e}），这次从空缓存开始")
+
+    def _touch(self, key: str) -> None:
+        """用到一次就挪到最后，截断时最后才被丢掉"""
+        if key and key in self._cache:
+            self._cache[key] = self._cache.pop(key)
+
+    def _trim(self) -> None:
+        if len(self._cache) <= CACHE_MAX:
+            return
+        items = list(self._cache.items())
+        room = max(0, CACHE_MAX - sum(1 for _, v in items if "o" in v))
+        others = [k for k, v in items if "o" not in v]
+        keep = set(others[len(others) - room:]) if room else set()
+        self._cache = {k: v for k, v in items if "o" in v or k in keep}
 
     def _save(self) -> None:
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        # 缓存最多留 2000 条，太多了就丢掉最早的
-        if len(self._cache) > 2000:
-            self._cache = dict(list(self._cache.items())[-2000:])
-        self.cache_file.write_text(json.dumps({"_v": CACHE_VERSION, "items": self._cache}, ensure_ascii=False),
-                                   encoding="utf-8")
+        self._trim()
+        # 先写临时文件再替换：写到一半崩溃，原文件也还是完整的
+        tmp = self.cache_file.with_name(self.cache_file.name + ".tmp")
+        tmp.write_text(json.dumps({"_v": CACHE_VERSION, "items": self._cache}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.cache_file)
 
     @property
     def tagging(self) -> bool:
@@ -174,6 +199,10 @@ class Vision:
         tags = [t for t, _ in found]
         if found:
             logger.info("角色识别：" + "、".join(f"{t}（{p:.2f}）" for t, p in found))
+        if key and self_score < 0:          # 图太大没识别：记下来，别每次都重新下载，也不给她加“画的不是你”
+            entry = self._cache.setdefault(key, {})
+            entry["c"], entry["t"], entry["x"] = [], 1, 1
+            return tags
         if SELF_TAG not in tags and self_score >= 0.1:
             how = "交给看图模型再确认" if self_score >= self.maybe else "当作不是"
             logger.info(f"角色识别：像伊蕾娜但没过门槛（{self_score:.2f}，门槛 {self.tagger.threshold}），{how}")
@@ -187,6 +216,7 @@ class Vision:
         if not self.tagging:
             return False
         key = self.cache_key(data)
+        self._touch(key)
         entry = self._cache.get(key) if key else None
         if entry and ("o" in entry or entry.get("t")):
             return self.is_self(entry)
@@ -208,13 +238,14 @@ class Vision:
             return desc
         key = self.cache_key(data)
         entry = self._cache.get(key) if key else None
-        judged = bool(entry) and ("o" in entry or entry.get("t"))
+        judged = bool(entry) and ("o" in entry or (entry.get("t") and not entry.get("x")))
         if judged and not self.is_self(entry) and _PERSON_RE.search(desc):
             return desc + NOT_SELF_NOTE
         return desc
 
     async def _describe(self, data: dict) -> str | None:
         key = self.cache_key(data)
+        self._touch(key)
         entry = self._cache.get(key) if key else None
         # 缓存里有描述，并且（已经认过人，或者现在也没法认人）就直接用
         if entry and entry.get("d") and (entry.get("t") or not self.tagging):

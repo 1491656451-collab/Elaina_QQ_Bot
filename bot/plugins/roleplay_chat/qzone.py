@@ -17,7 +17,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -39,6 +39,8 @@ URL_REPLY = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/
 RIGHT_PUBLIC = 1        # 所有人可见
 RIGHT_FRIENDS = 4       # QQ 好友可见
 RIGHT_SELF = 64         # 仅自己可见
+
+BJ = timezone(timedelta(hours=8))            # 日志统一用北京时间（服务器时区不是 UTC+8 时也对得上）
 
 _MENTION = re.compile(r"@\{uin:(\d+),nick:([^,}]*)[^}]*\}\s*")
 _EM = re.compile(r"\[em\].*?\[/em\]")
@@ -194,13 +196,18 @@ class _Ctx:
     skey: str
     p_skey: str
     at: float
+    raw: str = ""            # NapCat 给的完整 cookie（原样带上，比只带 4 个字段更像浏览器）
 
     @property
     def gtk(self) -> str:
         return gtk_of(self.p_skey or self.skey)
 
     def cookie_header(self) -> str:
-        return f"uin=o{self.uin}; p_uin=o{self.uin}; skey={self.skey}; p_skey={self.p_skey}"
+        base = self.raw.strip().rstrip(";")
+        need = {"uin": f"o{self.uin}", "p_uin": f"o{self.uin}", "skey": self.skey, "p_skey": self.p_skey}
+        have = {k.strip() for k in (x.split("=", 1)[0] for x in base.split(";")) if k.strip()}
+        extra = "; ".join(f"{k}={v}" for k, v in need.items() if k not in have and v)
+        return "; ".join(x for x in (base, extra) if x)
 
 
 _LIMIT_CODES = (-10049,)                       # 实测：-10049「使用人数过多，请稍后再试」= 这个号被空间限流了
@@ -220,8 +227,16 @@ class Qzone:
         self.cookie_source = ""
         # 风控信号（限流码、验证页、403）出现时调用：await on_risk(种类, 说明)。由空间日记模块接上“熔断”
         self.on_risk: Callable[[str, str], Awaitable[None]] | None = None
-        self.last_write: tuple[float, str] | None = None     # 最近一次写操作（时间, 做了什么），对照下线时间用
+        # 最近一次写操作（时间, 做了什么），对照下线时间用；存在文件里，重开 start.bat 也不丢
+        self._last_write_file = log_path.parent / "last_write.json"
+        self.last_write: tuple[float, str] | None = None
+        try:
+            lw = json.loads(self._last_write_file.read_text(encoding="utf-8"))
+            self.last_write = (float(lw["at"]), str(lw["op"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         self.cookie_at = 0.0                                  # 最近一次向 NapCat 要到凭证的时间
+        self._http: httpx.AsyncClient | None = None           # 一直复用一个连接池（每个请求新建连接不像浏览器）
         # 发请求前的闸门：guard(方法) 返回原因就不发（抛 QzoneError("hold")）。由空间日记模块接上：
         # 账号下线了什么都不发；刚上线、刚要到凭证时不写
         self.guard: Callable[[str], str | None] | None = None
@@ -230,6 +245,10 @@ class Qzone:
     async def ctx(self, refresh: bool = False) -> _Ctx:
         async with self._lock:
             if refresh or not self._ctx or (self.CTX_TTL and time.time() - self._ctx.at > self.CTX_TTL):
+                why = self.guard("GET") if self.guard else None     # 下线了、熔断中：连凭证也不要
+                if why:
+                    self._log("要凭证", "-", 0, f"没要：{why}")
+                    raise QzoneError("hold", why)
                 raw = await self._get_cookie()
                 jar = {k: v.value for k, v in SimpleCookie(raw).items()}
                 uin = str(jar.get("uin") or jar.get("p_uin") or "").lstrip("oO").lstrip("0")
@@ -238,7 +257,7 @@ class Qzone:
                     raise QzoneError("login", f"NapCat 返回的 cookie 里没有 uin/skey（字段：{sorted(jar)}）")
                 if not jar.get("p_skey"):
                     self._log("cookie", "-", 0, "警告：没有 p_skey，改用 skey 算 g_tk，空间接口可能不认")
-                self._ctx = _Ctx(int(uin), skey, jar.get("p_skey", "") or skey, time.time())
+                self._ctx = _Ctx(int(uin), skey, jar.get("p_skey", "") or skey, time.time(), raw=raw)
                 self.cookie_at = time.time()
                 self._log("要凭证", "-", 0, f"向 NapCat 要到了空间凭证（{self.cookie_source or '?'}）")
             return self._ctx
@@ -248,9 +267,30 @@ class Qzone:
         self._ctx = None
         self.cookie_at = 0.0
 
+    async def close(self) -> None:
+        if self._http is not None:
+            try:
+                await self._http.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            self._http = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(follow_redirects=True, trust_env=False)
+        return self._http
+
+    def _save_last_write(self, op: str) -> None:
+        self.last_write = (time.time(), op)
+        try:
+            self._last_write_file.write_text(json.dumps({"at": self.last_write[0], "op": op}, ensure_ascii=False),
+                                             encoding="utf-8")
+        except OSError:
+            pass
+
     # -------------------------------------------------------------- 日志
     def _log(self, op: str, url: str, status: int, note: str) -> None:
-        line = f"{datetime.now():%Y-%m-%d %H:%M:%S}｜{op}｜{url.rsplit('/', 1)[-1]}｜HTTP {status}｜{note}\n"
+        line = f"{datetime.now(BJ):%Y-%m-%d %H:%M:%S}｜{op}｜{url.rsplit('/', 1)[-1]}｜HTTP {status}｜{note}\n"
         try:
             with self.log_path.open("a", encoding="utf-8") as f:
                 f.write(line)
@@ -259,7 +299,10 @@ class Qzone:
 
     # -------------------------------------------------------------- 请求
     async def _req(self, op: str, method: str, url: str, *, params=None, data=None,
-                   headers=None, timeout: float = 20, page_ok: bool = False, _retry: int = 0) -> dict:
+                   headers=None, timeout: float = 20, page_ok: bool = False, raw: bool = False,
+                   _retry: int = 0):
+        """发一个请求。所有空间请求都走这里：先过闸门（下线、熔断、刚上线、刚要到凭证），再发。
+        raw=True 时返回原始文本（“与我相关”那种 JS 对象，解析不成 JSON）"""
         why = self.guard(method) if self.guard else None
         if why:
             self._log(op, url, 0, f"没发：{why}")
@@ -270,6 +313,8 @@ class Qzone:
             if why:
                 self._log(op, url, 0, f"没发：{why}")
                 raise QzoneError("hold", why)
+        if params and "g_tk" in params:              # 按当前凭证填 g_tk（重新要过凭证后，旧的 g_tk 就不对了）
+            params = dict(params, g_tk=c.gtk)
         h = {
             "User-Agent": UA,
             "Referer": f"https://user.qzone.qq.com/{c.uin}",
@@ -278,39 +323,72 @@ class Qzone:
         }
         h.update(headers or {})
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as http:
-                r = await http.request(method, url, params=params, data=data, headers=h)
+            r = await self._client().request(method, url, params=params, data=data, headers=h, timeout=timeout)
         except httpx.HTTPError as e:
+            if method == "POST":
+                self._save_last_write(op)            # 发出去了但不知道结果：也算写过
             self._log(op, url, 0, f"网络错误：{e!r}")
             raise QzoneError("network", f"网络错误：{e!r}") from e
         text = r.text
         if method == "POST":
-            self.last_write = (time.time(), op)
+            self._save_last_write(op)
         if r.status_code == 403:
             self._log(op, url, 403, f"被拒绝｜{_snip(text, 200)}")
             await self._risk("forbidden", f"{op}：请求被拒绝（403）")
             raise QzoneError("forbidden", "请求被拒绝（403）", _snip(text))
+
+        async def relogin(note: str):
+            """登录失效：读请求重新要凭证再试一次；写请求不自动重试（刚要到凭证也写不了），留给下一轮"""
+            if method == "POST" or _retry >= 1:
+                self._ctx = None                     # 下次用的时候重新要
+                self._log(op, url, r.status_code, f"{note}，这次不重试")
+                raise QzoneError("login", f"{op}：登录态失效")
+            self._log(op, url, r.status_code, f"{note}，重新向 NapCat 要凭证再试一次")
+            await self.ctx(refresh=True)
+            return await self._req(op, method, url, params=params, data=data, headers=headers,
+                                   timeout=timeout, page_ok=page_ok, raw=raw, _retry=_retry + 1)
+
+        if raw:
+            head = text.lstrip()[:400]
+            if head.startswith("<") or not head:
+                try:
+                    parse_body(text)             # 是网页：按登录页 / 验证页 / 普通页面分类
+                except QzoneError as e:
+                    if e.kind == "login" or r.status_code == 401:
+                        return await relogin("登录态失效")
+                    self._log(op, url, r.status_code, f"{e}｜{e.snippet}")
+                    if e.kind == "verify":
+                        await self._risk("verify", f"{op}：空间返回了验证/风控页面")
+                    raise
+            m = re.search(r'(?<![A-Za-z_])["\']?code["\']?\s*:\s*(-?\d+)', head)
+            code = int(m.group(1)) if m else None
+            mm = re.search(r'(?<![A-Za-z_])["\']?message["\']?\s*:\s*["\']([^"\']*)', head)
+            msg = mm.group(1) if mm else ""
+            if code == -3000:
+                return await relogin("code=-3000 登录态失效")
+            self._log(op, url, r.status_code, f"code={code} {msg}｜{len(text)} 字符"[:200])
+            if code in _LIMIT_CODES or (code not in (0, None) and any(w in msg for w in _LIMIT_WORDS)):
+                await self._risk("limit", f"{op}：code={code} {msg}")
+                raise QzoneError("limit", f"被空间限流了（code={code} {msg}）")
+            if code not in (0, None):
+                raise QzoneError("api", f"{op}失败：code={code} {msg}")
+            return text
+
         try:
             data_ = parse_body(text)
         except QzoneError as e:
             if e.kind == "page" and page_ok:
                 self._log(op, url, r.status_code, f"返回页面（这个接口成功时也回页面）｜{_snip(text, 150)}")
                 return {"_page": True, "_snippet": e.snippet}
-            if (e.kind == "login" or r.status_code == 401) and _retry < 1:
-                self._log(op, url, r.status_code, "登录态失效，重新向 NapCat 要 cookie 再试一次")
-                await self.ctx(refresh=True)
-                return await self._req(op, method, url, params=params, data=data, headers=headers,
-                                       timeout=timeout, page_ok=page_ok, _retry=_retry + 1)
+            if e.kind == "login" or r.status_code == 401:
+                return await relogin("登录态失效")
             self._log(op, url, r.status_code, f"{e}｜{e.snippet}")
             if e.kind == "verify":
                 await self._risk("verify", f"{op}：空间返回了验证/风控页面")
             raise
         code = data_.get("code", data_.get("ret"))
-        if code == -3000 and _retry < 1:
-            self._log(op, url, r.status_code, "code=-3000 登录态失效，重取 cookie 再试")
-            await self.ctx(refresh=True)
-            return await self._req(op, method, url, params=params, data=data, headers=headers,
-                                   timeout=timeout, page_ok=page_ok, _retry=_retry + 1)
+        if code == -3000:
+            return await relogin("code=-3000 登录态失效")
         msg = data_.get("message") or data_.get("msg") or ""
         self._log(op, url, r.status_code, f"code={code} {msg}"[:200])
         if code in _LIMIT_CODES or (code not in (0, None) and any(w in str(msg) for w in _LIMIT_WORDS)):
@@ -358,7 +436,8 @@ class Qzone:
         return parse_comments(items)
 
     async def feeds_raw(self, scope: int, count: int = 10) -> str:
-        """好友动态 / 与我相关（ic2 feeds3_html_more）的原始返回，先拿来看格式。scope=0 好友动态，scope=1 与我相关"""
+        """好友动态 / 与我相关（ic2 feeds3_html_more）的原始返回。scope=0 好友动态，scope=1 与我相关。
+        和别的接口一样走 _req：过闸门、识别登录失效 / 验证页 / 403 / 限流"""
         c = await self.ctx()
         params = {
             "uin": c.uin, "scope": scope, "view": 1, "daylist": "", "uinlist": "", "gid": "", "flag": 1,
@@ -368,11 +447,7 @@ class Qzone:
             "useutf8": 1, "outputhtmlfeed": 1, "count": count, "g_tk": c.gtk, "format": "json",
             "rd": str(time.time()), "usertime": str(int(time.time() * 1000)), "windowId": str(time.time()),
         }
-        h = {"User-Agent": UA, "Referer": f"https://user.qzone.qq.com/{c.uin}", "Cookie": c.cookie_header()}
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, trust_env=False) as http:
-            r = await http.get(URL_FEEDS, params=params, headers=h)
-        self._log(f"读动态 scope={scope}", URL_FEEDS, r.status_code, f"{len(r.text)} 字符")
-        return r.text
+        return await self._req(f"读动态 scope={scope}", "GET", URL_FEEDS, params=params, raw=True)
 
     # -------------------------------------------------------------- 写
     async def upload_image(self, image: bytes) -> tuple[str, str]:
@@ -447,7 +522,12 @@ class Qzone:
             "private": "0", "paramstr": 2, "qzreferrer": f"https://user.qzone.qq.com/{c.uin}/main",
         })
         await asyncio.sleep(2)
-        for thread in parse_comments((await self.detail(tid, host)).get("commentlist")):
+        try:
+            d = await self.detail(tid, host)
+        except Exception as e:  # noqa: BLE001  回复已经发出去了：回查出错就当“没确认”，别让上层以为没回、下一轮再回一遍
+            self._log("回复评论·回查", URL_DETAIL, 0, f"回查出错（{e}），按没确认处理")
+            return False
+        for thread in parse_comments(d.get("commentlist")):
             if thread.tid == root.tid:
                 ok = any(r.uin == c.uin and (r.time == 0 or r.time >= start) for r in thread.replies)
                 self._log("回复评论·回查", URL_DETAIL, 200, "找到了自己的回复" if ok else "没找到自己的回复")
@@ -466,14 +546,22 @@ class Qzone:
             "private": "0", "paramstr": 1, "qzreferrer": f"https://user.qzone.qq.com/{owner}",
         })
         await asyncio.sleep(2)
-        ok = any(r.uin == c.uin and (r.time == 0 or r.time >= start)
-                 for r in parse_comments((await self.detail(tid, owner)).get("commentlist")))
+        try:
+            d = await self.detail(tid, owner)
+        except Exception as e:  # noqa: BLE001
+            self._log("发评论·回查", URL_DETAIL, 0, f"回查出错（{e}），按没确认处理")
+            return False
+        ok = any(r.uin == c.uin and (r.time == 0 or r.time >= start) for r in parse_comments(d.get("commentlist")))
         self._log("发评论·回查", URL_DETAIL, 200, "找到了自己的评论" if ok else "没找到自己的评论")
         return ok
 
     async def about_me(self, count: int = 20) -> list[dict]:
         """“与我相关”里的说说类动态（谁、在谁的哪条说说、什么动作），见 parse_about_me"""
         return parse_about_me(await self.feeds_raw(1, count))
+
+    async def friend_feeds(self, count: int = 20) -> list[dict]:
+        """好友动态（刷空间首页看到的那些），格式同 about_me；state 字段在这里没意义"""
+        return parse_about_me(await self.feeds_raw(0, count))
 
 
 # ------------------------------------------------------------------ “与我相关”

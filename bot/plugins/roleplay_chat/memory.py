@@ -3,7 +3,7 @@
 
 - 每个人一份档案（按 QQ 号，群聊和私聊共用）：喜好、说过的事、和伊蕾娜的约定/梗……
 - 每个群一份“往事”：这个群一起聊过、做过的值得记住的事
-- 工作方式：每轮对话先攒起来，攒够一批（默认 8 条）就在后台调用一次模型，
+- 工作方式：每轮对话都先加进“待整理”，攒够一批（默认 8 条）就在后台调用一次模型，
   把要点合并进档案，并按对话内容调整好感度。不影响回复速度。
 - 回复时：把“正在说话的人”的档案 + 本群往事，作为一小段提示带给模型。
 
@@ -15,7 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
 import json
+import re
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -24,16 +27,32 @@ from pathlib import Path
 from nonebot import logger
 
 
+_DUP_MARK_RE = re.compile(r"#\d{1,2}$")     # 群里重名的记号（“小明#2”）
+_PID = itertools.count(time.time_ns())      # 待整理消息的编号（启动时从当前时间起，重启后也不会重复）
+
+
 def _read(path: Path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return default
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        # 文件坏了（比如写到一半断电）：改名留底，不要直接当成空档案再存回去
+        bad = path.with_name(f"{path.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
+        try:
+            path.replace(bad)
+            logger.warning(f"记忆文件读不出来，已改名留底：{bad.name}（{e}）")
+        except OSError:
+            logger.warning(f"记忆文件读不出来：{path}（{e}）")
         return default
 
 
 def _write(path: Path, data) -> None:
+    """先写临时文件再替换：写到一半被打断，原文件也还是完整的"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(path)
 
 
 SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。下面是她最近的一段聊天记录，请把值得长期记住的内容合并进档案，并评估好感变化。
@@ -61,11 +80,11 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
      - +1～+5：聊得投机、有趣、尊重她、真诚关心她、夸得她心里舒服、陪她聊她感兴趣的事
      - 0：普通寒暄、没什么感觉
      - -1～-5：无聊纠缠、刷屏、硬要她做不想做的事、一上来就告白/叫老婆/强加关系、提蘑菇之类让她烦的事
-     - -3～-8：拿她的身材开玩笑（平胸、飞机场、洗衣板等），她对这个非常在意
      - -6～-15：辱骂、人身攻击、性骚扰、恶意冒犯
-   ● 熟人：轻度调侃、互损、开玩笑（包括偶尔拿身材逗她）算正常打闹，0～-2；告白、撒娇不算冒犯，看她心情 0～+2；真正的恶意照样按基准扣
-   ● 很熟：互损、开玩笑、身材梗基本不扣（最多 -1），这是他们之间的相处方式；真心关心、陪伴、记得她的喜好可以多加 +2～+5；只有真正伤人的话才扣
+   ● 熟人：轻度调侃、互损、开玩笑算正常打闹，0～-2；告白、撒娇不算冒犯，看她心情 0～+2；真正的恶意照样按基准扣
+   ● 很熟：互损、开玩笑基本不扣（最多 -1），这是他们之间的相处方式；真心关心、陪伴、记得她的喜好可以多加 +2～+5；只有真正伤人的话才扣
    ● 讨厌：她本来就烦这个人，冒犯按基准再重一些；想加分很难，只有特别真诚、明显改过的表现才给 +1～+2
+   ● 身材梗不在这里算分：拿她的身材开玩笑（平胸、飞机场、洗衣板等）已经由系统当场按关系扣过，这里不因此再扣；只有同时还有别的恶意（辱骂、骚扰等）才按那部分扣。
    ● 送东西不在这里算分：说送面包、给钱（包括「[给面包]」「[给钱]」「转账」这类写法）已经由系统单独算过，这里不因此加分；付给她合理的报酬不加不减；拿钱引诱、无缘无故撒钱、用她不认识的钱糊弄她，不加分。
    同时写一句不超过 20 字的理由 reason。
 7. 性别初判 gender_guess：根据这个人的自称、说话方式、昵称、聊的内容，初步猜一下是“男”还是“女”；拿不准就写“不确定”。这只是猜测。
@@ -91,9 +110,12 @@ class LongTermMemory:
         self.enabled = enabled
         self.defer = defer or (lambda: False)   # 返回 True 时先不整理（比如 API 高峰时段）
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)   # QQ -> 整理这个人档案时的锁
         self._tasks: set[asyncio.Task] = set()
         self._running: set[str] = set()         # 正在整理的会话，避免重复开任务
         self._names: dict[int, dict[str, int]] = {}   # 群号 -> {昵称: QQ}
+        self._fails: dict[str, int] = {}          # 会话 -> 连续整理失败几次
+        self._retry_at: dict[str, float] = {}     # 会话 -> 失败后，这个时间之前先不再试
         # 整理出“今日见闻”后交给谁保存（QQ 空间日记用）：moment_sink(会话, 见闻列表, {QQ: 昵称})
         self.moment_sink = None
 
@@ -112,6 +134,8 @@ class LongTermMemory:
 
     def save_user(self, prof: dict) -> None:
         prof["updated"] = int(time.time())
+        if prof.get("name"):                      # 群里重名时聊天记录里写成“小明#2”，档案里只存原名
+            prof["name"] = _DUP_MARK_RE.sub("", str(prof["name"])).strip()
         _write(self._user_path(int(prof["qq"])), prof)
 
     def forget_user(self, qq: int) -> bool:
@@ -136,10 +160,23 @@ class LongTermMemory:
         return had
 
     def note_name(self, gid: int, qq: int, name: str) -> None:
-        """记下群里 昵称→QQ 的对应，整理记忆时用来认人"""
+        """记下群里 昵称→QQ 的对应，整理记忆时用来认人。每人只留最近 3 个昵称；有变化就马上存盘（整理一直失败也不丢）"""
+        if not name:
+            return
         m = self._names.setdefault(gid, self.get_group(gid).get("names", {}))
-        if m.get(name) != qq:
-            m[name] = qq
+        if m.get(name) == qq:
+            return
+        m.pop(name, None)
+        m[name] = qq                              # 放到最后 = 最新
+        mine = [n for n, u in m.items() if u == qq]
+        for n in mine[:-3]:
+            del m[n]
+        try:
+            g = self.get_group(gid)
+            g["names"] = m
+            self.save_group(g)
+        except OSError as e:
+            logger.warning(f"群昵称对照表存盘失败：{e}")
 
     # -------------------------------------------------------------- 写入：攒旧消息
     def add_pending(self, key: str, entries: list[dict]) -> None:
@@ -147,15 +184,38 @@ class LongTermMemory:
             return
         path = self._pending_path(key)
         pending = _read(path, [])
-        pending.extend(entries)
+        for e in entries:                         # 每条一个编号，整理完按编号删（不按位置删，免得删错）
+            pending.append({**e, "_pid": next(_PID)})
         pending = pending[-self.batch * 5:]          # 防止整理一直失败时无限变大
         _write(path, pending)
-        if len(pending) >= self.batch and not self.defer() and key not in self._running:
-            self._running.add(key)
-            task = asyncio.create_task(self.summarize(key))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-            task.add_done_callback(lambda _t, k=key: self._running.discard(k))
+        if len(pending) >= self.batch:
+            self._start(key)
+
+    def _start(self, key: str) -> bool:
+        """在后台整理这个会话（高峰时段、正在整理、刚失败过还没到重试时间，就先不整理）"""
+        if self.defer() or key in self._running or time.time() < self._retry_at.get(key, 0):
+            return False
+        self._running.add(key)
+        task = asyncio.create_task(self.summarize(key))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda _t, k=key: self._running.discard(k))
+        return True
+
+    def retry_pending(self) -> int:
+        """把攒够一批、还没整理的会话补做一次（开机时和定时任务用）。返回开始整理了几个"""
+        n = 0
+        for key in self.pending_keys():
+            if len(_read(self._pending_path(key), [])) >= self.batch and self._start(key):
+                n += 1
+        return n
+
+    def _failed(self, key: str) -> None:
+        """整理失败：5 分钟、15 分钟、1 小时后再试（期间来新消息也不马上重试，免得每条消息都白花一次钱）"""
+        n = self._fails[key] = self._fails.get(key, 0) + 1
+        wait = (300, 900, 3600)[min(n, 3) - 1]
+        self._retry_at[key] = time.time() + wait
+        logger.warning(f"长期记忆整理失败（{key} 连续第 {n} 次），{wait // 60} 分钟后再试")
 
     def pending_keys(self, since: float = 0.0) -> list[str]:
         """还有没整理的消息的会话（只看 since 之后改动过的）"""
@@ -200,92 +260,132 @@ class LongTermMemory:
             if len(entries) < (2 if force else self.batch):
                 return
             people = self._people_in(key, entries)
-            gid = int(key.split("_")[1]) if key.startswith("group_") else None
-            profiles = {qq: self.get_user(qq) for qq in people}
-            group = self.get_group(gid) if gid else None
-            prof_text = "\n".join(
-                f"- QQ {qq}（昵称：{people[qq] or profiles[qq].get('name') or '未知'}｜关系：{self.TIER_NAMES[self.familiarity(qq, self.close_friends)]}）："
-                + (json.dumps(profiles[qq].get("facts", []), ensure_ascii=False))
-                for qq in people
-            ) or "（无）"
-            now = datetime.now()
-            prompt = SUMMARIZE_PROMPT.format(
-                today=now.strftime("%Y年%m月%d日"),
-                md=f"{now.month}月{now.day}日",
-                profiles=prof_text,
-                events=json.dumps(group["events"], ensure_ascii=False) if group else "[]",
-                transcript=self._transcript(key, entries),
-                max_facts=self.max_facts,
-                max_events=self.max_events,
-            )
-            try:
-                resp = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=self.summary_max_tokens,
-                    response_format={"type": "json_object"},
-                    extra_body={"thinking": {"type": "disabled"}},
-                )
-                if resp.choices[0].finish_reason == "length":
-                    logger.warning(f"长期记忆整理写到一半被截断了（MEMORY_SUMMARY_MAX_TOKENS={self.summary_max_tokens} 不够），这次作废，下次再试：{key}")
-                    return
-                data = json.loads(resp.choices[0].message.content or "{}")
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"长期记忆整理失败（下次再试）：{e}")
-                return
+            async with contextlib.AsyncExitStack() as stack:
+                for qq in sorted(people):           # 同一个人的档案同一时间只有一处在整理（按 QQ 排序加锁，不会互相卡死）
+                    await stack.enter_async_context(self._user_locks[qq])
+                await self._summarize(key, path, entries, people)
 
-            changed = []
-            for p in data.get("people", []) or []:
-                try:
-                    qq = int(p.get("qq"))
-                except (TypeError, ValueError):
-                    continue
-                if qq not in people:        # 不在这段记录里的人不许改
-                    continue
-                facts = [str(f).strip()[:40] for f in (p.get("facts") or []) if str(f).strip()]
-                prof = self.get_user(qq)    # 重新读一遍：整理期间她可能又和这个人聊过（计数、好感已变）
-                if people[qq]:
-                    prof["name"] = people[qq]
-                prof["facts"] = facts[: self.max_facts]
-                guess = {"男": "male", "女": "female"}.get(str(p.get("gender_guess", "")).strip())
-                if guess:
-                    prof["gender_guess"] = guess
-                try:
-                    delta = int(p.get("affection", 0))
-                except (TypeError, ValueError):
-                    delta = 0
-                delta = max(-15, min(5, delta))
-                tier = self.familiarity(qq, self.close_friends)
-                if tier == "disliked" and delta > 0:     # 讨厌的人想挽回，加分减半（至少 +1）
-                    delta = max(1, delta // 2)
-                if delta:
-                    self._apply_affection(prof, delta, str(p.get("reason", ""))[:30])
-                self.save_user(prof)
-                changed.append(qq)
-            if group is not None:
-                events = [str(x).strip()[:50] for x in (data.get("group_events") or []) if str(x).strip()]
-                group["events"] = events[-self.max_events:] if len(events) > self.max_events else events
-                group["names"] = self._names.get(gid, group.get("names", {}))
-                self.save_group(group)
-            if self.moment_sink and data.get("today_moments"):
-                try:
-                    self.moment_sink(key, data.get("today_moments") or [], people)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"今日见闻保存失败：{e}")
-            # 只删掉这次整理过的那几条；整理期间新攒的留着下次用
-            remain = _read(path, [])[len(entries):]
-            if remain:
-                _write(path, remain)
+    async def _summarize(self, key: str, path: Path, entries: list[dict], people: dict[int, str]) -> None:
+        gid = int(key.split("_")[1]) if key.startswith("group_") else None
+        profiles = {qq: self.get_user(qq) for qq in people}
+        group = self.get_group(gid) if gid else None
+        prof_text = "\n".join(
+            f"- QQ {qq}（昵称：{people[qq] or profiles[qq].get('name') or '未知'}｜关系：{self.TIER_NAMES[self.familiarity(qq, self.close_friends)]}）："
+            + (json.dumps(profiles[qq].get("facts", []), ensure_ascii=False))
+            for qq in people
+        ) or "（无）"
+        now = datetime.now()
+        prompt = SUMMARIZE_PROMPT.format(
+            today=now.strftime("%Y年%m月%d日"),
+            md=f"{now.month}月{now.day}日",
+            profiles=prof_text,
+            events=json.dumps(group["events"], ensure_ascii=False) if group else "[]",
+            transcript=self._transcript(key, entries),
+            max_facts=self.max_facts,
+            max_events=self.max_events,
+        )
+        try:
+            api = self.summary_client or self.client     # 整理单独用更长的超时，出错不自动重试（每次重试都计费）
+            resp = await api.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=self.summary_max_tokens,
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            usage = getattr(resp, "usage", None)
+            used = getattr(usage, "completion_tokens", None)
+            if resp.choices[0].finish_reason == "length":
+                logger.warning(f"长期记忆整理写到一半被截断了（写了 {used} token，MEMORY_SUMMARY_MAX_TOKENS={self.summary_max_tokens} 不够），这次作废：{key}")
+                self._failed(key)
+                return
+            data = json.loads(resp.choices[0].message.content or "")
+            if not isinstance(data, dict) or not isinstance(data.get("people"), list):
+                raise ValueError(f"返回的内容不对（{str(resp.choices[0].message.content)[:60]!r}）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"长期记忆整理失败：{key}：{e}")
+            self._failed(key)
+            return
+        self._fails.pop(key, None)
+        self._retry_at.pop(key, None)
+
+        # 先在内存里算好所有人的新档案，最后统一写入；每批记一个编号，同一批重试时不重复加减好感
+        batch_id = entries[0].get("_pid") if entries else None
+        changed, updated = [], []
+        for p in data.get("people", []) or []:
+            try:
+                qq = int(p.get("qq"))
+            except (TypeError, ValueError):
+                continue
+            if qq not in people:        # 不在这段记录里的人不许改
+                continue
+            facts = [str(f).strip()[:40] for f in (p.get("facts") or []) if str(f).strip()]
+            prof = self.get_user(qq)    # 重新读一遍：整理期间她可能又和这个人聊过（计数、好感已变）
+            if people[qq]:
+                prof["name"] = people[qq]
+            old = prof.get("facts") or []
+            if "facts" not in p or (len(old) >= 4 and len(facts) < len(old) / 2):
+                # 没给 facts，或者一下子少了一半以上：多半是模型漏写了，保留原来的
+                if "facts" in p:
+                    logger.warning(f"长期记忆：{qq} 的档案从 {len(old)} 条变成 {len(facts)} 条，不像正常整理，保留原来的")
             else:
-                path.unlink(missing_ok=True)
-            logger.info(f"长期记忆已整理：{key}，更新了 {len(changed)} 人的档案")
+                prof["facts"] = facts[: self.max_facts]
+            guess = {"男": "male", "女": "female"}.get(str(p.get("gender_guess", "")).strip())
+            if guess:
+                prof["gender_guess"] = guess
+            try:
+                delta = int(p.get("affection", 0))
+            except (TypeError, ValueError):
+                delta = 0
+            delta = max(-15, min(5, delta))
+            tier = self.familiarity(qq, self.close_friends)
+            if tier == "disliked" and delta > 0:     # 讨厌的人想挽回，加分减半（至少 +1）
+                delta = max(1, delta // 2)
+            done_batches = prof.get("batches") or []
+            if batch_id is not None and batch_id in done_batches:
+                delta = 0                                # 这一批上次已经算过好感（上次写到一半出错了）
+            if delta:
+                self._apply_affection(prof, delta, str(p.get("reason", ""))[:30])
+            if batch_id is not None:
+                prof["batches"] = (done_batches + [batch_id])[-5:]
+            updated.append(prof)
+            changed.append(qq)
+        for prof in updated:
+            self.save_user(prof)
+        if group is not None:
+            events = [str(x).strip()[:50] for x in (data.get("group_events") or []) if str(x).strip()]
+            old_events = group.get("events") or []
+            if not isinstance(data.get("group_events"), list) or (len(old_events) >= 4 and len(events) < len(old_events) / 2):
+                # 没给群往事，或者一下子少了一半以上：保留原来的
+                if isinstance(data.get("group_events"), list):
+                    logger.warning(f"长期记忆：群 {gid} 的往事从 {len(old_events)} 条变成 {len(events)} 条，不像正常整理，保留原来的")
+            else:
+                group["events"] = events[-self.max_events:] if len(events) > self.max_events else events
+            group["names"] = self._names.get(gid, group.get("names", {}))
+            self.save_group(group)
+        if self.moment_sink and data.get("today_moments"):
+            try:
+                self.moment_sink(key, data.get("today_moments") or [],
+                                 {q: _DUP_MARK_RE.sub("", n).strip() for q, n in people.items()})
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"今日见闻保存失败：{e}")
+        # 只删掉这次整理过的那几条；整理期间新攒的留着下次用
+        done = {e["_pid"] for e in entries if e.get("_pid") is not None}
+        now_list = _read(path, [])
+        remain = [e for e in now_list if e.get("_pid") not in done] if done else now_list[len(entries):]
+        if remain:
+            _write(path, remain)
+        else:
+            path.unlink(missing_ok=True)
+        logger.info(f"长期记忆已整理：{key}，更新了 {len(changed)} 人的档案")
 
     # -------------------------------------------------------------- 好感度
     # 分数 -100～100。来源：① 正常聊天（默认不加分，可在配置里开）；② 长期记忆整理时按对话内容加减分；
     # ③ 管理员手动调整。很久不聊会慢慢回落到 0（好感和讨厌都会淡去）。
     close_friends: tuple = ()
-    summary_max_tokens: int = 2000           # 整理时模型最多写多少（要把每个人的整份档案重写一遍）
+    summary_max_tokens: int = 4000           # 整理时模型最多写多少（要把每个人的整份档案重写一遍）
+    summary_client = None                    # 整理专用的客户端（超时更长、不自动重试）；没设就用聊天那个
     gender_cap: bool = True                  # 只有确认是女生才能到“很熟”
     affection_cfg = {
         "base_gain": 0, "daily_cap": 5,

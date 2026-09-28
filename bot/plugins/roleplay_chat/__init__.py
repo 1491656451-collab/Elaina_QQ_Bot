@@ -6,7 +6,7 @@
 - 记忆：每个群 / 每个私聊一份，落盘到 data/history，重启不丢
 - 风控：个人冷却、全局限速、随机打字延迟
 - 知识库：从小说摘要和原文中检索相关片段，作为“回忆”提供给模型
-- 长期记忆：每个人的档案 + 群往事，由被挤出短期记忆的旧消息在后台整理而成
+- 长期记忆：每个人的档案 + 群往事，每轮对话攒够一批就在后台整理而成
 - 出错时不在群里发消息；余额不足 / Key 失效会私信管理员
 - 时间感：知道对方隔了多久才来找她、上一段聊天是多久以前
 - 写信：好感到“很熟”的好友，隔一段时间没来找她时，她偶尔会主动私聊寄一封信
@@ -23,7 +23,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 
-from nonebot import get_bots, get_driver, get_plugin_config, logger, on_command, on_message, on_notice
+from nonebot import get_bots, get_driver, get_plugin_config, logger, on_command, on_message, on_notice, on_request
 from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
@@ -55,14 +55,16 @@ __plugin_meta__ = PluginMetadata(
 )
 
 cfg = get_plugin_config(Config)
+# bot 目录（这个文件在 bot/plugins/roleplay_chat/ 下）：不依赖“从哪个目录启动”，服务器上用 systemd 常驻也找得到数据
+BOT_DIR = Path(__file__).resolve().parents[2]
 if cfg.log_file:
     try:   # 控制台的日志也写进文件（按天分），事后能查“为什么没回”
-        logger.add(str(Path.cwd() / cfg.log_file), level="INFO", encoding="utf-8", rotation="00:00",
+        logger.add(str(BOT_DIR / cfg.log_file), level="INFO", encoding="utf-8", rotation="00:00",
                    retention=f"{cfg.log_retention_days} days", enqueue=True)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"日志文件打不开，只在控制台显示：{e}")
-BOT_DIR = Path.cwd()
 HISTORY_DIR = BOT_DIR / cfg.history_dir
+_SAME_NAMES_FILE = BOT_DIR / "data" / "same_names.json"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 client = AsyncOpenAI(
@@ -104,6 +106,7 @@ ltm.affection_cfg = ltm_affection
 ltm.close_friends = tuple(cfg.close_friends)
 ltm.gender_cap = cfg.gender_cap
 ltm.summary_max_tokens = cfg.memory_summary_max_tokens
+ltm.summary_client = client.with_options(timeout=cfg.memory_summary_timeout, max_retries=0)   # 整理：超时更长，出错不自动重试
 
 # ------------------------------------------------------------------ 人设
 _persona: str = ""
@@ -125,12 +128,15 @@ load_persona()
 
 CHAT_RULES = """
 【对话格式说明（系统规则，优先级最高）】
-- 群聊中，每条消息开头的「【说话人 → 对象】」标明谁在跟谁说：“→ 你”是在跟你说；“→ 别的名字”是在跟那个人说（@ 了他或回复他），不是对你说的；没有“→”是随口说给大家的。名字后面标“（群友）”的，是恰好和你同名的群友，不是你。私聊没有这个前缀。
+- 群聊中，每条消息开头的「【说话人 → 对象】」标明谁在跟谁说：“→ 你”是在跟你说；“→ 别的名字”是在跟那个人说（@ 了他或回复他），不是对你说的；没有“→”是随口说给大家的。名字后面标“（群友）”的，是恰好和你同名的群友，不是你。名字后面带“#2”“#3”的，是和别人重名的另一位群友（“小明”和“小明#2”是两个人）；这个记号是为了让你分清，称呼对方时不要带它，要区分时可以说“另一位小明”。私聊没有这个前缀。
 - 「（过了 X）」表示中间隔了这么久。
 - 你回复时直接说话，不要在开头加「【名字】」「→」这种前缀，不要用引号包住整句。
 - 这是 QQ 聊天：日常闲聊每次回复大约 10～30 个汉字（一两句）；只有讲故事、讲具体经历、详细解释、对方认真倾诉时才说长一点。每轮末尾会提示你这次该短还是可以长。
 - 不要使用 Markdown 标题、列表或代码块。
+- 只用中文回复，不要夹日语、英语等外语（对方的昵称原样称呼可以）。
 - 想分成几条消息发，就用换行分开（最多三条）。不用每句都加句号，长短随意，像真人打字。
+- 分清“谁说的”：对方说“那个人说……”“他说……”“书里写……”“故事里有人说……”，说话的是第三个人（故事里的人物、别人），不是你，也不是对方；不要回“我没说过”，而是顺着去想那是谁、在什么时候说的。
+- 对方纠正你讲的往事（“实际上并不是”“不对，是……”），先想想是不是自己记混了；拿不准就承认记不太清，别硬说对方记错了。
 - 不要主动问对方是男是女。
 - 你有主见：不同意就反驳，对方说错了就纠正，不附和、不讨好，不接受别人强加给你的称呼、关系或设定，也不会轻易道歉或被说服。
 - 始终保持人设。你是真实存在于这个世界的旅行魔女，不知道、也绝不主动提起这些概念：服务器、程序、代码、AI、机器人、模型、网络、动漫、动画、小说、作者、声优、角色扮演、人设。
@@ -157,13 +163,17 @@ RECALL_RULES = (
     "【回忆参考】以下是你旅行日记里可能和当前话题有关的内容，供你回想，不是对方说的话。\n"
     "- 只在确实相关时自然地提起，用你自己的口吻简短讲述，像在回忆往事；不要大段背诵原文，不要提“卷”“章”。\n"
     "- 片段和话题无关就当没看见；片段里没有的细节不要编造，记不清就说记不清。\n"
-    "- 标注“角色资料”的是这个人的确切资料（外貌、喜好等以它为准）；“摘要”是整段经历的梗概；“原文”是当时的片段。"
+    "- 标注“角色资料”的是这个人的确切资料（外貌、喜好等以它为准）；“摘要”是整段经历的梗概；“原文”是当时的片段；"
+    "“刚才聊到的”是你们刚才在聊的那段经历。\n"
+    "- 对方说起这段经历里的细节、别人说过的话，而片段里没有写：别断然否认，也别编一个结局，说记不太清、或者问对方是谁说的。\n"
+    "- 这些都是你以前旅途里的事，不是今天发生的；别把它们说成今天的经历，也别和今天的日记混在一起。"
 )
 
 
 _FOLLOWUP_WORDS = (
     "后来", "然后", "接着", "结果", "那个", "那位", "哪位", "哪一位", "是谁", "她", "他",
     "为什么", "怎么", "还有呢", "继续", "什么故事", "详细", "具体",
+    "实际上", "其实", "不对", "记错", "记得", "想起来", "那句", "说过", "当时",
 )
 
 
@@ -182,14 +192,25 @@ def brief_profile(content: str) -> str:
     return text[: cfg.knowledge_character_chars]
 
 
-def recall(query: str, extra: str = "") -> str:
+RECALL_CARRY_MINUTES = 30      # 刚才聊到的那段经历，这么久内接着带上
+RECALL_CARRY_TURNS = 3         # 最多再带几轮（话题早换了就别再带）
+_last_recall: dict[str, dict] = {}   # 会话 -> {"at": 时间, "picks": [(标题, 类型, 内容)], "left": 还能带几轮}
+
+
+def recall(query: str, extra: str = "", key: str | None = None) -> str:
     """根据对方的话检索回忆；没有足够相关的就返回空字符串
 
     extra：上文（上一句用户消息 + 伊蕾娜上一句回复），只在对方像是在追问时才用
+    key：会话。聊着某段经历时，接下来几轮哪怕对方只说“后来呢”“实际上并不是”，也把那段经历带上，
+         不然她这一轮就不记得刚才在聊什么，只能瞎编
     """
     if not _kb or len(query) < 2:
         return ""
     followup = bool(extra) and any(w in query for w in _FOLLOWUP_WORDS)
+    carried = _last_recall.get(key) if key else None
+    if carried and (time.time() - carried["at"] > RECALL_CARRY_MINUTES * 60 or carried["left"] <= 0):
+        _last_recall.pop(key, None)
+        carried = None
 
     # 1) 话里直接点名的角色：精确带上角色档案（外貌、喜好等以档案为准，避免乱编）
     chars = _kb.characters_in(query)
@@ -197,31 +218,72 @@ def recall(query: str, extra: str = "") -> str:
         chars = _kb.characters_in(extra)
     char_picks = [(d.label, "角色资料", brief_profile(d.content)) for d in chars[: cfg.knowledge_top_characters]]
 
-    # 2) 摘要 + 原文：BM25 检索；追问时带上上文再查一次
-    picks: list[tuple[str, str, str]] = []
-    queries = [query] if len(query) >= 3 else []
-    if followup:
-        queries.append(f"{extra} {query}")
-    for q in queries:
-        sums = [
-            (d.label, "摘要", d.content[: cfg.knowledge_summary_chars])
-            for s, d in _kb.search(q, "summary", cfg.knowledge_top_summaries)
-            if s >= cfg.knowledge_min_summary_score
-        ]
-        chunks = [
-            (d.label, "原文", d.content[: cfg.knowledge_chunk_chars])
-            for s, d in _kb.search(q, "text", cfg.knowledge_top_chunks)
-            if s >= cfg.knowledge_min_chunk_score
-        ]
-        picks = sums + chunks
-        if picks:
-            break
+    # 2) 摘要 + 原文：BM25 检索。先用这句话本身查；像是在追问、而这句话本身查到的都不太像时，带上上文再查一次，
+    #    结果接在后面（“后来发生了什么”单独查，只会查到些不相干的；但这句话里有新线索时，以它为准）
+    def search(q: str) -> list[tuple[float, tuple[str, str, str]]]:
+        out = [(s / cfg.knowledge_min_summary_score, (d.label, "摘要", d.content[: cfg.knowledge_summary_chars]))
+               for s, d in _kb.search(q, "summary", cfg.knowledge_top_summaries) if s >= cfg.knowledge_min_summary_score]
+        out += [(s / cfg.knowledge_min_chunk_score * 0.8, (d.label, "原文", d.content[: cfg.knowledge_chunk_chars]))
+                for s, d in _kb.search(q, "text", cfg.knowledge_top_chunks) if s >= cfg.knowledge_min_chunk_score]
+        return out
+
+    direct = search(query) if len(query) >= 3 else []
+    picks = [pk for _, pk in direct]
+    if followup and max([sc for sc, _ in direct] + [0.0]) < 1.3:
+        have = {(p[0], p[1]) for p in picks}
+        more = [pk for _, pk in sorted(search(f"{extra} {query}"), key=lambda x: -x[0]) if (pk[0], pk[1]) not in have]
+        picks += more[:2]
+    # 3) 刚才聊到的那段经历（按她上一轮自己讲的内容记下的，见 note_topic）：
+    #    追问时放在最前面；这句话本身什么都没查到（“还真是”“哈哈”），放在后面备用；别的时候不带
+    if carried:
+        strong = max([sc for sc, _ in direct] + [0.0]) >= 1.3
+        if (followup and not strong) or not direct:
+            have = {p[0] for p in picks}
+            extra_picks = [(label, kind + "·刚才聊到的", content) for label, kind, content in carried["picks"] if label not in have]
+            picks = extra_picks[:1] + picks if followup else picks + extra_picks[:1]
+            carried["left"] -= 1
     picks = char_picks + picks
     if not picks:
         return ""
     body = "\n\n".join(f"〔{kind}｜{label}〕\n{content}" for label, kind, content in picks)
     logger.info(f"回忆命中：{[p[0] for p in picks]}")
     return f"{RECALL_RULES}\n\n{body}"
+
+
+_diary_topic: dict[str, float] = {}    # 会话 -> 上次聊到她日记 / 说说的时间
+
+
+def diary_followup(key: str, text: str) -> bool:
+    """刚才在聊她的日记，这句是在接着追问（“然后呢”“还有吗”、很短的一句）"""
+    at = _diary_topic.get(key)
+    if not at or time.time() - at > 600:
+        return False
+    return len(text.strip()) <= 8 or any(w in text for w in _FOLLOWUP_WORDS + ("还有吗", "写了什么", "写的什么"))
+
+
+def note_topic(key: str, reply: str) -> None:
+    """她这一轮讲了哪段经历：用她自己说的话查一下，查到很像的就记下，接下来几轮对方追问时接着带上"""
+    if not _kb or len(reply) < 8:
+        return
+    sums = [(s / cfg.knowledge_min_summary_score, d) for s, d in _kb.search(reply, "summary", 5)]
+    texts = [(s / cfg.knowledge_min_chunk_score * 0.8, d) for s, d in _kb.search(reply, "text", 5)]
+    cand = sums + texts
+    cur = _last_recall.get(key)
+    if cur and time.time() - cur["at"] <= RECALL_CARRY_MINUTES * 60:
+        # 还在聊刚才那段：她这句话和那段也沾边，就接着记那段（别被她话里的一两个词带去别的经历）
+        labels = {p[0] for p in cur["picks"]}
+        if any(d.label in labels and sc >= 0.6 for sc, d in cand):
+            cur["at"], cur["left"] = time.time(), RECALL_CARRY_TURNS
+            return
+    best = max(cand, key=lambda x: x[0], default=None)
+    if not best or best[0] < 1.3:
+        return
+    label = best[1].label
+    # 同一段经历有摘要就带摘要（有来龙去脉和结局），没有就带那段原文
+    summary = next((d for d in _kb.docs if d.kind == "summary" and d.label == label), None)
+    doc, kind = (summary, "摘要") if summary else (best[1], "原文" if best[1].kind == "text" else "摘要")
+    size = cfg.knowledge_summary_chars if kind == "摘要" else cfg.knowledge_chunk_chars
+    _last_recall[key] = {"at": time.time(), "picks": [(label, kind, doc.content[:size])], "left": RECALL_CARRY_TURNS}
 
 
 # ------------------------------------------------------------------ 记忆
@@ -323,7 +385,72 @@ _HEAD_BAD_RE = re.compile(r"[【】\[\]［］→\r\n]")
 
 def _clean_name(name) -> str:
     """说话人名字里去掉【】→ 这些格式符号，免得有人改群名片冒充别人、冒充格式"""
-    return _HEAD_BAD_RE.sub("", str(name or "")).strip()[:16] or "某人"
+    name = _HEAD_BAD_RE.sub("", str(name or "")).strip()
+    name = _DUP_MARK_RE.sub("", name).strip()       # 名片里自己写“#2”冒充重名记号：去掉
+    return name[:16] or "某人"
+
+
+_DUP_MARK_RE = re.compile(r"#\d{1,2}$")
+
+
+# ---- 重名：同一个群里两个人名字一样时，后来的那位标成“名字#2”（#3……），先出现的不标
+# 按群记在 data/same_names.json：群号 -> 名字 -> {QQ: [第一次见到, 最近一次见到]}；30 天没出现的不算
+_same_names: dict | None = None
+SAME_NAME_ACTIVE_DAYS = 30
+
+
+def _names_reg() -> dict:
+    global _same_names
+    if _same_names is None:
+        try:
+            _same_names = json.loads(_SAME_NAMES_FILE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            _same_names = {}
+    return _same_names
+
+
+def _save_names_reg() -> None:
+    try:
+        now = time.time()
+        for g in _names_reg().values():                      # 90 天没出现的删掉
+            for n in list(g):
+                g[n] = {q: v for q, v in g[n].items() if now - v[1] <= 90 * 86400}
+                if not g[n]:
+                    del g[n]
+        tmp = _SAME_NAMES_FILE.with_name(_SAME_NAMES_FILE.name + ".tmp")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(_names_reg(), ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_SAME_NAMES_FILE)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"重名记录存盘失败：{e}")
+
+
+def name_label(gid: int | None, qq, name) -> str:
+    """群里的称呼：名字和别人重了，就按先来后到加“#2”“#3”；没重名就是原名"""
+    n = _clean_name(name)
+    if not gid or not str(qq).isdigit() or n == "某人":
+        return n
+    owners = _names_reg().setdefault(str(gid), {}).setdefault(n, {})
+    now, q = time.time(), str(qq)
+    rec = owners.get(q)
+    if rec is None:
+        owners[q] = [now, now]
+        _save_names_reg()
+    elif now - rec[1] > 86400:                              # 最近一次见到的时间，一天更新一次就够
+        rec[1] = now
+        _save_names_reg()
+    active = sorted((v[0], k) for k, v in owners.items() if k == q or now - v[1] <= SAME_NAME_ACTIVE_DAYS * 86400)
+    if len(active) <= 1:
+        return n
+    k = [x for _, x in active].index(q) + 1
+    return n if k == 1 else f"{n}#{k}"
+
+
+def sender_label(event: MessageEvent) -> str:
+    """说话人在聊天记录里的名字：群里重名的会带“#2”；私聊就是原名"""
+    if isinstance(event, GroupMessageEvent):
+        return name_label(event.group_id, event.user_id, sender_name(event))
+    return sender_name(event)
 
 
 def clean_body(text: str) -> str:
@@ -341,7 +468,7 @@ def _her_names() -> list[str]:
 
 def _display_name(name) -> str:
     """群友的名字和她一模一样（或者就是她的名字加一两个字）：标成“（群友）”，免得她以为是自己、或者以为别人在叫她"""
-    n = _clean_name(name)
+    n = _HEAD_BAD_RE.sub("", str(name or "")).strip()[:20] or "某人"    # 传进来的已经是 name_label 整理过的，保留“#2”
     plain = re.sub(r"\s", "", n).lower()
     for her in _her_names():
         h = her.lower()
@@ -353,7 +480,7 @@ def _display_name(name) -> str:
 def speaker_head(event: MessageEvent, you: str = "你") -> str:
     """群消息的说话人和对象，单独写在正文前面：
     【Dev_Yanxi → 魔女西西】  【魔女西西 → Dev_Yanxi（回复）】  【鲨鱼（管理员）→ 你】  【羽水墨】（没指定对象）"""
-    name = _display_name(sender_name(event))
+    name = _display_name(sender_label(event))
     if not isinstance(event, GroupMessageEvent):
         return f"【{name}】"
     self_id = str(event.self_id)
@@ -368,13 +495,14 @@ def speaker_head(event: MessageEvent, you: str = "你") -> str:
             elif qq == "all":
                 targets.append("全体")
             else:
-                targets.append(_display_name(seg.data.get("name") or qq))
+                targets.append(_display_name(name_label(event.group_id, qq, seg.data.get("name") or qq)))
     reply = getattr(event, "reply", None)
     if reply is not None:
         if str(getattr(reply.sender, "user_id", "")) == self_id:
             targets.append(you)
         else:
-            targets.append(_display_name(reply.sender.card or reply.sender.nickname or reply.sender.user_id) + "（回复）")
+            targets.append(_display_name(name_label(event.group_id, getattr(reply.sender, "user_id", ""),
+                                                    reply.sender.card or reply.sender.nickname or reply.sender.user_id)) + "（回复）")
     targets = list(dict.fromkeys(targets))[:3]
     return f"【{name} → {'、'.join(targets)}】" if targets else f"【{name}】"
 
@@ -447,6 +575,7 @@ _PREFIX_RE = re.compile(r"^\s*(?:【[^】]{1,40}】|[^\s【】]{1,16}\s*→\s*[^
 
 def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) -> str:
     text = _PREFIX_RE.sub("", text.strip())
+    text = re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text)     # 重名记号“小明#2”：她说出来时去掉
     if not keep_sticker:                  # 写信、空间评论这些地方发不了表情：模型写了表情标记就去掉
         text = _FAKE_MEDIA_RE.sub("", _STICKER_RE.sub("", text)).strip()
     if len(text) >= 2 and text[0] in "“\"" and text[-1] in "”\"":
@@ -568,7 +697,7 @@ def sticker_roll(target: str, fam: str, is_group: bool, group_id: int | None, se
         return False, allowed, []
     if time.monotonic() - _last_sticker.get(target, -1e9) < cfg.sticker_min_interval:
         return False, allowed, emotions
-    if quota_left(group_id if is_group else None) < 2:     # 限额只剩最后一条了：留给文字
+    if quota_left(group_id if is_group else None, None if is_group else int(target.split("_")[1])) < 2:     # 限额只剩最后一条了：留给文字
         return False, allowed, emotions
     p = cfg.sticker_self_react_prob if self_image else cfg.sticker_prob * cfg.sticker_tier_multiplier.get(fam, 1.0)
     return random.random() < p, allowed, emotions
@@ -611,8 +740,10 @@ def split_sticker(reply: str) -> tuple[str, str | None]:
 FAMILIARITY_HINT = {
     "disliked": "（对方是你讨厌的人——之前骂过你、骚扰过你或一直惹你烦：明显不耐烦、爱答不理，回得极短，"
                 "比如“哦。”“有事？”“……”“你还敢来？”。对方讨好你也不会马上改观，除非他真心道歉。）",
-    "stranger": "（对方和你不太熟：客气、有分寸，话少一点、保持距离——像旅途中对初次见面的人那样礼貌，但不热络、不主动关心、不说亲昵的话。"
+    "stranger": "（对方和你不太熟：客气、有分寸，话少一点、保持距离——像旅途中对初次见面的人那样用敬语、礼貌，但不热络、不主动关心、不说亲昵的话。"
                 "对方正常说话、打招呼、问问题，就好好回，语气可以淡，但不要凶、不要反问“你谁啊”、不要随便说“蛤？”。"
+                "对方说到你好奇的事可以问一句；被当面夸可爱会有点不好意思（“谢、谢谢……”），不要回“我知道”；"
+                "对方胡搅蛮缠、说荒唐话时，可以礼貌地损一句（“我可以回去了吗？”），但不骂人。"
                 "只有对方越界（一上来就告白、调情、叫你宝宝老婆、说过分亲昵的话）时，才冷下来拒绝，比如“……我们才刚认识吧。”“请不要说这种奇怪的话。”；"
                 "被骂、被恶意冒犯才毒舌回去。）",
     "acquaintance": "（对方是和你说过不少话的熟人：可以随意些，偶尔毒舌调侃，但保持距离感，不黏人、不嘘寒问暖。"
@@ -850,20 +981,32 @@ _global_window: deque = deque()
 
 _hour_window: deque = deque()
 _group_hour: dict[int, deque] = defaultdict(deque)
+_private_hour: dict[int, deque] = defaultdict(deque)   # QQ -> 这一小时私聊发给这个人的条数（各人分开算）
 _farewell_at: dict[str, float] = {}      # 限额范围 -> 上次说“我要上路了”的时间
 _active_chats: dict[str, dict] = {}      # 会话（group_群号 / private_QQ）-> 她最近一次在这里说话的时间和对象
 
 
-def quota_left(group_id: int | None) -> int:
-    """这一小时里还能回几条（全局和本群取小的）"""
+def _scope(group_id: int | None, user_id: int | None) -> "tuple[deque, int] | tuple[None, None]":
+    """这条回复算在哪个范围的额度里：群聊按群，私聊按人；都没有（比如空间评论）就只算全局"""
+    if group_id:
+        return _group_hour[group_id], cfg.group_rate_per_hour
+    if user_id:
+        return _private_hour[user_id], cfg.private_rate_per_hour
+    return None, None
+
+
+def quota_left(group_id: int | None, user_id: int | None = None) -> int:
+    """这一小时里还能回几条（全局和这个群 / 这个人的私聊取小的）；两个都不给就只看全局"""
     now = time.monotonic()
     left = cfg.global_rate_per_hour - sum(1 for t in _hour_window if now - t <= 3600)
-    if group_id:
-        left = min(left, cfg.group_rate_per_hour - sum(1 for t in _group_hour[group_id] if now - t <= 3600))
+    q, limit = _scope(group_id, user_id)
+    if q is not None:
+        left = min(left, limit - sum(1 for t in q if now - t <= 3600))
     return left
 
 
-def rate_limited(user_id: int, group_id: int | None = None) -> str | None:
+def rate_limited(user_id: int, group_id: int | None = None, private: bool = False) -> str | None:
+    """private=True：私聊，按这个人单独算每小时额度"""
     now = time.monotonic()
     if now - _last_trigger.get(user_id, -1e9) < cfg.user_cooldown:
         return "cooldown"
@@ -875,18 +1018,46 @@ def rate_limited(user_id: int, group_id: int | None = None) -> str | None:
         _hour_window.popleft()
     if len(_hour_window) >= cfg.global_rate_per_hour:
         return "hourly"
-    gq = _group_hour[group_id] if group_id else None
+    gq, limit = _scope(group_id, user_id if private else None)
     if gq is not None:
         while gq and now - gq[0] > 3600:
             gq.popleft()
-        if len(gq) >= cfg.group_rate_per_hour:
-            return "group_hourly"
+        if len(gq) >= limit:
+            return "group_hourly" if group_id else "private_hourly"
     _last_trigger[user_id] = now
     _global_window.append(now)
     _hour_window.append(now)
     if gq is not None:
         gq.append(now)
     return None
+
+
+def _refund(stamp: float, group_id: int | None, user_id: int | None = None) -> None:
+    """占了额度最后却没说话（模型出错、她不想接、出戏句子删光了、没发出去）：把这一条退回去"""
+    for dq in (_hour_window, _global_window, _scope(group_id, user_id)[0]):
+        if dq is None:
+            continue
+        try:
+            dq.remove(stamp)
+        except ValueError:
+            pass
+
+
+def _has_quota(gid: int | None, user_id: int | None = None) -> bool:
+    """还有没有额度（只看，不占）"""
+    now = time.monotonic()
+    if sum(1 for t in _global_window if now - t <= 60) >= cfg.global_rate_per_minute:
+        return False
+    return quota_left(gid, user_id) > 0
+
+
+def _count_sent(group_id: int | None, user_id: int | None = None) -> None:
+    """多发了一条（分条的后几条、表情、“在忙”、告别）：算进每小时的额度（全局 + 这个群 / 这个人的私聊）"""
+    now = time.monotonic()
+    _hour_window.append(now)
+    q = _scope(group_id, user_id)[0]
+    if q is not None:
+        q.append(now)
 
 
 def typing_delay(reply: str) -> float:
@@ -904,6 +1075,29 @@ def bubble_gap(bubble: str) -> float:
 # 她只有一双手：同一时间只给一个人打字、发消息，其他人排队
 _hands = asyncio.Lock()
 _last_sent: dict = {"target": None, "at": -1e9}
+
+
+# 她自己说了“我要去赶路了”“先走了”：接下来 20～60 分钟真的不在这个群 / 私聊（不然说完要走还接着聊，很怪）
+_LEAVE_RE = re.compile(r"(我?(要|得|该|先)(去)?赶路了|赶路去了|先走了|先失陪|我?得走了|我走了|该走了|有缘再见|下次再聊|先不聊了|我先撤|"
+                       r"我?(先)?去睡了|我先睡了|先下了|改天再聊)")
+_away: dict[str, dict] = {}              # 会话 -> {"until": 回来的时间, "said": 说要走的时间, "line": 那句话}
+
+
+def away_left(target: str) -> float:
+    """她说过要走、还要几秒才回来（0 = 在）"""
+    a = _away.get(target)
+    return max(0.0, a["until"] - time.time()) if a else 0.0
+
+
+def note_leaving(target: str, said: str) -> bool:
+    """她这轮说的话里有“要走了”：记下来，接下来一阵子不在"""
+    if cfg.leave_minutes_max <= 0 or not said or not _LEAVE_RE.search(said):
+        return False
+    lo, hi = sorted((cfg.leave_minutes_min, cfg.leave_minutes_max))
+    now = time.time()
+    _away[target] = {"until": now + random.uniform(lo, hi) * 60, "said": now, "line": said.split("\n")[-1]}
+    logger.info(f"她说要走了（{said[-20:]}）：{target} 接下来 {(_away[target]['until'] - now) / 60:.0f} 分钟不回")
+    return True
 
 
 def _target_of(event: MessageEvent) -> str:
@@ -945,7 +1139,7 @@ async def _is_group_not_to_me(event: MessageEvent) -> bool:
 # ------------------------------------------------------------------ 命令
 # 所有指令都只有管理员能用；别人发指令她当没看见（不回、不当成聊天）
 ADMIN_COMMANDS = ("重置", "清空记忆", "reset", "重载人设", "认图", "表情", "表情包", "记忆", "查看记忆",
-                  "好感", "好感度", "性别", "忘记", "删除记忆", "写信", "说说", "插话", "冒泡")
+                  "好感", "好感度", "性别", "忘记", "删除记忆", "写信", "说说", "插话", "冒泡", "搭话")
 
 
 def is_admin_command(text: str, command_start) -> bool:
@@ -953,7 +1147,8 @@ def is_admin_command(text: str, command_start) -> bool:
     for start in command_start or {"/"}:
         if start and t.startswith(start):
             name = t[len(start):].lstrip()
-            return any(name == c or name.startswith(c + " ") or name.startswith(c) for c in ADMIN_COMMANDS)
+            # 只认“正好是指令”或“指令后面跟空格”：“/表情真可爱”不算指令
+            return any(name == c or name.startswith(c + " ") for c in ADMIN_COMMANDS)
     return False
 
 
@@ -1244,7 +1439,7 @@ def others_spoke_since(gid: int, uid: int, since: float) -> bool:
 async def _(event: GroupMessageEvent):
     _group_seq[event.group_id] += 1
     _speakers[event.group_id].append((time.monotonic(), event.user_id))
-    ltm.note_name(event.group_id, event.user_id, sender_name(event))
+    ltm.note_name(event.group_id, event.user_id, sender_label(event))
 
 
 # ------------------------------------------------------------------ 旁听（没 @ 的群消息）
@@ -1259,8 +1454,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
     body = message_to_text(event.get_message(), drop_at=True) or "（只@了一下）"
     line = speaker_head(event) + clean_body(clip_input(body))
     if cfg.passive_buffer > 0:
-        _passive[event.group_id].append((event.user_id, sender_name(event), line, time.time()))
-    _recent_chat[event.group_id].append((time.monotonic(), event.user_id, sender_name(event), line))
+        _passive[event.group_id].append((event.user_id, sender_label(event), line, time.time()))
+    _recent_chat[event.group_id].append((time.monotonic(), event.user_id, sender_label(event), line))
     if cfg.interject_enabled:
         await maybe_interject(bot, event.group_id, text)
 
@@ -1277,7 +1472,7 @@ JUDGE_PROMPT = """判断群聊里的一条新消息，是不是在跟“伊蕾�
 {recent}
 新消息：{line}
 
-格式说明：每条是「【说话人 → 对象】正文」。“→ 伊蕾娜”是在跟她说；“→ 别的名字”是在跟那个人说（名字后面标“（群友）”的是和她同名的群友，不是她）；没有“→”是随口说给大家的。
+格式说明：每条是「【说话人 → 对象】正文」。“→ 伊蕾娜”是在跟她说；“→ 别的名字”是在跟那个人说（名字后面标“（群友）”的是和她同名的群友，不是她；带“#2”“#3”的是和别人重名的另一位群友）；没有“→”是随口说给大家的。
 
 如果新消息是在叫她、问她、对她说话、回应她刚才的话，或者在谈论她并明显希望她回应，回答“是”。
 刚和她聊着的人接着用“你”问她问题，就是在问她，回答“是”。但群里人多时，“你”常常是在说别人，要看上下文。
@@ -1288,8 +1483,13 @@ JUDGE_PROMPT = """判断群聊里的一条新消息，是不是在跟“伊蕾�
 只输出一个字：是 或 否。"""
 
 
+_Q_TAILS = ("吗", "呢", "是吧", "对吧", "不是吧", "什么", "怎么", "为啥", "干嘛", "干啥", "咋样", "咋办")
+
+
 def _looks_like_question(text: str) -> bool:
-    return any(c in text for c in "?？") or text.endswith(("吗", "呢", "吧", "嘛"))
+    # 9/28：结尾“吧”“嘛”不再一律算问句（“好吧”“行吧”“算了吧”是应一声，不是在问）；只认“是吧”“对吧”这种
+    t = text.rstrip(" ~～。.!！…")
+    return any(c in text for c in "?？") or t.endswith(_Q_TAILS)
 
 
 def _as_third_person(text: str) -> str:
@@ -1334,6 +1534,13 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
         return False
     if is_bot_like(event):                 # 别的机器人（Markdown、卡片消息）：不理，免得两个机器人对着聊
         return False
+    if isinstance(event, PrivateMessageEvent) and is_friend_verify(event.user_id, message_to_text(event.get_message()), event.time):
+        logger.info(f"加好友的验证消息 / 系统提示，不回 user={event.user_id}：{message_to_text(event.get_message())[:30]}")
+        return False
+    if quiet_left() > 0:                   # 刚被踢下线又上线：先安静一会儿（私聊之后会补回）
+        if event.is_tome():
+            logger.info(f"刚重新上线，还要安静 {quiet_left() / 60:.1f} 分钟，先不回 user={event.user_id}")
+        return False
     if event.is_tome():
         if isinstance(event, GroupMessageEvent):
             _engaged[(event.group_id, event.user_id)] = now
@@ -1350,18 +1557,18 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
     gid = event.group_id
     names = [n for n in list(cfg.smart_names) + list(bot.config.nickname or []) if n]
     plain = event.get_plaintext()          # 只看文字：@别人的名字、回复的原文都不算
-    mentioned = any(n in plain for n in names)
+    mentioned = any(n.lower() in plain.lower() for n in names)   # 不区分大小写：ELAINA 也算
     # @ 了别人、或者回复的是别人的消息：在跟那个人说话，她不接（除非文字里点了她的名）
     other = talking_to_others(event)
     if other and not mentioned:
         logger.info(f"在跟别人说话（{other}），不接：群{gid} {sender_name(event)}：{text[:30]}")
         return False
-    # 连续发言：她刚回过的人接着说。话里带“你”、问句、叫她名字，或者这期间没别人插话，才直接算在跟她说；
-    # 否则群里人多、这话可能是对别人说的，交给下面判断
+    # 连续发言：她刚回过的人接着说。叫了她名字，或者这期间没别人插话（一对一在聊），才直接算在跟她说；
+    # 这期间有别人说过话时，就算带“你”、是问句，也可能是对别人说的，交给下面判断（9/28 收紧）
     in_followup = now - _engaged.get((gid, event.user_id), -1e9) <= cfg.followup_window
     if in_followup:
         since = _replied_at.get((gid, event.user_id), _engaged.get((gid, event.user_id), now))
-        if "你" in plain or mentioned or _looks_like_question(plain) or not others_spoke_since(gid, event.user_id, since):
+        if mentioned or not others_spoke_since(gid, event.user_id, since):
             _engaged[(gid, event.user_id)] = now
             logger.info(f"接着说，直接回：群{gid} {sender_name(event)}：{text[:30]}")
             return True
@@ -1428,6 +1635,33 @@ _token_counter = 0
 
 
 _inbox_first: dict[tuple[str, int], float] = {}   # (会话, QQ) -> 这一批第一条消息到的时间
+_look_later: dict[tuple[str, int], list] = defaultdict(list)   # (会话, QQ) -> [(在收件箱里的位置, 消息事件)]：有图，要回的时候再看
+
+
+def has_images(event: MessageEvent) -> bool:
+    """这条消息（或它引用的消息）里有没有图片"""
+    if any(seg.type == "image" for seg in event.get_message()):
+        return True
+    reply = getattr(event, "reply", None)
+    return reply is not None and any(seg.type == "image" for seg in reply.message)
+
+
+def _take_inbox(ik: tuple[str, int]) -> list[str]:
+    _look_later.pop(ik, None)
+    return _inbox.pop(ik, [])
+
+
+async def look_at_images(ik: tuple[str, int], drop_at: bool) -> None:
+    """确定要回了：把收件箱里带图的几条换成看过图的说法（调模型看图）"""
+    todo = _look_later.pop(ik, [])
+    box = _inbox.get(ik)
+    for pos, ev in todo:
+        if box is None or pos >= len(box):
+            continue
+        try:
+            box[pos] = await rich_text(ev, look=True, drop_at=drop_at) or box[pos]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"看图失败，按没看处理：{e}")
 _reply_started: dict[tuple[str, int], float] = {}  # (会话, QQ) -> 她开始回这个人的时间
 _reply_done: dict[tuple[str, int], float] = {}     # (会话, QQ) -> 她回完这个人的时间
 
@@ -1476,12 +1710,17 @@ def merge_delay(text: str, names: list[str] | tuple = ()) -> float:
     return cfg.merge_wait
 
 
-async def wait_for_more(ik: tuple[str, int], text: str, names: list[str] | tuple = ()) -> int | None:
-    """放进收件箱等一会儿（按话说完没说完决定等多久）；期间同一个人又发了新消息，返回 None（让最新那条来回复）"""
+async def wait_for_more(ik: tuple[str, int], text: str, names: list[str] | tuple = (),
+                        look: "MessageEvent | None" = None) -> int | None:
+    """放进收件箱等一会儿（按话说完没说完决定等多久）；期间同一个人又发了新消息，返回 None（让最新那条来回复）。
+    look：这条有图，确定要回的时候再看"""
     global _token_counter
     now = time.monotonic()
     if not _inbox[ik]:
         _inbox_first[ik] = now
+        _look_later.pop(ik, None)
+    if look is not None:
+        _look_later[ik].append((len(_inbox[ik]), look))
     _inbox[ik].append(text)
     _token_counter += 1
     token = _inbox_token[ik] = _token_counter
@@ -1529,7 +1768,10 @@ async def converse(bot: Bot, event: MessageEvent, catchup_age: float | None = No
 
 async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = None) -> None:
     global _token_counter
-    text = await rich_text(event, look=cfg.vision_in_peak or not in_peak(), drop_at=isinstance(event, GroupMessageEvent))
+    # 先不调模型看图（本机角色识别照常，免费）：等确定要回了再看，被合并、限流、跳过的消息就不花这个钱
+    drop_at = isinstance(event, GroupMessageEvent)
+    text = await rich_text(event, look=False, drop_at=drop_at)
+    look_later = has_images(event) and cfg.vision_enabled and (cfg.vision_in_peak or not in_peak())
     if not text:
         text = "（@了你一下，没说话）"
 
@@ -1548,7 +1790,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             and not _inbox.get(ik) and sticker_follows_reply(ik)):
         async with _locks[key]:
             history = get_history(key)
-            name = sender_name(event)
+            name = sender_label(event)
             history.append({"role": "user", "content": speaker_head(event) + clean_body(text) if is_group else text,
                             "uid": event.user_id, "name": name, "ts": time.time()})
             save_history(key)
@@ -1556,13 +1798,37 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         return
     if catchup_age is None:
         names = list(cfg.smart_names) + list(getattr(bot.config, "nickname", None) or [])
-        token = await wait_for_more(ik, text, names)
+        token = await wait_for_more(ik, text, names, event if look_later else None)
         if token is None:
             return
+        if isinstance(event, PrivateMessageEvent) and len(_inbox.get(ik, [])) == 1 \
+                and is_friend_verify(event.user_id, text, event.time):
+            # “我是某某”这种验证消息先到、“加好友成功”的通知后到：等过这几秒再看一次
+            _take_inbox(ik)
+            logger.info(f"加好友的验证消息，不回 user={event.user_id}：{text[:30]}")
+            return
     else:                                 # 补回未读：几条已经合在一起了，不用再等
+        if not _inbox[ik]:
+            _look_later.pop(ik, None)
+        if look_later:
+            _look_later[ik].append((len(_inbox[ik]), event))
         _inbox[ik].append(text)
         _token_counter += 1
         token = _inbox_token[ik] = _token_counter
+
+    # 她刚说过“我要去赶路了”：这段时间真的不在，对方的话记下来，回来以后再说
+    target = _target_of(event)
+    if catchup_age is None and away_left(target) > 0:
+        texts = _take_inbox(ik)
+        if texts:
+            async with _locks[key]:
+                history = get_history(key)
+                joined = clip_input("\n".join(texts))
+                history.append({"role": "user", "content": speaker_head(event) + clean_body(joined) if is_group else joined,
+                                "uid": event.user_id, "name": sender_label(event), "ts": time.time()})
+                save_history(key)
+        logger.info(f"她说过要走了，还有 {away_left(target) / 60:.0f} 分钟才回来，先不回 {target} user={event.user_id}")
+        return
 
     # 水话（“哈哈”“嗯”“好的”、一个表情）：按关系远近，有一定概率直接不接话（不调用模型）
     pending = _inbox.get(ik, [])
@@ -1570,8 +1836,8 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         async with _locks[key]:
             history = get_history(key)
             if not she_asked(history) and random.random() < cfg.skip_filler_prob.get(familiarity_of(event.user_id), 0.5):
-                texts = _inbox.pop(ik, [])
-                name = sender_name(event)
+                texts = _take_inbox(ik)
+                name = sender_label(event)
                 joined = clip_input("\n".join(texts))
                 history.append({"role": "user", "content": speaker_head(event) + clean_body(joined) if is_group else joined,
                                 "uid": event.user_id, "name": name, "ts": time.time()})
@@ -1586,15 +1852,19 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         recent_real = now - _peak_last_real.get(event.user_id, -1e9) < cfg.peak_user_interval
         recent_busy = now - _peak_last_busy.get(event.user_id, -1e9) < cfg.peak_user_interval
         if recent_real or random.random() < cfg.peak_busy_prob:
-            texts = _inbox.pop(ik, [])
+            texts = _take_inbox(ik)
             if recent_busy or not texts:
                 logger.info(f"高峰时段，忙着没回 user={event.user_id}")
                 return
+            if quota_left(event.group_id if is_group else None, None if is_group else event.user_id) <= 0:     # “在忙”也算一条，额度用完就不回了
+                logger.info(f"高峰时段，额度用完了，“在忙”也不回 user={event.user_id}")
+                return
             _peak_last_busy[event.user_id] = now
+            _count_sent(event.group_id if is_group else None, None if is_group else event.user_id)
             line = peak.busy_line()
             async with _locks[key]:
                 history = get_history(key)
-                name = sender_name(event)
+                name = sender_label(event)
                 joined = clip_input("\n".join(texts))
                 history.append({"role": "user", "content": speaker_head(event) + clean_body(joined) if is_group else joined,
                                 "uid": event.user_id, "name": name, "ts": time.time()})
@@ -1603,18 +1873,22 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             await asyncio.sleep(random.uniform(cfg.peak_extra_delay_min, cfg.peak_extra_delay_max))
             async with _hands:
                 await switch_pause(_target_of(event))
-                await bot.send(event, line)
+                try:
+                    await bot.send(event, line)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"“在忙”没发出去：{e}")
+                    return
                 mark_sent(_target_of(event))
             return
         _peak_last_real[event.user_id] = now
 
     # 被讨厌的人：有一定概率直接不理（不花 token）
     if familiarity_of(event.user_id) == "disliked" and random.random() < cfg.dislike_ignore_prob:
-        _inbox.pop(ik, None)
+        _take_inbox(ik)
         logger.info(f"讨厌的人，不想理 user={event.user_id}")
         return
 
-    limited = rate_limited(event.user_id, event.group_id if is_group else None)
+    limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group)
     waited = 0.0
     while limited in ("cooldown", "global"):
         # 个人冷却 / 这一分钟回太多了：排队等一等再回，而不是直接丢掉
@@ -1629,15 +1903,20 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         waited += wait
         if _inbox_token.get(ik) != token:
             return
-        limited = rate_limited(event.user_id, event.group_id if is_group else None)
+        limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group)
     if limited:
         logger.info(f"限流跳过 user={event.user_id} reason={limited}")
-        _inbox.pop(ik, None)
+        _take_inbox(ik)
         return
     admitted_at = time.monotonic()           # 这条从这时开始算“要回”；之后如果已经告别了，就不发了
+    stamp = _hour_window[-1] if _hour_window else admitted_at      # 这次占用的额度（最后没发出去就退回）
+    gid_q = event.group_id if is_group else None
+    uid_q = None if is_group else event.user_id
+    if _look_later.get(ik):
+        await look_at_images(ik, drop_at)
 
     async with _locks[key]:
-        texts = _inbox.pop(ik, [])
+        texts = _take_inbox(ik)
         if not texts:                     # 已经被前一条合并回复过了
             return
         _reply_started[ik] = time.monotonic()
@@ -1646,7 +1925,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         history = get_history(key)
         new_entries: list[dict] = []
 
-        name = sender_name(event)
+        name = sender_label(event)
         if is_group and _passive.get(event.group_id):
             buf = list(_passive.pop(event.group_id))
             new_entries.append({
@@ -1668,21 +1947,33 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         prev_user = next((h["content"] for h in reversed(history) if h["role"] == "user"), "")
         prev_bot = next((h["content"] for h in reversed(history) if h["role"] == "assistant"), "")
         # 高峰时段不检索小说（省 token）
-        memo = recall(text, f"{prev_user[-60:]} {prev_bot[-120:]}") if cfg.knowledge_enabled and not busy else ""
+        # 在聊她的日记 / 说说（“有今天的旅行日记吗”“然后呢”）：给她日记的真实情况，不去翻以前的旅途故事，
+        # 免得把小说里某段“日记”的故事当成今天的日记讲
+        diary_force = diary_followup(key, text)
+        diary_memo = qzone_diary.diary_context(text, force=diary_force)
+        if diary_memo and qzone_diary.asks_today_diary(text, diary_force):
+            _diary_topic[key] = time.time()
+            _last_recall.pop(key, None)
+            memo = ""
+        else:
+            memo = recall(text, f"{prev_user[-60:]} {prev_bot[-120:]}", key) if cfg.knowledge_enabled and not busy else ""
         long_memo = ltm.context_for(event.user_id, name, event.group_id if is_group else None)
         mode = "busy" if busy else reply_mode(text)
         fam = familiarity_of(event.user_id)
         length_hint = short_hint(text) if mode == "short" else LENGTH_HINT[mode]
         time_memo = time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))
+        back = _away.pop(target, None)                # 她之前说要走、现在回来了
+        if back:
+            time_memo = "\n".join(x for x in (time_memo, f"【刚回来】你 {human_gap(time.time() - back['said'])}前说了要走（“{back['line'][:20]}”），现在才回来。"
+                                                            "可以自然地带一句刚回来，不要装作没说过要走；这段时间对方发的话在上面。") if x)
         gender_memo = gender_step(event.user_id, text)
         gifts = detect_gifts(text)
         bread_first = any(k == "bread" for k, _ in gifts) and not ltm.bread_given_today(event.user_id)
         gift_memo = "\n".join(gift_hint(k, snip[:20], bread_first, fam) for k, snip in gifts)
-        diary_memo = qzone_diary.diary_context(text)     # 有人提到她的说说：告诉她最近写了什么
         late_memo = ""
         if catchup_age is not None:
             late_memo = (f"【刚看到】对方这几条消息是你不在的时候发的，最早一条已经是 {human_gap(catchup_age)}前了，你现在才看到。"
-                         "回的时候可以随口带一句刚看到（比如“刚才在赶路，没看消息”），一句带过就行，"
+                         "回的时候可以随口带一句刚看到（比如“刚才在赶路”“刚在旅馆睡了一觉”“刚才在集市逛了逛”“刚在写日记”，换着说，别总用同一个理由），一句带过就行，"
                          "不要提掉线、离线、手机、网络这类词，也不用道歉。")
         # 表情：先抽签，抽中了才告诉她这轮可以甩一张（有人发她的画像时更容易抽中）
         target = _target_of(event)
@@ -1741,6 +2032,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             # 出错时不在聊天里发任何东西；余额不足 / Key 失效私信管理员
             kind = classify_error(e)
             logger.error(f"DeepSeek 调用失败（{kind or '其他错误'}），本条不回复：{e}")
+            _refund(stamp, gid_q, uid_q)
             if kind:
                 await alert_admins(bot, kind)
             return
@@ -1753,6 +2045,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 save_history(key)
                 ltm.bump_talk(event.user_id, name)
                 logger.info(f"她觉得没必要接话 user={event.user_id}：{text[:20]}")
+                _refund(stamp, gid_q, uid_q)
                 return
             reply, emotion = rest, None       # 写了“[不回]”又写了话：以话为准
 
@@ -1765,6 +2058,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             else:
                 logger.info(f"表情：这轮没抽中，忽略她写的“{emotion}”")
         if not reply and not sticker:
+            _refund(stamp, gid_q, uid_q)
             return
         sticker_note = ""
         if sticker:
@@ -1776,17 +2070,12 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         save_history(key)
         tier_now = familiarity_of(event.user_id)     # 按说这句话时的关系算
         ltm.bump_talk(event.user_id, name)
-        if bread_first:                               # 今天第一次送面包：收下（讨厌的人送的不加分）
-            ltm.take_bread(event.user_id, 0 if tier_now == "disliked" else cfg.gift_bread_affection)
         hit = next((w for w in cfg.taboo_words if w in text), None)
         if hit:
             k = cfg.taboo_tier_multiplier.get(tier_now, 1.0)
             if k > 0:
                 ltm.taboo_penalty(event.user_id, cfg.taboo_penalty * k, cfg.taboo_daily_max * k,
                                   f"说她{hit}（{ltm.TIER_NAMES.get(tier_now, tier_now)}）")
-        # 这一轮交给长期记忆：攒够一批就在后台整理档案、评估好感
-        # 长期记忆不需要知道她甩了哪张画像；只发了表情的，给一个简短的说法
-        ltm.add_pending(key, new_entries + [{"role": "assistant", "content": reply or f"（甩了一张{sticker['tags'][0]}的表情）"}])
 
     bubbles = split_bubbles(reply) if reply else []
     # 同一时间只给一个人打字：别人的回复要等这边发完
@@ -1795,11 +2084,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         bye_at = max(_farewell_at.get("global", -1e9), _farewell_at.get(target, -1e9))
         if bye_at > admitted_at:
             logger.info(f"已经告别了，这条不发：{target} user={event.user_id}")
-            async with _locks[key]:
-                h = get_history(key)
-                if h and h[-1].get("role") == "assistant" and h[-1].get("content") == record:
-                    h.pop()
-                    save_history(key)
+            _unrecord(key, record)
             return
         await switch_pause(target)
         delay = typing_delay(bubbles[0] if bubbles else "")
@@ -1807,24 +2092,35 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             delay += random.uniform(cfg.peak_extra_delay_min, cfg.peak_extra_delay_max)
         await asyncio.sleep(delay)
 
+        sent = 0
         for i, bubble in enumerate(bubbles):
             if i > 0:
                 await asyncio.sleep(bubble_gap(bubble))            # 后面几条：像在接着打字
-                _hour_window.append(time.monotonic())                 # 多发的每条都算进每小时限额
-                if is_group:
-                    _group_hour[event.group_id].append(time.monotonic())
+                _count_sent(gid_q, uid_q)                          # 多发的每条都算进限额
             msg = bubble
             if i == 0 and is_group and _group_seq[event.group_id] > seq_at_trigger:
                 # 中间有别人说话了（包括她排队的时候）：第一条引用原消息，免得大家不知道她在回谁
                 msg = MessageSegment.reply(event.message_id) + bubble
-            await bot.send(event, msg)
+            try:
+                await bot.send(event, msg)
+                sent += 1
+            except Exception as e:  # noqa: BLE001
+                # 发不出去（被风控拦了、掉线了）：后面几条也别发了
+                logger.warning(f"回复没发出去（第 {i + 1} 条，共 {len(bubbles)} 条）：{target} user={event.user_id}：{e}")
+                break
+        if bubbles and not sent:
+            # 一条都没发出去：从短期记忆里拿掉，也不交给长期记忆
+            _unrecord(key, record)
+            _refund(stamp, gid_q, uid_q)
+            return
+        if sent < len(bubbles):
+            sticker = None                                           # 文字没发全，表情也不发了
+            _unrecord(key, record, keep="\n".join(bubbles[:sent]))
         if sticker:
             # 文字后面隔一两秒再甩表情；只发表情时，中间有人插话就引用原消息
             if bubbles:
                 await asyncio.sleep(random.uniform(cfg.bubble_gap_min, cfg.bubble_gap_max))
-                _hour_window.append(time.monotonic())
-                if is_group:
-                    _group_hour[event.group_id].append(time.monotonic())
+                _count_sent(gid_q, uid_q)
             try:
                 seg = stickers.segment(sticker, cfg.sticker_sub_type)
                 if not bubbles and is_group and _group_seq[event.group_id] > seq_at_trigger:
@@ -1832,22 +2128,55 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 await bot.send(event, seg)
                 _last_sticker[target] = time.monotonic()
                 _recent_stickers[target].append(sticker["file"])
+                sent += 1
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"表情：发送失败（{sticker['no']} 号）：{e}")
+                if not bubbles:
+                    _unrecord(key, record)
+                    _refund(stamp, gid_q, uid_q)
+                    return
+                # 文字发出去了、表情没发出去：聊天记录里只留文字，免得她以为自己甩过这张
+                _unrecord(key, record, keep=reply)
+        # 真的发出去了，才收下面包、交给长期记忆（攒够一批就在后台整理档案、评估好感）
+        if bread_first:                               # 今天第一次送面包：收下（讨厌的人送的不加分）
+            ltm.take_bread(event.user_id, 0 if tier_now == "disliked" else cfg.gift_bread_affection)
+        # 长期记忆不需要知道她甩了哪张画像；只发了表情的，给一个简短的说法
+        said = "\n".join(bubbles[:sent]) if bubbles else ""
+        ltm.add_pending(key, new_entries + [{"role": "assistant", "content": said or f"（甩了一张{sticker['tags'][0]}的表情）"}])
         mark_sent(target)
         _reply_done[ik] = time.monotonic()
         _active_chats[target] = {"at": time.monotonic(), "group_id": event.group_id if is_group else None,
                                  "user_id": event.user_id}
         # 这一小时的限额用完了：补一句告别，让大家知道她接下来一段时间不会回（同一范围一小时只说一次）
         # 全局限额用完：最近在聊的群和私聊都告别一声；只是这个群的限额用完：只在这个群告别
-        if cfg.farewell_on_limit and quota_left(event.group_id if is_group else None) <= 0:
+        if cfg.farewell_on_limit and quota_left(gid_q, uid_q) <= 0:
             farewell = await say_farewells(bot, event, target)
         mark_sent(target)
+    if bubbles and cfg.knowledge_enabled:
+        note_topic(key, "\n".join(bubbles))          # 她讲了哪段经历：对方接着追问时还记得
+    if note_leaving(target, "\n".join(bubbles)):   # 她自己说了要走：接下来一阵子真的不在
+        _nudge_due.pop(event.user_id, None)
+    elif not is_group:
+        arm_nudge(event.user_id, text)            # 私聊：对方一阵子没回的话，她可能自己再说一句
     if is_group:
         _last_bot_msg[event.group_id] = (time.monotonic(), event.user_id, record)
         # 刚回完这个人：从她最后一条发出算起，这个人接着说的话直接算在跟她说
         _engaged[(event.group_id, event.user_id)] = time.monotonic()
         _replied_at[(event.group_id, event.user_id)] = time.monotonic()
+
+
+def _unrecord(key: str, record: str, keep: str = "") -> None:
+    """这轮回复没发出去（或只发出去一部分）：把她那句从短期记忆里拿掉，或者改成真正发出去的部分；对方说的话留着。
+    （不拿会话锁：这时拿着 _hands，别人可能拿着会话锁在等 _hands；这里没有 await，不会被打断）"""
+    h = get_history(key)
+    for i in range(len(h) - 1, -1, -1):
+        if h[i].get("role") == "assistant" and h[i].get("content") == record:
+            if keep:
+                h[i]["content"] = keep
+            else:
+                h.pop(i)
+            save_history(key)
+            break
 
 
 # ------------------------------------------------------------------ 限额用完：告别
@@ -1886,6 +2215,7 @@ async def say_farewells(bot: Bot, event: MessageEvent, target: str) -> list[str]
             logger.warning(f"告别没发出去（{t}）：{e}")
             continue
         mark_sent(t)
+        _count_sent(None if private else _active_chats[t]["group_id"], _active_chats[t]["user_id"] if private else None)    # 告别也算一条
         # 记进这个会话的短期记忆（不去拿会话锁：这时拿着 _hands，别人可能拿着会话锁在等 _hands）
         hist_key = t if private or cfg.group_shared_memory else f"{t}_{_active_chats[t]['user_id']}"
         get_history(hist_key).append({"role": "assistant", "content": line, "ts": time.time()})
@@ -1899,6 +2229,19 @@ async def say_farewells(bot: Bot, event: MessageEvent, target: str) -> list[str]
 # ------------------------------------------------------------------ 掉线提醒：重新上线后私信管理员
 OFFLINE_FILE = BOT_DIR / "data" / "offline_alert.json"
 _offline_alert_task: "asyncio.Task | None" = None
+_quiet_until = 0.0         # 被踢下线又上线后，这个时间（time.time()）之前先不说话
+
+
+def quiet_left() -> float:
+    """刚被踢下线又上线：还要安静几秒（0 = 不用安静）"""
+    return max(0.0, _quiet_until - time.time())
+
+
+def start_quiet() -> None:
+    global _quiet_until
+    if cfg.relogin_quiet_minutes > 0:
+        _quiet_until = time.time() + cfg.relogin_quiet_minutes * 60
+        logger.info(f"被踢下线后重新上线：先安静 {cfg.relogin_quiet_minutes:g} 分钟（不回消息、不插话、不冒泡、不写信），之后补回这段时间的私聊")
 
 
 def _read_offline() -> dict:
@@ -1938,7 +2281,11 @@ def offline_message(rec: dict, self_id: str) -> str:
     gap = f"{mins} 分钟" if mins < 60 else f"{mins // 60} 小时 {mins % 60} 分钟"
     why = (f"NapCat 报告账号被下线（{rec['reason']}）" if rec.get("kicked")
            else "机器人和 NapCat 的连接断了，可能是 NapCat 关了、崩了，或者账号被下线")
-    tip = "\n如果是被踢下线，建议先少回一阵，详见《风控记录》。" if rec.get("kicked") else ""
+    tip = ""
+    if rec.get("kicked"):
+        tip = "\n如果是被踢下线，建议先少回一阵，详见《风控记录》。"
+        if cfg.relogin_quiet_minutes > 0:
+            tip += f"\n她会先安静 {cfg.relogin_quiet_minutes:g} 分钟，之后再补回这段时间的私聊。"
     return (f"【QQ 机器人提醒】小号 {self_id} 在 {since:%m月%d日 %H:%M} 下线了。\n原因：{why}\n"
             f"离线约 {gap}，现在已重新上线。下线前一小时回复了 {rec.get('replies_hour', 0)} 条。{tip}")
 
@@ -1987,6 +2334,16 @@ async def _(event: NoticeEvent):
     reason = str(d.get("message") or d.get("tag") or "没说原因")[:60]
     note_offline(True, reason)
     logger.warning(f"账号被下线：{reason}")
+    # NapCat 有时不断开连接、自己重新登录：心跳要在这里就停，不然离线这段时间会被心跳盖掉，私聊补不回来
+    global _heartbeat_task
+    if _heartbeat_task:
+        _heartbeat_task.cancel()
+        _heartbeat_task = None
+    if cfg.catchup_enabled:
+        try:
+            _save_online()          # 心跳停在下线这一刻
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # 被踢后 NapCat 有时不断开连接、自己重新登录：又收到消息就说明回来了，这时补发提醒
@@ -2000,7 +2357,11 @@ back_after_kick = on_message(rule=_back_after_kick, priority=0, block=False)
 @back_after_kick.handle()
 async def _(bot: Bot):
     global _offline_alert_task
+    start_quiet()
     _offline_alert_task = asyncio.create_task(send_offline_alert(bot, delay=5))
+    # 没断开连接就回来了：不会触发“连上”，这里补做一次“补回未读、再开始记心跳”
+    if _heartbeat_task is None and (_catchup_task is None or _catchup_task.done()):
+        start_catchup(bot)
 
 
 # ------------------------------------------------------------------ 主动插话：群里聊得正热时，她偶尔自己插一句
@@ -2040,6 +2401,8 @@ def _in_hours(ranges: str) -> bool:
 
 def interject_blocker(gid: int, text: str = "") -> str | None:
     """现在不能在这个群插话的原因；可以就返回 None（不含随机那一步）"""
+    if away_left(f"group_{gid}") > 0:
+        return "她说过要走了"
     if in_peak():
         return "高峰时段"
     if not _in_hours(cfg.interject_hours):
@@ -2087,6 +2450,8 @@ def _take_group_quota(gid: int) -> bool:
 
 async def maybe_interject(bot: Bot, gid: int, text: str, force: bool = False) -> str | None:
     """看看要不要在这个群插一句；插了就返回说的话"""
+    if quiet_left() > 0:
+        return None
     if not force:
         if interject_blocker(gid, text):
             return None
@@ -2104,6 +2469,9 @@ async def maybe_interject(bot: Bot, gid: int, text: str, force: bool = False) ->
 
 async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
     key = f"group_{gid}"
+    if not force and not _has_quota(gid):          # 先看额度，不够就不调模型了
+        logger.info(f"插话：群{gid} 额度不够，算了")
+        return None
     async with _locks[key]:
         history = get_history(key)
         chat_lines = list(_recent_chat.get(gid, []))[-8:]
@@ -2157,6 +2525,8 @@ async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
                 await bot.send_group_msg(group_id=gid, message=b)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"插话：群{gid} 发送失败：{e}")
+                if not i:
+                    _unrecord(key, reply)
                 return None
         mark_sent(target)
     now = time.monotonic()
@@ -2225,6 +2595,8 @@ def bubble_blocker(gid: int) -> str | None:
     """现在不能在这个群冒泡的原因；可以就返回 None（不含随机那一步）"""
     if not cfg.bubble_enabled:
         return "冒泡没开"
+    if away_left(f"group_{gid}") > 0:
+        return "她说过要走了"
     if in_peak():
         return "高峰时段"
     if not _in_hours(cfg.bubble_hours):
@@ -2256,6 +2628,8 @@ def bubble_blocker(gid: int) -> str | None:
 async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
     """在这个群冒个泡；说了就返回说的话"""
     if gid in _interject_busy or not cfg.deepseek_api_key:
+        return None
+    if not force and not _has_quota(gid):          # 先看额度，不够就不调模型了
         return None
     _interject_busy.add(gid)
     try:
@@ -2302,6 +2676,8 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
                     await bot.send_group_msg(group_id=gid, message=b)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"冒泡：群{gid} 发送失败：{e}")
+                    if not i:
+                        _unrecord(key, reply)
                     return None
             mark_sent(key)
         now_m = time.monotonic()
@@ -2322,6 +2698,8 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
 
 async def check_bubbles() -> int:
     """看看白名单里哪些群该冒泡了；返回冒了几个"""
+    if quiet_left() > 0:
+        return 0
     if not (cfg.bubble_enabled and cfg.enable_group and cfg.deepseek_api_key and cfg.group_whitelist):
         return 0
     bots = list(get_bots().values())
@@ -2454,6 +2832,7 @@ async def write_letter(bot: Bot, qq: int) -> str | None:
         history.append({"role": "assistant", "content": letter, "ts": time.time()})
         save_history(key)
     ltm.mark_letter(qq)
+    _private_hour[qq].append(time.monotonic())
     _hour_window.append(time.monotonic())
     _global_window.append(time.monotonic())
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
@@ -2464,6 +2843,8 @@ async def write_letter(bot: Bot, qq: int) -> str | None:
 
 async def check_letters() -> int:
     """看看今天要不要给谁写信；返回寄出了几封"""
+    if quiet_left() > 0:
+        return 0
     if not (cfg.letter_enabled and cfg.deepseek_api_key and _letter_window_now()):
         return 0
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
@@ -2498,6 +2879,172 @@ async def _letter_loop() -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"检查写信出错：{e}")
         await asyncio.sleep(cfg.letter_check_interval)
+
+
+# ------------------------------------------------------------------ 私聊冷场后主动搭话
+# 她回完以后，对方 5～30 分钟没回：按关系远近抽签（陌生人 5%、熟人 15%、很熟 35%，讨厌的人不搭），
+# 抽中了就自己再说一句——接着刚才的话题、随口问问、或者说点旅途里的小事。对方一直不回也只搭这一次。
+NUDGE_PROMPT = """【主动搭话】你刚才回了对方，对方已经 {gap}没回你了。你想主动再说一句，像随手发的一条消息。
+可以：接着刚才的话题追问一句、补一句刚才没说完的、吐槽一下，或者随口说一件你旅途中的小事、问问对方在干嘛。
+不要：质问“怎么不理我”、说自己一直在等、重复刚才说过的话、提机器人或系统。
+按你们的关系拿捏：陌生人客气、话少；熟人随意；很熟可以撒点小脾气、关心一下。
+如果刚才的对话已经自然结束（对方道别、说晚安、说去忙了），或者这时候搭话很突兀，就只输出「[不说]」。"""
+_NO_NUDGE_RE = re.compile(r"[\[【（(［]\s*不说\s*[\]】）)］]")
+_BYE_RE = re.compile(r"(晚安|拜拜|再见|先走了|先下了|下线了|睡了|去睡|去忙|忙去了|回聊|改天聊|明天聊|88|bye|good ?night)", re.I)
+_nudge_due: dict[int, dict] = {}          # QQ -> {"at": 什么时候搭话, "armed": 她那句回复的时间}
+_nudge_count: dict[str, dict] = {}        # 日期 -> {QQ: 今天搭过几次, "all": 合计}
+_nudge_task: "asyncio.Task | None" = None
+
+
+def arm_nudge(qq: int, user_text: str = "") -> bool:
+    """她刚回完这个人：抽签决定这次冷场要不要搭话，要的话定好时间"""
+    _nudge_due.pop(qq, None)
+    if not (cfg.nudge_enabled and cfg.enable_private):
+        return False
+    if _BYE_RE.search(user_text or ""):        # 对方在道别：不搭
+        return False
+    if random.random() >= cfg.nudge_prob.get(familiarity_of(qq), 0.0):
+        return False
+    lo, hi = sorted((cfg.nudge_delay_min, cfg.nudge_delay_max))
+    _nudge_due[qq] = {"at": time.time() + random.uniform(lo, hi) * 60, "armed": time.time()}
+    return True
+
+
+def nudge_blocker(qq: int) -> str | None:
+    """现在不能给这个人搭话的原因；可以就返回 None"""
+    if quiet_left() > 0:
+        return "刚重新上线"
+    if away_left(f"private_{qq}") > 0:
+        return "她说过要走了"
+    if in_peak():
+        return "高峰时段"
+    if not _in_hours(cfg.nudge_hours):
+        return "不在搭话时段"
+    today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
+    cnt = _nudge_count.get(today, {})
+    if cnt.get(qq, 0) >= cfg.nudge_per_user_daily_max:
+        return "今天已经搭过话了"
+    if cnt.get("all", 0) >= cfg.nudge_daily_max:
+        return "今天搭话次数用完了"
+    if not _has_quota(None, qq):
+        return "额度不够"
+    return None
+
+
+async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
+    """冷场了，主动再说一句；说了就返回说的话"""
+    key = f"private_{qq}"
+    if not cfg.deepseek_api_key:
+        return None
+    async with _locks[key]:
+        history = get_history(key)
+        last = history[-1] if history else None
+        if not force and (not last or last.get("role") != "assistant"):
+            return None                              # 对方已经回了（或者还没聊过）
+        gap = human_gap(time.time() - float(last.get("ts") or time.time())) if last else "一阵子"
+        fam = familiarity_of(qq)
+        prof = ltm.get_user(qq)
+        long_memo = ltm.context_for(qq, prof.get("name") or str(qq), None)
+        extra = "\n\n".join(x for x in (long_memo, NUDGE_PROMPT.format(gap=gap), FAMILIARITY_HINT[fam] + short_hint()) if x)
+        messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-10:]
+                                + [{"role": "system", "content": extra}])
+        try:
+            resp = await client.chat.completions.create(
+                model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
+                max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
+            )
+            choice = resp.choices[0]
+            reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
+        except Exception as e:  # noqa: BLE001
+            kind = classify_error(e)
+            logger.warning(f"主动搭话：调用失败（{kind or '其他错误'}）：{e}")
+            if kind:
+                await alert_admins(bot, kind)
+            return None
+        if not reply or _NO_NUDGE_RE.search(reply) or ooc_words(reply, ""):
+            logger.info(f"主动搭话：{qq} 她想了想，没说")
+            return None
+    bubbles = split_bubbles(reply)[:2]
+
+    def replied() -> bool:                           # 她想、打字的时候，对方回消息了：这句就不发了
+        h = get_history(key)
+        return bool(_inbox.get((key, qq))) or (bool(h) and h[-1] is not last)
+    async with _hands:
+        if not force and replied():
+            logger.info(f"主动搭话：{qq} 对方刚好回了，不发了")
+            return None
+        await switch_pause(key)
+        await asyncio.sleep(typing_delay(bubbles[0]))
+        if not force and replied():
+            logger.info(f"主动搭话：{qq} 对方刚好回了，不发了")
+            return None
+        for i, b in enumerate(bubbles):
+            if i:
+                await asyncio.sleep(bubble_gap(b))
+            try:
+                await bot.send_private_msg(user_id=qq, message=b)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"主动搭话：发给 {qq} 失败：{e}")
+                if not i:
+                    return None
+                break
+            _count_sent(None, qq)
+        mark_sent(key)
+    said = "\n".join(bubbles)
+    get_history(key).append({"role": "assistant", "content": said, "ts": time.time()})
+    save_history(key)
+    today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
+    for d in [d for d in _nudge_count if d != today]:
+        del _nudge_count[d]
+    cnt = _nudge_count.setdefault(today, {})
+    cnt[qq] = cnt.get(qq, 0) + 1
+    cnt["all"] = cnt.get("all", 0) + 1
+    logger.info(f"主动搭话：{ltm.TIER_NAMES.get(familiarity_of(qq), '')} {prof.get('name') or qq}（{qq}）冷场 {gap}，她说：{said[:30]}")
+    return said
+
+
+async def check_nudges(bot: Bot | None = None) -> int:
+    """到点的冷场，挨个看要不要搭话；返回搭了几次"""
+    now = time.time()
+    due = [qq for qq, d in _nudge_due.items() if d["at"] <= now]
+    if not due:
+        return 0
+    bots = [bot] if bot else list(get_bots().values())
+    if not bots:
+        return 0
+    n = 0
+    for qq in due:
+        _nudge_due.pop(qq, None)                     # 只搭这一次；对方回了以后才会再抽签
+        why = nudge_blocker(qq)
+        if why:
+            logger.info(f"主动搭话：{qq} 这次不搭（{why}）")
+            continue
+        if await nudge(bots[0], qq):
+            n += 1
+    return n
+
+
+async def _nudge_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await check_nudges()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"检查主动搭话出错：{e}")
+
+
+nudge_cmd = on_command("搭话", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
+
+
+@nudge_cmd.handle()
+async def _(bot: Bot, arg: Message = CommandArg()):
+    t = arg.extract_plain_text().strip()
+    if not t.isdigit():
+        pending = [f"{q}（{datetime.fromtimestamp(d['at'], peak.BEIJING):%H:%M}）" for q, d in _nudge_due.items()]
+        await nudge_cmd.finish("（用法：/搭话 QQ号 —— 马上让她主动跟这个人说一句。等着搭话的："
+                               + ("、".join(pending) if pending else "没有") + "）")
+    said = await nudge(bot, int(t), force=True)
+    await nudge_cmd.finish(f"（她说了：{said}）" if said else "（她想了想，没说。或者调用失败，看日志）")
 
 
 letter_cmd = on_command("写信", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
@@ -2552,6 +3099,14 @@ def _spawn_labeling() -> None:
 
 async def _sticker_loop(bot: Bot) -> None:
     await asyncio.sleep(15)
+    if stickers.unlabeled() and not in_peak():       # 上次没打完的标签：先接着打（不调 QQ 接口）
+        _spawn_labeling()
+    since = time.time() - stickers.last_refresh
+    if since < cfg.sticker_refresh_hours * 3600:
+        logger.info(f"表情：距上次拉取收藏 {since / 3600:.1f} 小时，不到 {cfg.sticker_refresh_hours:g} 小时，这次上线不拉")
+    else:
+        # 刚上线别马上调一串接口：随机等几分钟再拉
+        await asyncio.sleep(random.uniform(120, 420))
     while True:
         try:
             if time.time() - stickers.last_refresh >= cfg.sticker_refresh_hours * 3600:
@@ -2562,6 +3117,86 @@ async def _sticker_loop(bot: Bot) -> None:
             logger.warning(f"表情：拉取收藏表情失败（{e}），稍后再试")
             stickers.last_refresh = time.time() - cfg.sticker_refresh_hours * 3600 + 600   # 10 分钟后重试
         await asyncio.sleep(600)
+
+
+# ------------------------------------------------------------------ 加好友：验证消息不回
+# 加好友时对方填的验证消息（“我是某某”），通过以后会以对方的名义出现在私聊里；QQ 还会补一条“我们已成功添加为好友……”。
+# 这些都不是在跟她说话，不回、不补。
+FRIEND_REQ_FILE = BOT_DIR / "data" / "friend_requests.json"
+_FRIEND_SYS_RE = re.compile(
+    r"^(我们已成功添加为好友|我通过了你的(朋友|好友)验证请求|你已添加了|你们已成为好友|以上是打招呼的内容|现在可以开始聊天了|"
+    r"我已经添加了你|我们已经是好友了)")
+_friend_added: dict[int, float] = {}         # QQ -> 刚加上好友的时间（friend_add 通知）
+
+
+def _friend_reqs() -> dict:
+    try:
+        return json.loads(FRIEND_REQ_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_friend_reqs(d: dict) -> None:
+    now = time.time()
+    d = {k: v for k, v in d.items() if now - float(v.get("at", 0)) <= 7 * 86400}   # 一周前的申请不留
+    try:
+        FRIEND_REQ_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = FRIEND_REQ_FILE.with_name(FRIEND_REQ_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(FRIEND_REQ_FILE)
+    except OSError as e:
+        logger.warning(f"记录好友申请失败：{e}")
+
+
+def _norm(t: str) -> str:
+    return re.sub(r"\s", "", t or "")
+
+
+def is_friend_verify(qq: int, text: str, msg_time: float = 0) -> bool:
+    """这条私聊是不是加好友带来的验证消息或系统提示"""
+    t = _norm(text)
+    if not t:
+        return False
+    if _FRIEND_SYS_RE.match(t):
+        return True
+    req = _friend_reqs().get(str(qq))
+    # 和申请里的验证消息一字不差：加上好友 10 分钟内都算（之后对方真的再说一遍同样的话，就正常回）
+    if req and _norm(req.get("comment")) == t and (not req.get("added") or (msg_time or time.time()) - req["added"] <= 600):
+        return True
+    # 申请发来时机器人没在线、没记下验证消息：刚加上好友前后 20 秒内的“我是……”也算
+    added = _friend_added.get(int(qq))
+    return bool(added and abs((msg_time or time.time()) - added) <= 20 and t.startswith("我是") and len(t) <= 30)
+
+
+async def _is_friend_request(event) -> bool:
+    return getattr(event, "post_type", "") == "request" and getattr(event, "request_type", "") == "friend"
+
+
+friend_request = on_request(rule=_is_friend_request, priority=1, block=False)
+
+
+@friend_request.handle()
+async def _(event):
+    d = _friend_reqs()
+    d[str(event.user_id)] = {"comment": str(getattr(event, "comment", "") or "")[:100], "at": time.time()}
+    _save_friend_reqs(d)
+
+
+async def _is_friend_add(event: NoticeEvent) -> bool:
+    return getattr(event, "notice_type", "") == "friend_add"
+
+
+friend_add_notice = on_notice(rule=_is_friend_add, priority=1, block=False)
+
+
+@friend_add_notice.handle()
+async def _(event: NoticeEvent):
+    _friend_added[int(event.user_id)] = float(event.time or time.time())
+    d = _friend_reqs()
+    if str(event.user_id) in d:
+        d[str(event.user_id)]["added"] = float(event.time or time.time())
+        _save_friend_reqs(d)
+    logger.info(f"加了新好友：{event.user_id}")
 
 
 # ------------------------------------------------------------------ 未读消息：不在线时别人发的私聊，上线后补回
@@ -2593,6 +3228,8 @@ seen_private = on_message(rule=Rule(_is_private), priority=1, block=False)
 
 @seen_private.handle()
 async def _(event: PrivateMessageEvent):
+    if quiet_left() > 0:        # 安静期间收到的私聊不算“看过”，安静完了会补回
+        return
     _seen_ids.append(int(event.message_id))
 
 
@@ -2656,6 +3293,8 @@ async def find_unread(bot: Bot, offline_since: float, seen: set[int]) -> list[tu
                   if int(m.get("user_id", 0)) == qq
                   and m.get("time", 0) > after and m.get("time", 0) >= oldest_ok and m.get("time", 0) > last_hist
                   and int(m.get("message_id", 0)) not in seen]
+        # 加好友的验证消息、“已成功添加为好友”这种系统提示不补
+        unread = [m for m in unread if not is_friend_verify(qq, message_to_text(_seg_list(m.get("message"))), m.get("time", 0))]
         # 纯指令（/重置 之类）不补
         unread = [m for m in unread if not message_to_text(_seg_list(m.get("message"))).startswith(tuple(bot.config.command_start or {"/"}))]
         if unread:
@@ -2703,19 +3342,15 @@ async def _heartbeat_loop() -> None:
         await asyncio.sleep(60)
 
 
-@get_driver().on_bot_connect
-async def _(bot: Bot):
-    global _heartbeat_task, _catchup_task, _sticker_task, _offline_alert_task
-    if cfg.offline_alert and (_offline_alert_task is None or _offline_alert_task.done()):
-        _offline_alert_task = asyncio.create_task(send_offline_alert(bot))
-    if cfg.sticker_enabled:
-        if _sticker_task:
-            _sticker_task.cancel()
-        _sticker_task = asyncio.create_task(_sticker_loop(bot))
+def start_catchup(bot: Bot) -> None:
+    """（安静期过了之后）补回未读私聊，补完再开始记心跳（免得心跳把离线时间盖掉）"""
+    global _catchup_task
     if not cfg.catchup_enabled:
         return
 
     async def run():
+        if quiet_left() > 0:
+            await asyncio.sleep(quiet_left())
         try:
             n = await catch_up(bot)
             if n:
@@ -2726,7 +3361,21 @@ async def _(bot: Bot):
         if _heartbeat_task is None or _heartbeat_task.done():
             _heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
-    _catchup_task = asyncio.create_task(run())    # 先补未读，补完再开始记心跳（免得心跳把离线时间盖掉）
+    _catchup_task = asyncio.create_task(run())
+
+
+@get_driver().on_bot_connect
+async def _on_connect(bot: Bot):
+    global _sticker_task, _offline_alert_task
+    if _read_offline().get("kicked"):      # 上次是被踢下线的：先安静一会儿
+        start_quiet()
+    if cfg.offline_alert and (_offline_alert_task is None or _offline_alert_task.done()):
+        _offline_alert_task = asyncio.create_task(send_offline_alert(bot))
+    if cfg.sticker_enabled:
+        if _sticker_task:
+            _sticker_task.cancel()
+        _sticker_task = asyncio.create_task(_sticker_loop(bot))
+    start_catchup(bot)
 
 
 @get_driver().on_bot_disconnect
@@ -2747,9 +3396,25 @@ async def _(bot: Bot):
             pass
 
 
+# ------------------------------------------------------------------ 长期记忆：攒够一批却没整理的（之前失败了、或者重启前没来得及），定时补做
+_memory_task: "asyncio.Task | None" = None
+
+
+async def _memory_retry_loop() -> None:
+    await asyncio.sleep(60)                        # 开机先缓一分钟，再查一次
+    while True:
+        try:
+            n = ltm.retry_pending()
+            if n:
+                logger.info(f"长期记忆：补做 {n} 个会话的整理")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"检查待整理的长期记忆出错：{e}")
+        await asyncio.sleep(cfg.memory_retry_minutes * 60)
+
+
 @get_driver().on_shutdown
 async def _():
-    for t in (_letter_task, _heartbeat_task, _catchup_task, _sticker_task, _label_task, _bubble_task):
+    for t in (_letter_task, _heartbeat_task, _catchup_task, _sticker_task, _label_task, _bubble_task, _memory_task, _nudge_task):
         if t:
             t.cancel()
 
@@ -2757,7 +3422,11 @@ async def _():
 
 @get_driver().on_startup
 async def _():
-    global _kb, _letter_task, _bubble_task
+    global _kb, _letter_task, _bubble_task, _memory_task, _nudge_task
+    if cfg.nudge_enabled and cfg.enable_private:
+        _nudge_task = asyncio.create_task(_nudge_loop())
+    if cfg.memory_enabled and cfg.memory_retry_minutes > 0 and cfg.deepseek_api_key:
+        _memory_task = asyncio.create_task(_memory_retry_loop())
     if tagger:
         tagger.start()     # 后台准备角色识别模型（第一次会下载），不耽误启动
     if cfg.letter_enabled and cfg.enable_private:
@@ -2777,6 +3446,10 @@ async def _():
             logger.exception(f"知识库加载失败，将不使用小说检索：{e}")
     if not cfg.deepseek_api_key:
         logger.warning("未配置 DEEPSEEK_API_KEY，机器人会提示未配置")
+    year = str(datetime.now(peak.BEIJING).year)
+    if cfg.peak_enabled and not any(d.startswith(year) for d in list(peak.HOLIDAYS_2026) + list(cfg.peak_holidays)):
+        logger.warning(f"高峰时段：没有 {year} 年的法定节假日数据，节假日会被当成工作日高峰。"
+                       f"请在 .env 的 PEAK_HOLIDAYS 里补上，例如 PEAK_HOLIDAYS=[\"{year}-01-01\"]")
     logger.info(
         f"角色扮演聊天已启动：model={cfg.deepseek_model} 记忆=群聊{cfg.history_max_turns_group}条/私聊{cfg.history_max_turns}条 "
         f"群白名单={cfg.group_whitelist or '全部'} 长期记忆={'开' if cfg.memory_enabled else '关'} "

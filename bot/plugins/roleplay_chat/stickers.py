@@ -40,7 +40,17 @@ ALIASES = {
     "哭": "委屈", "难过": "委屈", "伤心": "委屈", "可怜": "委屈", "失落": "委屈", "心酸": "委屈",
     "惊讶": "震惊", "吃惊": "震惊", "惊吓": "震惊", "意外": "震惊",
     "随便": "敷衍", "好吧": "敷衍", "冷淡": "敷衍", "懒得理": "敷衍", "爱答不理": "敷衍", "无所谓": "敷衍",
+    # 带“笑”“气”但不是开心、生气的
+    "冷笑": "嫌弃", "嘲笑": "嫌弃", "讥笑": "嫌弃", "嗤笑": "嫌弃", "嘲讽": "嫌弃", "坏笑": "得意", "偷笑": "得意",
+    "奸笑": "得意", "苦笑": "无语", "干笑": "无语", "傻笑": "开心", "微笑": "开心", "大笑": "开心",
+    "气鼓鼓": "生气", "气呼呼": "生气", "生闷气": "生气",
+    # 否定说法
+    "不开心": "委屈", "不高兴": "生气", "不爽": "生气", "不满意": "生气", "没意思": "无语", "不屑一顾": "嫌弃",
 }
+
+# 包含匹配只用两个字以上的近义词（长的先试）；单字（笑、气、汗、羞、凶、哭）只做完全匹配，
+# 免得“客气”被归成生气、“冷笑”被归成开心
+_CONTAINS = sorted((k for k in ALIASES if len(k) >= 2), key=len, reverse=True)
 
 # 库里没有这种情绪时，退而求其次用哪些
 NEIGHBORS = {
@@ -76,9 +86,11 @@ def normalize(word: str) -> str | None:
         return w
     if w in ALIASES:
         return ALIASES[w]
-    for k, v in ALIASES.items():          # “有点嫌弃”“气死了”这种：包含关系也算
+    for k in _CONTAINS:                   # “有点嫌弃”“一脸冷笑”这种：包含关系也算（只用两个字以上的词）
         if k in w:
-            return v
+            return ALIASES[k]
+    if re.match(r"^[不没别]", w):          # “不生气”“没开心”：否定的说法不按包含匹配
+        return None
     for e in EMOTIONS:
         if e in w:
             return e
@@ -94,17 +106,20 @@ def parse_tags(text: str) -> list[str]:
     return out[:2]
 
 
-def _first_frame_png(raw: bytes) -> bytes | None:
-    """动图 / webp 看图模型可能不认：取第一帧转成 PNG"""
+def _small_png(raw: bytes, max_side: int = 512) -> bytes | None:
+    """打标签前先缩小：取第一帧（动图也一样），缩到最长边不超过 max_side，转成 PNG。
+    看图模型不用看原图，这样请求小得多，也不用管动图、webp 认不认"""
     try:
         from PIL import Image
         with Image.open(io.BytesIO(raw)) as im:
             im.seek(0)
+            frame = im.convert("RGBA")
+            frame.thumbnail((max_side, max_side))
             buf = io.BytesIO()
-            im.convert("RGBA").save(buf, format="PNG")
+            frame.save(buf, format="PNG", optimize=True)
             return buf.getvalue()
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"表情：转换第一帧失败：{e}")
+        logger.warning(f"表情：缩图失败（{e}），改发原图")
         return None
 
 
@@ -128,6 +143,7 @@ class StickerStore:
             if data.get("_v") == INDEX_VERSION:
                 self.items = data.get("items", {})
                 self.next_no = int(data.get("next_no", 1))
+                self.last_refresh = float(data.get("last_refresh", 0))   # 存在文件里：重开 start.bat 不会重新拉
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass
 
@@ -135,7 +151,8 @@ class StickerStore:
     def save(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self.index_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"_v": INDEX_VERSION, "next_no": self.next_no, "items": self.items},
+        tmp.write_text(json.dumps({"_v": INDEX_VERSION, "next_no": self.next_no, "last_refresh": self.last_refresh,
+                                   "items": self.items},
                                   ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(self.index_file)
 
@@ -205,17 +222,32 @@ class StickerStore:
                 self.next_no += 1
                 added += 1
             removed = 0
-            if urls:                             # 拉取失败（空列表）时不要把所有表情都标成取消收藏
+            # 这次没见到的表情：连续两次拉取都没见到才算取消收藏。
+            # 只没见到一次的，可能只是地址变了、这次又没下载成功，先照常能发
+            # 拉取失败（空列表）、或者拉满了上限（后面可能还有没拉到的）时，不标取消收藏
+            truncated = len(urls) >= count
+            if truncated:
+                logger.warning(f"表情：收藏表情拉满了 {count} 张，可能没拉全；这次不标取消收藏，请调大 STICKER_FETCH_COUNT")
+            if urls and not truncated:
                 for h, it in self.items.items():
-                    if h not in seen and not it.get("removed"):
-                        it["removed"] = True
-                        removed += 1
-                    elif h in seen:
+                    if h in seen:
                         it.pop("removed", None)
+                        it.pop("miss", None)
+                    elif not it.get("removed"):
+                        it["miss"] = it.get("miss", 0) + 1
+                        if it["miss"] >= 2:
+                            it["removed"] = True
+                            removed += 1
+            else:
+                for h in seen:
+                    self.items[h].pop("removed", None)
+                    self.items[h].pop("miss", None)
             self.last_refresh = time.time()
             self.save()
             n = len(self.usable())
-            logger.info(f"表情：收藏 {len(urls)} 张，新增 {added}，取消收藏 {removed}，可用 {n}，待打标签 {len(self.unlabeled())}")
+            missing = sum(1 for it in self.items.values() if it.get("miss") and not it.get("removed"))
+            note = f"，{missing} 张这次没见到（下次还没有才算取消收藏）" if missing else ""
+            logger.info(f"表情：收藏 {len(urls)} 张，新增 {added}，取消收藏 {removed}{note}，可用 {n}，待打标签 {len(self.unlabeled())}")
             return added, removed, n
 
     # ------------------------------------------------------------ 打标签
@@ -240,18 +272,14 @@ class StickerStore:
         except FileNotFoundError:
             it["fails"] = 9
             return False
-        kind = _kind(raw)
-        mime = kind[0] if kind else "image/png"
+        png = await asyncio.to_thread(_small_png, raw)
+        if png:
+            data, mime = png, "image/png"
+        else:                                      # 缩不了（比如 Pillow 没装）：发原图
+            kind = _kind(raw)
+            data, mime = raw, (kind[0] if kind else "image/png")
         try:
-            try:
-                out = await self._ask(raw, mime)
-            except Exception as e:  # noqa: BLE001
-                if mime not in ("image/gif", "image/webp"):
-                    raise
-                png = _first_frame_png(raw)        # 动图不认：拿第一帧再试一次
-                if not png:
-                    raise e
-                out = await self._ask(png, "image/png")
+            out = await self._ask(data, mime)
         except Exception as e:  # noqa: BLE001
             it["fails"] = it.get("fails", 0) + 1
             logger.warning(f"表情：{it['no']} 号打标签失败（第 {it['fails']} 次）：{e}")

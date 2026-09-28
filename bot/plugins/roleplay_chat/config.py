@@ -30,7 +30,7 @@ class Config(BaseModel):
     vision_tagger_dir: str = "data/models"
     vision_tagger_threshold: float = 0.75  # 角色置信度门槛：误认成伊蕾娜就调高，认不出就调低
     vision_tagger_maybe: float = 0.35     # 伊蕾娜置信度在这个值～门槛之间：让看图模型再确认一次（设成 1 就关掉）
-    vision_tagger_threads: int = 2        # 识别时最多占几个 CPU 核
+    vision_tagger_threads: int = 2        # 识别时最多占几个 CPU 核（2 核的服务器上建议设 1，免得识别时卡住 NapCat）
     # 群里有人发伊蕾娜的图（没 @ 她）时，她也可能看一眼、说一句
     vision_self_react: bool = True
     vision_self_react_prob: float = 0.6   # 每次遇到时搭话的概率
@@ -44,7 +44,7 @@ class Config(BaseModel):
     sticker_self_react_prob: float = 0.5  # 有人发了她的画像（斗图）时，这一轮可以带表情的概率
     sticker_recent_avoid: int = 5         # 同一个会话最近发过的几张不重复
     sticker_refresh_hours: float = 6.0    # 多久重新拉一次收藏表情
-    sticker_fetch_count: int = 200        # 一次最多拉多少张收藏
+    sticker_fetch_count: int = 500        # 一次最多拉多少张收藏（拉满了就说明可能没拉全，那次不标取消收藏）
     sticker_private: bool = True          # 私聊也发
     sticker_sub_type: int = 1             # 1 = 显示成表情样式（小图）；发出来不对就改成 -1，按普通图片发
     sticker_dir: str = "data/stickers"
@@ -76,10 +76,12 @@ class Config(BaseModel):
     # ---- 长期记忆 ----
     memory_enabled: bool = True
     memory_dir: str = "data/memory"
-    memory_batch: int = 8                 # 被挤出短期记忆的消息攒够几条就整理一次
+    memory_batch: int = 8                 # 每轮对话都加进待整理，攒够这么多条就在后台整理一次
     memory_max_facts: int = 20            # 每人档案最多几条（9/27 从 12 加到 20）
     memory_max_events: int = 12           # 每个群往事最多几条（9/27 从 8 加到 12）
-    memory_summary_max_tokens: int = 2000 # 后台整理时模型最多写多少（要把每个人的整份档案重写一遍，写不下这次整理就作废）
+    memory_summary_max_tokens: int = 4000 # 后台整理时模型最多写多少（要把每个人的整份档案重写一遍，写不下这次整理就作废；只按实际写的计费）
+    memory_summary_timeout: float = 180.0 # 后台整理的超时（秒）；整理出错不自动重试，失败后隔 5 / 15 / 60 分钟再试
+    memory_retry_minutes: float = 15.0    # 每隔多久检查一次有没有攒够一批却没整理的（开机时也查一次）；0 = 不查
 
     # ---- 好感度（决定她对人冷淡还是随意）----
     # 分数 -100～100：长期记忆整理时按对话内容 +5～-15；踩雷立刻扣分；很久不聊慢慢回落到 0
@@ -117,6 +119,15 @@ class Config(BaseModel):
     letter_check_interval: int = 1800     # 每隔多少秒看一次要不要写信
     letter_max_tokens: int = 250
 
+    # ---- 私聊冷场后主动搭话：她回完以后对方一阵子没回，她有几率自己再说一句 ----
+    nudge_enabled: bool = True
+    nudge_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.05, "acquaintance": 0.15, "close": 0.35}   # 每次冷场时搭话的概率，关系越好越高
+    nudge_delay_min: float = 5.0          # 对方多少分钟没回，才可能搭话（在这两个数之间随机）
+    nudge_delay_max: float = 30.0
+    nudge_hours: str = "09:00-23:30"      # 只在这段时间搭话（北京时间）；高峰时段也不搭
+    nudge_per_user_daily_max: int = 2     # 每人每天最多被搭话几次
+    nudge_daily_max: int = 10             # 所有人合计每天最多几次（风控）
+
     # ---- QQ 空间日记：每天一条说说（图 + 文案），回复说说下的评论 ----
     qzone_enabled: bool = False           # 总开关。先用 /空间测试 测通接口，再在 .env 里改成 true
     qzone_post_window: str = "20:30-22:30"   # 每天在这段时间里随机挑一个时刻发（北京时间）
@@ -127,7 +138,7 @@ class Config(BaseModel):
     qzone_length_weights: list[float] = [35, 45, 20]   # 一句话 / 两三句 / 小游记 的概率
     qzone_max_moments: int = 3            # 一条说说最多写几件今天的见闻
     qzone_private_moments: bool = True    # 私聊（只算有长期档案的人）也算见闻素材
-    qzone_max_tokens: int = 350
+    qzone_max_tokens: int = 350           # 写说说文案最多多少 token（小游记那档也不超过它）
     qzone_comment_reply: bool = True      # 回复说说下的评论
     qzone_comment_poll_minutes: float = 120.0   # 每隔多久查一次评论（空间没有评论推送，只能定时查；查太勤容易被风控）
     qzone_comment_quiet: str = "01:00-09:00"   # 这段时间不查也不回（像在睡觉）
@@ -138,9 +149,17 @@ class Config(BaseModel):
     qzone_max_replies_per_poll: int = 2   # 每一轮最多回几条（评论和 @ 合计），剩下的留到下一轮
     qzone_reply_gap_min: float = 120.0    # 同一轮里两条回复之间隔多久（秒）
     qzone_reply_gap_max: float = 300.0
-    qzone_startup_grace_minutes: float = 30.0   # 机器人连上 NapCat 后这么久内，空间一概不碰（9/26 两次被踢都是刚上线 1 分多钟就写空间）
+    qzone_startup_grace_minutes: float = 30.0   # 机器人连上 NapCat 后，空间一概不碰的时长下限（9/26 两次被踢都是刚上线 1 分多钟就写空间）
+    qzone_startup_grace_max_minutes: float = 60.0   # 上限：每次上线在下限～上限之间随机，节奏别太固定
+    qzone_quiet_release_max_minutes: float = 40.0   # 勿扰时段、高峰结束后，再随机推迟 0～这么多分钟才查（别每天 09:00 准点查）
+    qzone_post_min_gap_hours: float = 12.0          # 离上一条说说（包括手动 /说说 立即发 的）不到这么久，定时说说就跳过
     qzone_risk_pause_hours: float = 24.0  # 熔断：空间一出现风控信号（限流码 -10049、验证页、403），空间功能自动停这么久
     qzone_mention_reply: bool = True      # 别人在自己的说说里 @ 她、在别人说说下 @ 她或回她：也按聊天规则回（查评论时顺便读“与我相关”）
+    # ---- 刷好友动态：看到好友发的说说，有几率评论一句（查评论时顺便刷一次；去别人空间写评论是风险最高的写操作，所以量压得很低）----
+    qzone_friend_comment: bool = True     # 总开关
+    qzone_friend_comment_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.03, "acquaintance": 0.15, "close": 0.35}   # 每条说说被评论的概率，关系越好越高
+    qzone_friend_comment_daily_max: int = 2    # 每天最多评论几条好友的说说（单独算，不占上面回评论的 10 条）
+    qzone_friend_post_max_age_hours: float = 6.0   # 只评论这么多小时内发的说说（翻出几天前的去评论很怪）
 
     # ---- DeepSeek 高峰时段：伊蕾娜“很忙”，少回、短回 ----
     peak_enabled: bool = True
@@ -156,6 +175,7 @@ class Config(BaseModel):
     log_file: str = "data/logs/bot_{time:YYYY-MM-DD}.log"   # 机器人自己的运行日志也存一份（留空不存），方便事后查“为什么没回”
     log_retention_days: int = 14
     offline_alert: bool = True            # 小号被踢下线 / 和 NapCat 断开后，重新上线时私信管理员说明情况
+    relogin_quiet_minutes: float = 5.0    # 被踢下线后重新上线，先安静这么多分钟：不回消息、不插话、不冒泡、不写信；之后再补回这段时间的私聊。0 = 不安静
     admin_alert_interval: int = 3600      # 余额不足/Key 失效时私信管理员，同类提醒最短间隔（秒）
 
     # ---- 没 @ 也回复（群聊）----
@@ -229,9 +249,12 @@ class Config(BaseModel):
 
     # ---- 风控 / 拟人节奏 ----
     user_cooldown: float = 5.0            # 同一人两次触发的最小间隔（秒）
-    global_rate_per_minute: int = 12      # 全局每分钟最多回复条数
-    global_rate_per_hour: int = 60        # 全局每小时最多回复条数（降低被风控的概率）
-    group_rate_per_hour: int = 40         # 每个群每小时最多回复条数
+    global_rate_per_minute: int = 20      # 全局每分钟最多回复几次（所有群、私聊合计；9/28 从 12 调到 20）
+    global_rate_per_hour: int = 150       # 全局每小时最多发几条（所有群、私聊合计，兜底防风控；9/28 从 60 调到 150）
+    group_rate_per_hour: int = 40         # 每个群每小时最多发几条（各群分开算）
+    private_rate_per_hour: int = 30       # 每个人私聊每小时最多发几条（各人分开算；9/28 新增）
+    leave_minutes_min: float = 20.0       # 她自己说了“我要去赶路了”“先走了”之后，这么多分钟内真的不在（在两个数之间随机）；0 = 不管
+    leave_minutes_max: float = 60.0
     farewell_on_limit: bool = True        # 每小时限额用完时，补一句“我要上路了”之类的告别（不调用模型）
     farewell_active_minutes: float = 10.0 # 全局限额用完时，这么多分钟内她说过话的群和私聊都会收到告别
     reply_delay_min: float = 1.5          # 回复前随机“打字”延迟（秒）

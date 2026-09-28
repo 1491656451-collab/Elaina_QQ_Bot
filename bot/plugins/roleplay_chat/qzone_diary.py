@@ -7,7 +7,8 @@
 - 评论：每 30 分钟查一次最近 7 天的说说，只回直接对她说的评论，按聊天规则回（好感、雷点、出戏检查、限额）。
 - 别人空间里的 @：查评论时顺便读“与我相关”（NapCat 不推送空间提醒，只能定时读），别人在说说里 @ 她就去评论一句，
   在评论里 @ 她、回她的话就回复那一条；别人之间聊天不插嘴。和自己说说下的评论共用每天的回复上限。
-- 管理员指令：/说说 预览｜发预览｜立即发｜删除最新｜今日｜图库｜查评论｜日结｜暂停｜恢复
+- 刷好友动态：查评论时顺便刷一次好友动态，好友几小时内发的原创说说按好感抽几率评论一句（每天单独限几条，每轮最多 1 条）。
+- 管理员指令：/说说 预览｜发预览｜立即发｜删除最新｜今日｜图库｜查评论｜好友动态｜日结｜暂停｜恢复
 
 这个模块在 roleplay_chat/__init__.py 的最后导入，直接用聊天插件里的人设、记忆、好感、限流这些东西。
 """
@@ -33,7 +34,8 @@ from . import (
 )
 from .gallery import Gallery
 from .qzone import (
-    RIGHT_PUBLIC, Comment, Qzone, QzoneError, addressed_to_me, mention_targets, parse_comments, plain_text, post_pics,
+    RIGHT_PUBLIC, Comment, Qzone, QzoneError, addressed_to_me, mention_targets, mentions_in, parse_comments, plain_text,
+    post_pics,
 )
 
 DATA = BOT_DIR / cfg.qzone_data_dir
@@ -151,23 +153,52 @@ qz.on_risk = _on_risk
 # 9/26 的 #3、#4 都是机器人刚连上 1 分多钟、刚要到凭证几秒就往空间里写，随后被踢；上线半小时后再写的那次没事。
 _online_since: float | None = None      # 这次连上 NapCat 的时间；None = 没连上或账号已被下线
 _offline_note = "机器人还没连上 NapCat"
-_cookie_gap = random.uniform(5, 10) * 60
+_grace = 30 * 60.0                      # 这次上线的冷静期（每次上线在 30～60 分钟里随机，节奏别太固定）
+_cookie_gap = 7 * 60.0                  # 这份凭证要放多久才能写（每次要到新凭证都重新随机 5～10 分钟）
+_gap_for = 0.0                          # _cookie_gap 是按哪一次要到的凭证算的
+
+
+def _new_grace() -> float:
+    lo = cfg.qzone_startup_grace_minutes
+    hi = max(lo, cfg.qzone_startup_grace_max_minutes)
+    return random.uniform(lo, hi) * 60
+
+
+def _gap() -> float:
+    global _cookie_gap, _gap_for
+    if qz.cookie_at and qz.cookie_at != _gap_for:
+        _gap_for = qz.cookie_at
+        _cookie_gap = random.uniform(5, 10) * 60
+    return _cookie_gap
+
+
+def read_block() -> str | None:
+    """定时任务、/说说 查评论 能不能读空间：下线、熔断、刚上线都不读"""
+    why = write_block("GET")
+    if why:
+        return why
+    if time.time() - _online_since < _grace:
+        return f"刚上线 {int((time.time() - _online_since) // 60)} 分钟，{datetime.fromtimestamp(_online_since + _grace, BJ):%H:%M} 之后才碰空间"
+    return None
 
 
 def write_block(method: str = "POST") -> str | None:
-    """现在能不能碰空间：返回不能的原因，能就返回 None。只读请求只看有没有下线"""
+    """现在能不能碰空间：返回不能的原因，能就返回 None。
+    任何请求：下线了、熔断中都不发（连凭证也不要）；写请求另外要过“刚上线”“刚要到凭证”两道"""
     if _online_since is None:
         return _offline_note
+    rb = risk_block()
+    if rb:
+        return f"空间功能{rb}"
     if method != "POST":
         return None
     now = time.time()
-    grace = cfg.qzone_startup_grace_minutes * 60
-    if now - _online_since < grace:
-        return f"刚上线 {int((now - _online_since) // 60)} 分钟，{datetime.fromtimestamp(_online_since + grace, BJ):%H:%M} 之后才写空间"
+    if now - _online_since < _grace:
+        return f"刚上线 {int((now - _online_since) // 60)} 分钟，{datetime.fromtimestamp(_online_since + _grace, BJ):%H:%M} 之后才写空间"
     if not qz.cookie_at:
         return "还没有空间凭证：先要一个，过几分钟再写"
-    if now - qz.cookie_at < _cookie_gap:
-        return f"刚要到新凭证，{datetime.fromtimestamp(qz.cookie_at + _cookie_gap, BJ):%H:%M} 之后才写空间"
+    if now - qz.cookie_at < _gap():
+        return f"刚要到新凭证，{datetime.fromtimestamp(qz.cookie_at + _gap(), BJ):%H:%M} 之后才写空间"
     return None
 
 
@@ -175,8 +206,8 @@ def write_ready_at() -> float:
     """最早什么时候可以写（给定时任务安排重试用）"""
     t = time.time()
     if _online_since is not None:
-        t = max(t, _online_since + cfg.qzone_startup_grace_minutes * 60)
-    t = max(t, (qz.cookie_at or time.time()) + _cookie_gap)
+        t = max(t, _online_since + _grace)
+    t = max(t, (qz.cookie_at or time.time()) + _gap())
     return t
 
 
@@ -308,7 +339,8 @@ DIARY_PROMPT = """【这次不是聊天，是写旅行日记，发在 QQ 空间�
 写作要求：
 - 文案要和配图对得上：可以写图里的场景、你在做什么、你的心情。
 - 篇幅：{length}。
-- 保持伊蕾娜的语气：自恋、嘴硬、有点毒舌，偶尔流露一点真心。像随手写的日记，不要写成文章。
+- 用你写旅行日记时的口吻（和聊天时不一样）：冷静的第一人称旁白，吐槽写在叙述里，自恋、嘴硬、有点毒舌，偶尔流露一点真心。像随手写的日记，不要写成文章。
+- 日记里才会用的习惯可以偶尔用上，但大多数时候一样都不用；用的话一条最多一样，别和最近几条用同一样（“话虽如此”尤其容易用多，要少用）：先把自己描述一番再自问自答（“……那位魔女究竟是谁？没错，就是我。”）、“话虽如此”“顺带一提”“原来如此原来如此”“可喜可贺可喜可贺”、结尾一句淡淡的感想（比如“卑鄙跟温柔果然挺类似的呢。”）。
 - 不写任何人的 QQ 号、群名，不写别人私事的细节；除了上面明确允许的称呼，不写任何人的名字。
 - 不落款（不要写“——伊蕾娜”），不加“#话题”，最多一个颜文字，也可以不加。不要出现“日记”“说说”“配图”“画像”这些字眼。
 - 别和最近几条重复开头、句式和话题。最近几条：{recent}
@@ -369,7 +401,7 @@ async def make_post() -> dict:
     async def ask(extra: list[dict]) -> str:
         resp = await client.chat.completions.create(
             model=cfg.deepseek_model, messages=messages + extra, temperature=cfg.llm_temperature,
-            max_tokens=max(max_tokens, 60), extra_body={"thinking": {"type": "disabled"}},
+            max_tokens=max(min(max_tokens, cfg.qzone_max_tokens), 60), extra_body={"thinking": {"type": "disabled"}},
         )
         ch = resp.choices[0]
         t = clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length")
@@ -405,17 +437,42 @@ async def publish(draft: dict) -> str:
     return tid
 
 
-def diary_context(text: str) -> str:
-    """聊天时有人提到她的说说：告诉她最近一条写了什么（聊天插件调用）"""
-    if not any(w in text for w in ("说说", "空间", "日记", "动态", "配图", "那张图", "你发的")):
+DIARY_WORDS = ("说说", "空间", "日记", "动态", "配图", "那张图", "你发的")
+TODAY_WORDS = ("今天", "今日", "今晚", "刚才", "最新", "最近")
+
+
+def asks_today_diary(text: str, force: bool = False) -> bool:
+    """是不是在问她今天 / 最近写的日记、说说（不是问以前旅途里的故事——那些也叫“旅行日记”）"""
+    return force or (any(w in text for w in ("日记", "说说", "动态")) and any(w in text for w in TODAY_WORDS))
+
+
+def diary_context(text: str, force: bool = False) -> str:
+    """聊天时有人提到她的说说 / 日记：告诉她写过什么、今天的写了没有（聊天插件调用）。
+    force=True：对方在接着刚才日记的话题追问（“然后呢”），话里没提“日记”也照样给"""
+    if not force and not any(w in text for w in DIARY_WORDS):
         return ""
     posts = recent_posts(1)
-    if not posts or time.time() - posts[-1]["ts"] > 3 * 86400:
-        return ""
-    p = posts[-1]
-    when = datetime.fromtimestamp(p["ts"], BJ)
-    return (f"【你最近写的旅行日记】{when.month}月{when.day}日：「{p['text']}」（配图是你自己：{p['desc']}）。"
-            "别人提到的话，你知道自己写过这个。")
+    last = posts[-1] if posts else None
+    now = _now()
+    today = now.strftime("%Y-%m-%d")
+    last_day = datetime.fromtimestamp(last["ts"], BJ).strftime("%Y-%m-%d") if last else ""
+    parts = []
+    if last and time.time() - last["ts"] <= 3 * 86400:
+        when = datetime.fromtimestamp(last["ts"], BJ)
+        parts.append(f"【你最近写的旅行日记】{when.month}月{when.day}日{'（就是今天）' if last_day == today else ''}："
+                     f"「{last['text']}」（配图是你自己：{last['desc']}）。别人提到的话，你知道自己写过这个。")
+    if last_day != today and asks_today_diary(text, force):
+        try:
+            st = state()
+            plan = "今天不打算写了" if st.get("posted") else f"打算晚上 {st['post_at']} 左右写"
+        except Exception:  # noqa: BLE001
+            plan = "打算晚上再写"
+        events = "；".join(str(m.get("event", "")) for m in today_moments()[:4] if m.get("event"))
+        parts.append(f"【今天的旅行日记】今天的还没写，{plan}。"
+                     + (f"今天记下来、可能会写进去的事：{events}。" if events else "今天还没遇到什么值得写的事。")
+                     + "对方问起今天的日记，就照这个说（可以说还没写、写好了再给他看），"
+                     "别编今天没发生的事，也别把以前旅途里的故事（【回忆参考】里的）说成今天的日记。")
+    return "\n".join(parts)
 
 
 # ------------------------------------------------------------------ 评论
@@ -432,6 +489,20 @@ def _save_seen(seen: dict) -> None:
 def _comment_key(tid: str, root: Comment, item: Comment | None) -> str:
     c = item or root
     return f"{tid}|{root.tid}|{c.tid if item else '-'}|{c.uin}|{c.time}"
+
+
+def _answered(me: int, root: Comment, item: Comment | None) -> bool:
+    """她是不是已经在这条之后回过这个人了（上次回完没来得及记“已看过”的情况，免得再回一遍）"""
+    c = item or root
+    for r in root.replies:
+        if r.uin != me or (c.time and r.time and r.time < c.time) or r is c:
+            continue
+        ms = r.mentions
+        if item is None and (not ms or root.uin in ms):
+            return True
+        if item is not None and (item.uin in ms or (not ms and item.uin == root.uin)):
+            return True
+    return False
 
 
 def _rounds_with(me: int, root: Comment, uin: int) -> int:
@@ -458,6 +529,9 @@ ELSEWHERE_COMMENT_PROMPT = """【这是「{owner}」的 QQ 空间说说下的评
 
 ELSEWHERE_POST_PROMPT = """【「{nick}」在自己的 QQ 空间说说里提到了你】他写的是：「{post}」{pic}
 你在这条说说下面评论一句：一两句话，不要换行。"""
+
+FRIEND_POST_PROMPT = """【你在刷 QQ 空间，刷到了「{nick}」刚发的说说】他写的是：「{post}」{pic}
+这不是在跟你说话，是你自己看到的。你顺手在下面评论一句：一两句话，不要换行，不要 @ 人，别像在回复谁找你；不想说的话不用硬凑。"""
 
 
 def _thread_text(me: int, root: Comment, upto: Comment) -> str:
@@ -528,8 +602,8 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
     return re.sub(r"\s*\n+\s*", "，", reply).strip()[:150]
 
 
-def _remember(uin: int, nick: str, said: str, reply: str, where: str) -> None:
-    """记进短期记忆、长期记忆；雷点照常扣分"""
+def _remember(uin: int, nick: str, said: str, reply: str, where: str, taboo: bool = True) -> None:
+    """记进短期记忆、长期记忆；雷点照常扣分（taboo=False：对方不是在跟她说话，比如她刷到的好友说说，不扣）"""
     key = f"qzone_{uin}"
     history = get_history(key)
     user_line = f"【{nick}】（{where}）{said}"
@@ -538,7 +612,7 @@ def _remember(uin: int, nick: str, said: str, reply: str, where: str) -> None:
     save_history(key)
     tier_now = familiarity_of(uin)
     ltm.bump_talk(uin, nick)
-    hit = next((w for w in cfg.taboo_words if w in said), None)
+    hit = taboo and next((w for w in cfg.taboo_words if w in said), None)
     if hit:
         k = cfg.taboo_tier_multiplier.get(tier_now, 1.0)
         if k > 0:
@@ -552,6 +626,9 @@ async def reply_comment(me: int, post: dict, root: Comment, item: Comment | None
                         owner: int | None = None, owner_nick: str = "", pic: str = "", earlier: list[str] | None = None) -> str:
     """回一条评论（她自己的说说，或 owner 的说说）；返回 replied / skipped / retry
     earlier：同一个人在这条说说下、这条之前连着说的几句（合成一次回，免得一条条回显得刷屏）"""
+    why = write_block()
+    if why:                              # 现在写不了：先别调模型（省钱，也不占冷却和额度）
+        raise QzoneError("hold", why)
     c = item or root
     text = clip_input("\n".join((earlier or []) + [c.text])) or "（评论了一个表情）"
     nick = c.nick or str(c.uin)
@@ -583,6 +660,9 @@ async def reply_comment(me: int, post: dict, root: Comment, item: Comment | None
 
 async def reply_post_mention(me: int, owner: int, owner_nick: str, d: dict, pic: str) -> str:
     """别人在自己的说说正文里 @ 了她：在那条说说下评论一句"""
+    why = write_block()
+    if why:
+        raise QzoneError("hold", why)
     text = clip_input(plain_text(str(d.get("content") or ""))) or "（一条说说）"
     scene = ELSEWHERE_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic)
     async with _locks[f"qzone_{owner}"]:
@@ -675,6 +755,9 @@ async def poll_comments(force: bool = False) -> str:
                     seen[k] = int(time.time())
                     logger.info(f"空间评论：和 {c.nick} 在这一楼已经来回 {cfg.qzone_comment_max_rounds} 轮了，不再回")
                     continue
+                if _answered(me, root, item):
+                    seen[k] = int(time.time())          # 之前其实回过了，只是没来得及记
+                    continue
                 todo.append({"time": c.time, "post": p, "root": root, "item": item, "key": k})
     _save_seen(seen)
     todo = _merge_same_person(todo, lambda t: str(t["post"].get("tid")), lambda t: (t["item"] or t["root"]).uin,
@@ -727,8 +810,10 @@ async def find_mentions(me: int) -> tuple[list[dict], list[str]]:
         try:
             d = await qz.detail(tid, owner)
         except QzoneError as e:
-            logger.info(f"空间：读 {it['nick']} 的说说失败（可能没权限看）：{e}")
-            continue
+            if e.kind == "api":          # 接口明确说不行（多半是没权限看）：以后也看不了，标成已看过
+                logger.info(f"空间：读 {it['nick']} 的说说失败（可能没权限看）：{e}")
+                continue
+            raise                        # 下线、熔断、限流、网络……：这一轮直接停，动态留到下一轮再看
         d.setdefault("tid", tid)
         owner_nick = str(d.get("name") or it["nick"] or owner)
         post_at_me, hits = mention_targets(me, d)
@@ -753,7 +838,8 @@ async def find_mentions(me: int) -> tuple[list[dict], list[str]]:
             k = f"m|{owner}|{tid}|{root.tid}|{c.tid if item else '-'}|{c.uin}|{c.time}"
             if k in seen:
                 continue
-            if (c.time and now - c.time > max_age) or _rounds_with(me, root, c.uin) >= cfg.qzone_comment_max_rounds:
+            if ((c.time and now - c.time > max_age) or _rounds_with(me, root, c.uin) >= cfg.qzone_comment_max_rounds
+                    or _answered(me, root, item)):
                 seen[k] = int(now)
                 continue
             todo.append({"kind": "comment", "owner": owner, "owner_nick": owner_nick, "d": d,
@@ -807,12 +893,151 @@ async def poll_mentions() -> str:
     return f"别人的空间：{len(todo)} 处在跟她说话，回了 {replied} 处，不理 {skipped} 处"
 
 
+# ------------------------------------------------------------------ 刷好友动态
+def _friend_quota_left() -> int:
+    st = state()
+    if st.get("friend_day") != st["date"]:
+        st["friend_day"], st["friend_count"], st["friend_uins"] = st["date"], 0, []
+        save_state(st)
+    return cfg.qzone_friend_comment_daily_max - st.get("friend_count", 0)
+
+
+def _count_friend(uin: int) -> None:
+    st = state()
+    st["friend_count"] = st.get("friend_count", 0) + 1
+    st["friend_uins"] = sorted(set(st.get("friend_uins", [])) | {uin})
+    save_state(st)
+
+
+def _friend_key(owner: int, tid: str) -> str:
+    return f"friend|{owner}|{tid}"
+
+
+def friend_candidates(me: int, items: list[dict]) -> list[dict]:
+    """好友动态里，可能去评论的说说：好友自己发的（不是评论、转发别人的动态）、够新的；同一条只留一次"""
+    now = time.time()
+    max_age = cfg.qzone_friend_post_max_age_hours * 3600
+    out, got = [], set()
+    for it in items:
+        owner = it["owner"]
+        if it["appid"] != "311" or not it["tid"] or not owner or owner == me:
+            continue
+        if it["opuin"] and it["opuin"] != owner:
+            continue                                   # 是别人在这条说说下的动作（评论、点赞……），不是好友刚发的
+        if not it["abstime"] or now - it["abstime"] > max_age:
+            continue
+        if (owner, it["tid"]) in got:
+            continue
+        got.add((owner, it["tid"]))
+        out.append(it)
+    return out
+
+
+def _friend_skip_reason(me: int, d: dict, created_fallback: int) -> str:
+    """读到详情后，还有哪些情况不评"""
+    if d.get("rt_tid") or d.get("rt_con") or d.get("rt_uin"):
+        return "是转发"
+    created = int(d.get("created_time") or created_fallback)
+    if time.time() - created > cfg.qzone_friend_post_max_age_hours * 3600:
+        return "发得太久了"
+    if me in mentions_in(str(d.get("content") or "")):
+        return "说说里 @ 了她（由回 @ 那边管）"
+    if any(r.uin == me or any(x.uin == me for x in r.replies) for r in parse_comments(d.get("commentlist"))):
+        return "她已经在下面说过话了"
+    if not plain_text(str(d.get("content") or "")).strip() and not post_pics(d):
+        return "没字也没图"
+    return ""
+
+
+async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic: str) -> str:
+    """在好友的说说下主动评论一句；返回 replied / skipped / retry / unconfirmed"""
+    why = write_block()
+    if why:
+        raise QzoneError("hold", why)
+    text = clip_input(plain_text(str(d.get("content") or ""))) or "（只发了图）"
+    scene = FRIEND_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic)
+    async with _locks[f"qzone_{owner}"]:
+        reply = await _respond(owner, owner_nick, text, scene)
+        if reply is None:
+            return "retry"
+        if not reply:
+            return "skipped"
+        ok = await qz.comment(str(d.get("tid")), owner, reply)
+        if not ok:
+            logger.warning(f"空间：在 {owner_nick} 的说说下评论没能确认发出，不记进记忆，也不再重试：{reply}")
+            return "unconfirmed"
+        _remember(owner, owner_nick, text, reply, "发了条说说，你刷到后在下面评论了一句", taboo=False)
+    logger.info(f"空间：刷到 {owner_nick}（{owner}）的说说，评论：{reply}")
+    return "replied"
+
+
+async def poll_friends() -> str:
+    """刷一次好友动态：每条新说说按好感抽一次签，抽中的去评论一句；每轮最多评 1 条"""
+    if _friend_quota_left() <= 0:
+        return f"好友动态：今天已评 {cfg.qzone_friend_comment_daily_max} 条，不刷了"
+    if _round_full():
+        return "好友动态：这一轮回复已满，没刷"
+    me = (await qz.ctx()).uin
+    cands = friend_candidates(me, await qz.friend_feeds(20))
+    seen = _seen()
+    done_today = set(state().get("friend_uins", []))
+    picked, fresh = [], 0
+    for it in cands:
+        k = _friend_key(it["owner"], it["tid"])
+        if k in seen:
+            continue
+        fresh += 1
+        prob = cfg.qzone_friend_comment_prob.get(familiarity_of(it["owner"]), 0.0)
+        if it["owner"] in done_today or random.random() >= prob:
+            seen[k] = int(time.time())                 # 没抽中：这条就当看过了，下次不再抽
+        else:
+            picked.append(it)
+    _save_seen(seen)
+    commented = reads = 0
+    notes = []
+    for it in picked:
+        k = _friend_key(it["owner"], it["tid"])
+        if commented or reads >= 3 or _round_full() or _friend_quota_left() <= 0:
+            _mark_seen([k])                            # 抽中了但这轮轮不上：也不留到下一轮（免得多抽几次签）
+            continue
+        try:
+            d = await qz.detail(it["tid"], it["owner"])
+        except QzoneError as e:
+            if e.kind == "api":
+                _mark_seen([k])
+                continue
+            raise
+        reads += 1
+        d.setdefault("tid", it["tid"])
+        nick = str(d.get("name") or it["nick"] or it["owner"])
+        skip = _friend_skip_reason(me, d, it["abstime"])
+        if skip:
+            _mark_seen([k])
+            notes.append(f"{nick}：{skip}")
+            await asyncio.sleep(random.uniform(1.5, 4))
+            continue
+        await _gap_between_replies(0)
+        res = await comment_friend_post(me, it["owner"], nick, d, await _pic_hint(post_pics(d)))
+        if res == "retry":
+            continue                                   # 限流、模型出错：留到下一轮
+        _mark_seen([k])
+        if res in ("replied", "unconfirmed"):          # 没确认的也算今天的一条（万一其实发出去了）
+            commented += res == "replied"
+            _round["n"] += 1
+            _count_friend(it["owner"])
+    out = f"好友动态：新说说 {fresh} 条，抽中 {len(picked)} 条，评论了 {commented} 条"
+    return out + (f"（{'；'.join(notes)}）" if notes else "")
+
+
 async def poll_all() -> str:
     _round["n"] = 0
     parts = [await poll_comments()]
     if cfg.qzone_mention_reply:
         await asyncio.sleep(random.uniform(2, 5))
         parts.append(await poll_mentions())
+    if cfg.qzone_friend_comment:
+        await asyncio.sleep(random.uniform(2, 5))
+        parts.append(await poll_friends())
     st = state()
     st["last_poll"] = time.time()
     save_state(st)
@@ -826,7 +1051,7 @@ def _new_day_state(day: str) -> dict:
     old = _read(STATE_FILE, {})
     return {"date": day, "post_at": f"{m // 60:02d}:{m % 60:02d}", "posted": False, "post_tries": 0,
             "summary_done": False, "paused": old.get("paused", False), "last_poll": old.get("last_poll", 0),
-            "comment_day": day, "comment_count": 0}
+            "comment_day": day, "comment_count": 0, "friend_day": day, "friend_count": 0, "friend_uins": []}
 
 
 def state() -> dict:
@@ -856,6 +1081,24 @@ _poll_gap = 0.0
 
 
 _retry_poll_at = 0.0     # 上一轮有回复被闸门挡住：到这个时间再查一次（不用等满 2 小时）
+_was_quiet = False       # 上一次 tick 是不是在勿扰时段 / 高峰里
+_release_at = 0.0        # 勿扰 / 高峰结束后，到这个时间才开始查
+
+
+async def _adopt_recent_post() -> bool:
+    """最近 40 分钟里空间有没有她新发的说说（上次“结果不确定”其实发出去了）；有就记下来，返回 True"""
+    known = {p["tid"] for p in _read(POSTS_FILE, [])}
+    for p in await qz.list_posts(3):
+        if int(p.get("created_time") or 0) >= time.time() - 40 * 60:
+            tid = str(p.get("tid"))
+            if tid not in known:
+                posts = _read(POSTS_FILE, [])
+                posts.append({"tid": tid, "ts": int(p.get("created_time") or time.time()),
+                              "text": str(p.get("content") or ""), "image": "", "desc": "", "moments": []})
+                _write(POSTS_FILE, posts[-60:])
+            logger.info(f"QQ 空间：上次的说说其实发出去了（tid={tid}），不再重发")
+            return True
+    return False
 
 
 async def _warm_cookie() -> None:
@@ -870,10 +1113,8 @@ async def _warm_cookie() -> None:
 async def tick() -> None:
     global _poll_gap, _retry_poll_at
     st = state()
-    if st.get("paused") or risk_block() or _online_since is None:
-        return
-    if time.time() - _online_since < cfg.qzone_startup_grace_minutes * 60:
-        return                       # 刚上线：半小时内空间一概不碰（读也不读）
+    if st.get("paused") or read_block():
+        return                       # 下线、熔断、刚上线（30～60 分钟内读也不读）：空间一概不碰
     now = _now()
     minute = now.hour * 60 + now.minute
     window = peak.parse_ranges(cfg.qzone_post_window)
@@ -886,9 +1127,29 @@ async def tick() -> None:
         logger.info(f"QQ 空间：日结完成，整理了 {n} 个会话")
 
     if not st["posted"] and _hm(st["post_at"]) <= minute < end + 60 and st.get("post_tries", 0) < 3:
+        last = recent_posts(1)
+        if last and time.time() - last[-1]["ts"] < cfg.qzone_post_min_gap_hours * 3600:
+            st["posted"] = True          # 离上一条（比如手动发的）还不到 12 小时：今天这条不发了
+            save_state(st)
+            logger.info(f"QQ 空间：离上一条说说不到 {cfg.qzone_post_min_gap_hours:g} 小时，今天的定时说说跳过")
+            return
         if write_block():
             await _warm_cookie()
             return                   # 到点了但现在还不能写：过几分钟再来，不算失败次数
+        if st.get("post_uncertain"):
+            # 上次发的时候超时/格式不对，不知道发没发出去：先看看空间里是不是已经有了，免得发两条
+            try:
+                if await _adopt_recent_post():
+                    st = state()
+                    st["posted"], st["post_uncertain"] = True, False
+                    save_state(st)
+                    return
+            except QzoneError as e:
+                logger.info(f"QQ 空间：查上次说说发没发出去失败（{e}），这次先不发")
+                return
+            st = state()
+            st["post_uncertain"] = False
+            save_state(st)
         st["post_tries"] = st.get("post_tries", 0) + 1
         save_state(st)
         if not st["summary_done"]:
@@ -907,6 +1168,9 @@ async def tick() -> None:
                 save_state(st)
                 logger.info(f"QQ 空间：说说先不发（{e.msg}）")
                 return
+            if isinstance(e, QzoneError) and e.kind in ("network", "format", "page"):
+                st["post_uncertain"] = True                  # 不知道发没发出去：下次先查再发
+                save_state(st)
             logger.warning(f"QQ 空间：第 {st['post_tries']} 次发说说失败：{e}")
             # 10 分钟后再试（最多 3 次）
             later = min(end + 59, minute + 10)
@@ -915,7 +1179,14 @@ async def tick() -> None:
             if st["post_tries"] >= 3:
                 await _alert(e if isinstance(e, QzoneError) else QzoneError("api", str(e)), "发说说（今天试了 3 次）")
 
-    if cfg.qzone_comment_reply and not in_peak() and not _in_ranges(cfg.qzone_comment_quiet, minute):
+    global _was_quiet, _release_at
+    quiet_now = in_peak() or _in_ranges(cfg.qzone_comment_quiet, minute)
+    if quiet_now:
+        _was_quiet = True
+    elif _was_quiet:                 # 勿扰时段 / 高峰刚结束：再随机推迟一会儿，别每天 09:00 准点查
+        _was_quiet = False
+        _release_at = time.time() + random.uniform(0, cfg.qzone_quiet_release_max_minutes * 60)
+    if cfg.qzone_comment_reply and not quiet_now and time.time() >= _release_at:
         if not _poll_gap:
             _poll_gap = cfg.qzone_comment_poll_minutes * 60 * random.uniform(0.85, 1.15)
         due = time.time() - float(st.get("last_poll") or 0) >= _poll_gap
@@ -971,13 +1242,15 @@ async def _():
 async def _():
     if _task:
         _task.cancel()
+    await qz.close()
 
 
 # ------------------------------------------------------------------ 管理员指令
 _last_draft: dict | None = None
 
-USAGE = ("/说说 预览：生成一条给你看，不发\n/说说 发预览：把刚才预览的那条发出去\n/说说 立即发：马上生成并发出（今天就不再定时发了）\n"
-         "/说说 删除最新：删掉最近一条\n/说说 今日：今天的见闻和发布安排\n/说说 图库：图库情况\n/说说 查评论：马上查一轮评论（自己说说下的、别人空间里 @ 她的）并回复\n"
+USAGE = ("/说说 预览：生成一条给你看，不发\n/说说 发预览：把刚才预览的那条发出去\n/说说 立即发：马上生成并发出（离它不到 12 小时的定时说说会跳过）\n"
+         "/说说 删除最新：删掉最近一条\n/说说 今日：今天的见闻和发布安排\n/说说 图库：图库情况\n/说说 查评论：马上查一轮评论（自己说说下的、别人空间里 @ 她的）并回复，顺便刷好友动态\n"
+         "/说说 好友动态：只看不评，列出最近好友发的说说和她评论的几率\n"
          "/说说 日结：马上把今天的聊天整理成见闻\n/说说 暂停 / 恢复：停掉或恢复自动发说说和回评论（恢复也会解除风控熔断）")
 
 diary_cmd = on_command("说说", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
@@ -997,8 +1270,13 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     global _last_draft
     cmd = arg.extract_plain_text().strip()
     blocked = risk_block()
-    if blocked and cmd in ("发预览", "立即发", "删除最新", "查评论"):
+    if blocked and cmd in ("发预览", "立即发", "删除最新", "查评论", "好友动态"):
         await diary_cmd.finish(f"（空间功能{blocked}。这时候再动空间容易让设备被下线；确定要恢复就先发 /说说 恢复）")
+    if cmd in ("查评论", "好友动态") and read_block():
+        await diary_cmd.finish(f"（先不查：{read_block()}）")
+    if cmd == "删除最新" and write_block():
+        await _warm_cookie()
+        await diary_cmd.finish(f"（先不删：{write_block()}）")
     try:
         if cmd == "预览":
             _last_draft = await make_post()
@@ -1012,10 +1290,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
                 await diary_cmd.finish(f"（先不发：{write_block() or why}。预览还留着，过会儿再发 /说说 发预览）")
             tid = await publish(_last_draft)
             _last_draft = None
-            st = state()
-            st["posted"] = True
-            save_state(st)
-            await diary_cmd.finish(f"（发出去了 tid={tid}，今天不再定时发）")
+            await diary_cmd.finish(f"（发出去了 tid={tid}。离这条不到 {cfg.qzone_post_min_gap_hours:g} 小时的定时说说会跳过）")
         elif cmd == "立即发":
             why = write_block()
             if why:
@@ -1023,10 +1298,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
                 await diary_cmd.finish(f"（先不发：{write_block() or why}）")
             d = await make_post()
             tid = await publish(d)
-            st = state()
-            st["posted"] = True
-            save_state(st)
-            await diary_cmd.finish(_draft_msg(d, f"（已发出 tid={tid}，今天不再定时发）"))
+            await diary_cmd.finish(_draft_msg(d, f"（已发出 tid={tid}。离这条不到 {cfg.qzone_post_min_gap_hours:g} 小时的定时说说会跳过）"))
         elif cmd == "删除最新":
             posts = _read(POSTS_FILE, [])
             if not posts:
@@ -1040,6 +1312,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             ms = today_moments()
             lines = [f"（今天：{'已发' if st['posted'] else '定在 ' + st['post_at'] + ' 发'}｜日结{'已做' if st['summary_done'] else '还没做'}"
                      f"｜回评论 {st.get('comment_count', 0)}/{cfg.qzone_comment_daily_max}"
+                     f"｜评好友 {st.get('friend_count', 0) if st.get('friend_day') == st['date'] else 0}/{cfg.qzone_friend_comment_daily_max}"
                      f"｜{'⏸ 已暂停' if st.get('paused') else ('自动运行中' if cfg.qzone_enabled else '总开关没开')}）"]
             if blocked:
                 lines.append(f"⚠️ 空间功能{blocked}")
@@ -1056,6 +1329,21 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             await diary_cmd.finish((f"（刚处理了 {n} 张新图）\n" if n else "") + gallery.stats(cfg.qzone_image_reuse_days))
         elif cmd == "查评论":
             await diary_cmd.finish("（" + await poll_all() + "）")
+        elif cmd == "好友动态":
+            me = (await qz.ctx()).uin
+            items = await qz.friend_feeds(20)
+            cands = friend_candidates(me, items)
+            seen = _seen()
+            lines = [f"（只看不评：好友动态读到 {len(items)} 条，其中 {cfg.qzone_friend_post_max_age_hours:g} 小时内好友自己发的说说 {len(cands)} 条"
+                     f"｜今天已评 {cfg.qzone_friend_comment_daily_max - _friend_quota_left()}/{cfg.qzone_friend_comment_daily_max}"
+                     f"｜{'开' if cfg.qzone_friend_comment else '关'}）"]
+            for it in cands[:10]:
+                fam = familiarity_of(it["owner"])
+                when = datetime.fromtimestamp(it["abstime"], BJ).strftime("%H:%M")
+                mark = "已看过" if _friend_key(it["owner"], it["tid"]) in seen else "还没抽"
+                lines.append(f"· {when} {it['nick'] or it['owner']}（{ltm.TIER_NAMES.get(fam, fam)}，"
+                             f"几率 {cfg.qzone_friend_comment_prob.get(fam, 0.0):.0%}，{mark}）")
+            await diary_cmd.finish("\n".join(lines))
         elif cmd == "日结":
             n = await daily_summary()
             await diary_cmd.finish(f"（整理了 {n} 个会话，今日见闻现在有 {len(today_moments())} 件）")
@@ -1087,8 +1375,15 @@ def _context_line() -> str:
         ago = (time.time() - lw[0]) / 60
         last = f"最近一次空间写操作：{ago:.0f} 分钟前（{lw[1]}）"
     else:
-        last = "这次启动后没有空间写操作"
+        last = "没有空间写操作的记录"
     return f"最近一小时回复 {replies} 条｜{last}｜空间功能{'开' if cfg.qzone_enabled else '关'}"
+
+
+def _go_online() -> None:
+    global _online_since, _grace
+    _online_since = time.time()
+    _grace = _new_grace()
+    qz.forget_ctx()
 
 
 def _go_offline(note: str) -> None:
@@ -1100,10 +1395,8 @@ def _go_offline(note: str) -> None:
 
 @get_driver().on_bot_connect
 async def _(bot: Bot):
-    global _online_since
-    _online_since = time.time()
-    qz.forget_ctx()
-    log_event(f"机器人连上 NapCat（QQ {bot.self_id}）｜空间功能 {cfg.qzone_startup_grace_minutes:g} 分钟后才开始动")
+    _go_online()
+    log_event(f"机器人连上 NapCat（QQ {bot.self_id}）｜空间功能 {_grace / 60:.0f} 分钟后（{datetime.fromtimestamp(_online_since + _grace, BJ):%H:%M}）才开始动")
 
 
 @get_driver().on_bot_disconnect
@@ -1127,7 +1420,10 @@ async def _(event: NoticeEvent):
     logger.warning(f"账号被下线：{detail}")
 
 
-# 下线后 NapCat 有时不断开连接、自己重新登录：又收到消息，就说明账号回来了，按“刚上线”重新计时
+# 下线后 NapCat 有时不断开连接、自己重新登录：又收到消息时，问一下 NapCat 账号是不是真的在线了（迟到的旧消息不算）
+_last_online_check = 0.0
+
+
 async def _back_online(event: MessageEvent) -> bool:
     return _online_since is None
 
@@ -1135,9 +1431,27 @@ async def _back_online(event: MessageEvent) -> bool:
 back_online = on_message(rule=_back_online, priority=0, block=False)
 
 
+async def _really_online(bot: Bot) -> bool:
+    try:
+        st = await bot.call_api("get_status")
+        if isinstance(st, dict) and "online" in st:
+            return bool(st.get("online"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        info = await bot.call_api("get_login_info")
+        return bool(isinstance(info, dict) and info.get("user_id"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @back_online.handle()
-async def _():
-    global _online_since
-    _online_since = time.time()
-    qz.forget_ctx()
-    log_event(f"下线后又收到消息，账号应该重新登录了｜空间功能 {cfg.qzone_startup_grace_minutes:g} 分钟后才开始动")
+async def _(bot: Bot):
+    global _last_online_check
+    if time.time() - _last_online_check < 60:       # 别每条消息都去问
+        return
+    _last_online_check = time.time()
+    if not await _really_online(bot):
+        return
+    _go_online()
+    log_event(f"下线后 NapCat 确认账号重新在线了｜空间功能 {_grace / 60:.0f} 分钟后（{datetime.fromtimestamp(_online_since + _grace, BJ):%H:%M}）才开始动")

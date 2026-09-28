@@ -24,6 +24,16 @@ FILES = ("selected_tags.csv", "model.onnx")
 SIZE = 448          # v3 系列的输入尺寸（加载模型后会按模型实际的输入尺寸为准）
 CHARACTER = 4       # selected_tags.csv 里 category=4 表示角色标签
 SELF_TAG = "elaina_(majo_no_tabitabi)"
+MAX_PIXELS = 16_000_000    # 超过约 1600 万像素（比如 4000×4000）的图不识别：解码一张就要几百 MB 内存
+MIN_MODEL_BYTES = 100 * 1024 * 1024   # v3 系列模型都在 300 MB 以上，比这小肯定是没下完整
+
+
+class ImageTooLarge(Exception):
+    pass
+
+
+class TagTableMismatch(Exception):
+    pass
 
 
 class Tagger:
@@ -76,8 +86,33 @@ class Tagger:
             self._load()
         except Exception as e:  # noqa: BLE001
             self.status = "加载失败"
-            logger.warning(f"角色识别：模型加载失败（{e}）。文件可能没下完整，已删除，下次启动会重新下载")
-            (self.dir / "model.onnx").unlink(missing_ok=True)
+            self._handle_load_error(e)
+
+    def _handle_load_error(self, e: Exception) -> None:
+        """只有确认文件坏了才删（删了下次启动会重新下载）；内存不够等其他原因保留文件，免得反复重下 470 MB"""
+        model = self.dir / "model.onnx"
+        msg = str(e)
+        if isinstance(e, TagTableMismatch):
+            (self.dir / "selected_tags.csv").unlink(missing_ok=True)
+            logger.warning(f"角色识别：{msg}。标签表已删除，下次启动会重新下载")
+            return
+        size = model.stat().st_size if model.exists() else 0
+        expected = self._expected_size()
+        broken = ("protobuf" in msg.lower() or size < MIN_MODEL_BYTES
+                  or (expected is not None and size != expected))
+        if broken:
+            model.unlink(missing_ok=True)
+            logger.warning(f"角色识别：模型文件损坏或没下完整（{msg[:120]}），已删除，下次启动会重新下载")
+        else:
+            logger.warning(f"角色识别：模型加载失败（{msg[:200]}）。文件看起来是完整的，所以没删；"
+                           f"如果是内存不够，关掉一些程序后重启机器人，或者设 VISION_TAGGER=false 先关掉角色识别")
+
+    def _expected_size(self) -> int | None:
+        """自动下载时记下的文件大小（手动下载的没有这个记录）"""
+        try:
+            return int((self.dir / "model.onnx.size").read_text().strip())
+        except (OSError, ValueError):
+            return None
 
     def _download(self, names: list[str]) -> bool:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -97,8 +132,7 @@ class Tagger:
                 return False
         return True
 
-    @staticmethod
-    def _fetch(url: str, dest: Path) -> None:
+    def _fetch(self, url: str, dest: Path) -> None:
         """下载到 .part 文件，支持断点续传；下完再改名"""
         part = dest.with_name(dest.name + ".part")
         have = part.stat().st_size if part.exists() else 0
@@ -125,6 +159,8 @@ class Tagger:
         if total and part.stat().st_size < total:
             raise OSError("没下完整")
         part.replace(dest)
+        if total:
+            dest.with_name(dest.name + ".size").write_text(str(total))
 
     def _load(self) -> None:
         import onnxruntime as ort
@@ -135,6 +171,7 @@ class Tagger:
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = max(1, self.threads)   # 少占几个核，别让 QQ 卡
         opts.inter_op_num_threads = 1
+        opts.enable_cpu_mem_arena = False    # 不留内存池：识别完把临时内存还给系统（小内存服务器上很重要）
         t0 = time.monotonic()
         sess = ort.InferenceSession(str(self.dir / "model.onnx"), sess_options=opts,
                                     providers=["CPUExecutionProvider"])
@@ -144,7 +181,7 @@ class Tagger:
             self._size = inp.shape[1]
         n_out = sess.get_outputs()[0].shape[-1]
         if isinstance(n_out, int) and n_out != len(rows):
-            raise ValueError(f"标签表（{len(rows)} 个）和模型输出（{n_out} 个）对不上")
+            raise TagTableMismatch(f"标签表（{len(rows)} 个）和模型输出（{n_out} 个）对不上")
         self._session = sess
         self.status = "已启用"
         self._self_idx = next((i for i, n in self._chars if n == SELF_TAG), None)
@@ -154,35 +191,50 @@ class Tagger:
 
     # ------------------------------------------------------------ 识别
     def _preprocess(self, raw: bytes):
+        """先查尺寸、先缩小，再垫白底和铺正方形：全程只在小图上做格式转换，大图也不会占太多内存"""
         import numpy as np
         from PIL import Image
 
-        img = Image.open(io.BytesIO(raw))
-        img.seek(0)                          # 动图只看第一帧
-        img = img.convert("RGBA")
-        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        img = Image.alpha_composite(bg, img).convert("RGB")   # 透明背景垫成白色
-        side = max(img.size)
-        square = Image.new("RGB", (side, side), (255, 255, 255))
-        square.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
-        square = square.resize((self._size, self._size), Image.BICUBIC)
+        img = Image.open(io.BytesIO(raw))       # 这一步只读文件头，还没解码
+        w, h = img.size
+        if w * h > MAX_PIXELS:
+            raise ImageTooLarge(f"{w}×{h}")
+        img.seek(0)                             # 动图只看第一帧
+        size = self._size
+        if img.format == "JPEG":
+            img.draft("RGB", (size, size))      # JPEG 直接按缩小的比例解码，省内存
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA")           # 调色板、灰度等先转一下（像素数已经限制过）
+        w, h = img.size
+        scale = size / max(w, h)
+        img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BICUBIC)
+        if img.mode == "RGBA":
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(bg, img)     # 透明背景垫成白色
+        img = img.convert("RGB")
+        square = Image.new("RGB", (size, size), (255, 255, 255))
+        square.paste(img, ((size - img.width) // 2, (size - img.height) // 2))
         arr = np.asarray(square, dtype=np.float32)[:, :, ::-1]   # RGB → BGR，数值保持 0～255
         return np.ascontiguousarray(arr[None, ...])
 
     def _detect_sync(self, raw: bytes) -> tuple[list[tuple[str, float]], float]:
-        x = self._preprocess(raw)
-        with self._lock:                     # 一次只跑一张，避免同时占满 CPU
+        with self._lock:                     # 一次只处理一张（预处理也在锁里），避免同时占满 CPU 和内存
+            x = self._preprocess(raw)
             probs = self._session.run(None, {self._input: x})[0][0]
         found = [(name, float(probs[i])) for i, name in self._chars if probs[i] >= self.threshold]
         self_score = float(probs[self._self_idx]) if self._self_idx is not None else 0.0
         return sorted(found, key=lambda t: -t[1])[:3], self_score
 
     async def detect_full(self, raw: bytes) -> tuple[list[tuple[str, float]], float] | None:
-        """返回 ([(过了门槛的角色标签, 置信度)], 伊蕾娜的置信度)；模型没准备好或出错时返回 None"""
+        """返回 ([(过了门槛的角色标签, 置信度)], 伊蕾娜的置信度)；模型没准备好或出错时返回 None；
+        图太大没识别时返回 ([], -1.0)"""
         if not self.ready:
             return None
         try:
             return await asyncio.to_thread(self._detect_sync, raw)
+        except ImageTooLarge as e:
+            logger.info(f"角色识别：图太大（{e}），跳过")
+            return [], -1.0          # 置信度 -1 表示“太大没识别”，和“识别过、不是她”区分开
         except Exception as e:  # noqa: BLE001
             logger.warning(f"角色识别：这张图识别失败：{e}")
             return None

@@ -34,3 +34,16 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---- 从服务器拉回来的日志和聊天记录（含别人的 QQ 号和聊天内容，不能传）----
+server_logs/
+qqbot.tgz
+server.txt
+
+# ---- 人设相关、含原作台词或真实聊天的文档（不公开）----
+docs/人设打磨备份/
+docs/人设回归测试/
+docs/人设回归测试报告.md
+docs/人设打磨-原文台词对照报告.md
+docs/问题排查记录-今天的日记乱编.md
+docs/问题排查记录-追问往事记混.md

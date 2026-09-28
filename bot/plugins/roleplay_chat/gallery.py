@@ -37,23 +37,30 @@ DESCRIBE_PROMPT = """这是一张画着伊蕾娜（灰色长发、黑色三角�
 SEASON_OF_MONTH = {12: "冬", 1: "冬", 2: "冬", 3: "春", 4: "春", 5: "春", 6: "夏", 7: "夏", 8: "夏", 9: "秋", 10: "秋", 11: "秋"}
 
 
-def _compress(src: Path, side: int, quality: int = 90) -> bytes:
-    from PIL import Image
-
-    img = Image.open(src)
-    img.seek(0)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGBA")
-        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        img = Image.alpha_composite(bg, img)
-    img = img.convert("RGB")
-    img.thumbnail((side, side), Image.LANCZOS)
+def _to_jpeg(img, quality: int) -> bytes:
     for q in (quality, 85, 78, 70):
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=q, optimize=True)
         if buf.tell() <= UPLOAD_MAX_BYTES or q == 70:
             return buf.getvalue()
     return buf.getvalue()
+
+
+def _compress(src, side: int, quality: int = 90) -> bytes:
+    """src 是文件路径或图片字节。先缩小再处理（大原图整张解码很吃内存），再垫白底、转成 JPEG"""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src)
+    img.seek(0)
+    if img.format == "JPEG":
+        img.draft("RGB", (side, side))         # JPEG 解码时直接按缩小后的尺寸解，省内存
+    img.thumbnail((side, side), Image.LANCZOS)  # 先缩小，后面的垫底、转色都在小图上做
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(bg, img)
+    img = img.convert("RGB")
+    return _to_jpeg(img, quality)
 
 
 def _json_of(text: str) -> dict:
@@ -91,6 +98,7 @@ class Gallery:
     def _stale(self, f: Path) -> bool:
         it = self.items.get(f.name)
         return not it or it.get("size") != f.stat().st_size or not it.get("desc") or \
+            not it.get("cache") or not (self.cache_dir / it["cache"]).exists() or \
             (it.get("self") is None and self.tagger is not None and self.tagger.ready)
 
     async def prepare(self, limit: int | None = None) -> int:
@@ -121,10 +129,13 @@ class Gallery:
               "disabled": old.get("disabled", False)}
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         up = await asyncio.to_thread(_compress, f, MAX_SIDE)
-        cache = self.cache_dir / (f.stem + ".jpg")
+        cache = self.cache_dir / (f.name + ".jpg")      # 带上原扩展名：a.png 和 a.jpg 不会共用一个缓存
         cache.write_bytes(up)
+        old_cache = old.get("cache")
+        if old_cache and old_cache != cache.name and (self.cache_dir / old_cache).exists():
+            (self.cache_dir / old_cache).unlink(missing_ok=True)
         it["cache"] = cache.name
-        look = await asyncio.to_thread(_compress, f, LOOK_SIDE, 85)
+        look = await asyncio.to_thread(_compress, up, LOOK_SIDE, 85)    # 给模型看的小图从压好的上传图生成，不再解码原图
 
         # 认人（本机，免费）
         it["self"] = None
