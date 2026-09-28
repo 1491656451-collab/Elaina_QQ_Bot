@@ -1,5 +1,9 @@
-# 9/27 从你电脑上的 .venv（Python 3.14）里抄下来的版本，也就是能正常跑的那一套。Python 3.12 以上都装得上（Ubuntu 24.04 自带 3.12）。
-# 服务器上想装得一模一样：.venv/bin/pip install -r requirements.lock
+# Python 3.12 和 3.14 都能装的一套固定版本（Windows 电脑、Ubuntu 24.04 服务器通用）。
+# 9/28 按服务器（Ubuntu 24.04，Python 3.12）实际装上、跑通的版本改的：9/27 那版是从电脑 3.14 的 .venv 抄的，
+# 其中 httpcore2 2.13.1 要求 3.14 以上，服务器装不上。和 3.14 那版相比，下面几个降了一点：
+#   httpcore2 2.13.0、httpx2 2.13.0、openai 3.17.0、starlette 1.6.0、uvicorn 0.53.0、watchfiles 1.2.0
+# uvloop 只在 Linux / macOS 上装（Windows 没有）；win32-setctime 只在 Windows 上装。
+# 用法：服务器 .venv/bin/pip install -r requirements.lock ；电脑上 .venv\Scripts\pip install -r requirements.lock
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -11,10 +15,10 @@ fastapi==0.141.1
 flatbuffers==25.12.19
 h11==0.16.0
 httpcore==1.0.9
-httpcore2==2.13.1
+httpcore2==2.13.0
 httptools==0.8.0
 httpx==0.28.1
-httpx2==2.13.1
+httpx2==2.13.0
 idna==3.20
 jiter==0.17.0
 loguru==0.7.3
@@ -24,7 +28,7 @@ nonebot-adapter-onebot==2.4.6
 nonebot2==2.5.0
 numpy==2.5.3
 onnxruntime==1.30.0
-openai==3.19.2
+openai==3.17.0
 packaging==26.3
 pillow==12.3.0
 propcache==0.5.4
@@ -35,12 +39,13 @@ pygtrie==2.6.2
 python-dotenv==1.2.3
 pyyaml==6.0.3
 sniffio==1.3.1
-starlette==1.7.0
+starlette==1.6.0
 truststore==0.10.4
 typing-extensions==4.16.0
 typing-inspection==0.4.4
-uvicorn==0.54.0
-watchfiles==1.3.0
+uvloop==0.22.1; sys_platform != "win32"
+uvicorn==0.53.0
+watchfiles==1.2.0
 websockets==17.1
 win32-setctime==1.2.0; sys_platform == "win32"
 yarl==1.25.1

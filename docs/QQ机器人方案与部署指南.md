@@ -671,54 +671,15 @@ QZONE_ENABLED=true                   ← QQ 空间日记（代码默认关，见
 
 ## 6. 迁移到服务器
 
-下面按 Ubuntu 24.04 写。其他 Linux 发行版命令大同小异。
+**9/28 起机器人已经搬到阿里云服务器（Ubuntu 24.04，2 核 2G）上运行。** 服务器上装了什么、平时怎么管、怎么更新、从零重装的完整步骤，都写在单独的《服务器部署与运维.md》里，这里只列要点：
 
-1. **先登录小号**：换机器登录相当于"异地登录"，是封号的高发时刻。建议先在服务器上正常登录那个小号用几天，再挂机器人。
-2. **时区设成北京时间**：`sudo timedatectl set-timezone Asia/Shanghai`。机器人自己的日志固定用北京时间，但 `qzone.log` 用的是系统时间，时区不对两边会对不上。
-3. **NapCat 用 Docker 部署**（`mlikiowa/napcat-docker`），WebUI 的配置方法和 4.4 一样，**但连接地址要注意**：容器里的 `127.0.0.1` 是容器自己，不是服务器，照抄 4.4 会一直重连。二选一：
-   - **推荐**：NapCat 容器用主机网络（`docker run` 加 `--network host`，或 compose 里写 `network_mode: host`）。这样 4.4 的 `ws://127.0.0.1:8081/onebot/v11/ws` 不用改，`.env` 里 `HOST=127.0.0.1` 也不用改。
-   - 不用主机网络：机器人 `.env` 里 `HOST=0.0.0.0`，NapCat 里的地址填 `ws://172.17.0.1:8081/onebot/v11/ws`（Docker 默认网桥的宿主机地址）。
-   - 两种都**不要在防火墙或云安全组里对外开放 8081 端口**，token 换成一串随机字符（不要带 QQ 号）。
-4. **拷文件**：把整个 `D:\QQBot\bot` 和 `D:\QQBot\novel` 一起拷过去，保持两者的相对位置不变。`.venv` 不用拷（Windows 的用不了）。下面这些要一起带走：
-   - `data\history`（短期记忆）
-   - `data\memory`（长期记忆）
-   - `data\stickers`（表情库）
-   - `data\qzone`（发过的说说和评论已读记录，不带会重复回旧评论）
-   - `qzone\images`（图库）
-5. **装环境**（Ubuntu 24.04 默认没有 `python` 命令，也没装 venv）：
-
-   ```bash
-   sudo apt install -y python3-venv
-   cd ~/QQBot/bot
-   python3 -m venv .venv
-   .venv/bin/pip install -r requirements.lock      # 和你电脑上测过的版本一模一样
-   .venv/bin/python bot.py                          # 先手动跑一次，看到“角色扮演聊天已启动”再 Ctrl+C
-   ```
-
-   `requirements.lock` 是 9/27 从你电脑的 `.venv` 里抄的版本，需要 Python 3.12 以上（Ubuntu 24.04 自带 3.12）。`requirements.txt` 只写了大版本范围，用它装会装到当时的最新版，和你测过的不一定一样。
-6. **用 systemd 常驻**：新建 `/etc/systemd/system/qqbot.service`（`User` 和路径换成你自己的）：
-
-   ```ini
-   [Unit]
-   Description=QQ bot (Elaina)
-   After=network-online.target docker.service
-
-   [Service]
-   User=ubuntu
-   WorkingDirectory=/home/ubuntu/QQBot/bot
-   ExecStart=/home/ubuntu/QQBot/bot/.venv/bin/python bot.py
-   Restart=on-failure
-   RestartSec=30
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-   然后执行 `sudo systemctl daemon-reload && sudo systemctl enable --now qqbot`。看日志用 `journalctl -u qqbot -f`，或者看 `bot/data/logs/` 里当天的文件。
-   - 9/27 起，`bot.py` 启动时会自己切到 bot 目录，插件也按自己所在的位置找数据，所以就算漏写 `WorkingDirectory`，也不会找不到人设、把数据写到别处。写上更稳妥。
-   - `RestartSec=30`：崩了隔 30 秒再起，别连续秒重启。
-7. **2 核的服务器**：`.env` 里 `VISION_TAGGER_THREADS=1`，免得识别图片的那一两秒卡住 NapCat。
-8. **如果 NapCat 和机器人不在同一台机器上**：`HOST` 改成 `0.0.0.0`，URL 改成机器人那台的 IP，同样不要把 8081 对公网开放。
+- **NapCat 不用 Docker**：国内拉不到 Docker Hub 的镜像，用 NapCat 官方安装脚本直接装（不要加 sudo）。
+- **识图必须用压缩版模型**（int8，167MB）：原版 446MB 在 2G 内存的服务器上会把整台机器卡死。压缩版用 `bot\量化识图模型.bat` 在电脑上生成。
+- **两个系统服务**：`napcat.service`、`qqbot.service`，开机自动启动；机器人服务限制了最多用多少内存。
+- **更新**：代码走 GitHub（电脑上 `git push`，服务器上 `~/update.sh`）；人设、知识库、说说配图用 `scp` 传；服务器的 `.env` 在服务器上改。
+- **`bot\data` 以服务器上的为准**，不要再用电脑上的覆盖。
+- **拿日志**：双击 `D:\QQBot\拉取服务器日志.bat`。
+- **Python 依赖**：服务器上用 `requirements.lock` 装（9/28 起 Python 3.12 和 3.14、Linux 和 Windows 都能装）；万一装不上，退回用 `requirements.txt`。
 
 ---
 
