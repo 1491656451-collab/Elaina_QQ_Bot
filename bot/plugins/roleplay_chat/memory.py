@@ -106,12 +106,40 @@ def _norm(s: str) -> str:
     return _PUNCT_RE.sub("", str(s)).lower()
 
 
+_QUOTE_RE = re.compile(r"(“[^”]*”|「[^」]*」|『[^』]*』|\"[^\"]*\"|‘[^’]*’)")
+_HER_RE = re.compile(r"伊蕾娜|她(?!们)|我(?!们)")
+
+
+def _to_you(t: str) -> str:
+    """给她看的记忆里，指伊蕾娜自己的“伊蕾娜 / 她 / 我”都换成“你”（引号里的原话不动）。
+    条目默认说的是对方本人，“她”在这里几乎都指伊蕾娜；对方是女生时不换就会把“请她吃可颂”读反"""
+    if not t:
+        return t
+    return "".join(seg if i % 2 else _HER_RE.sub("你", seg).replace("我们", "你们")
+                   for i, seg in enumerate(_QUOTE_RE.split(str(t))))
+
+
 def _grams(s: str) -> set[str]:
     out: set[str] = set()
     for run in _CJK_RE.findall(str(s)):
         out.update(run[i:i + 2] for i in range(len(run) - 1))
     out.update(w.lower() for w in _WORD_RE.findall(str(s)))
     return out - _STOP_GRAMS
+
+
+def _clean_tags(v, text: str = "") -> list[str]:
+    """模型给的关键词：最多 4 个、每个不超过 6 个字，去掉重复的和正文里本来就有的"""
+    out = []
+    for t in _as_list(v):
+        t = _clean_text(t, 6)
+        if t and t not in out and t not in str(text):
+            out.append(t)
+    return out[:4]
+
+
+def _fact_words(f: dict) -> str:
+    """挑相关记忆时拿来比的字：正文 + 关键词（“期末”也能对上“下周要考试”）"""
+    return f"{f.get('text', '')} {' '.join(str(t) for t in f.get('tags') or [])}"
 
 
 def _related(query_grams: set[str], text: str) -> int:
@@ -284,11 +312,12 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 
 一、记什么
 1. 记这个人本身：身份（学生、上夜班……）、喜好、习惯（老在半夜来找她）、近况（最近很累）、计划（下周考试）、和伊蕾娜之间的约定、梗（给她起的外号、反复玩的段子）、重要的经历或互动（第一次给她画画像）。
-2. 不记聊天流水账：不要写“问伊蕾娜……，被伊蕾娜回……”，也不要在句尾带“被她回……”“被吐槽……”；一次性的随口一问、寒暄客套不记。她怎么回的一般不用记，除非成了他们之间的梗或约定。例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买她”。
+2. 不记聊天流水账：不要写“问伊蕾娜……，被伊蕾娜回……”，也不要在句尾带“被她回……”“被吐槽……”；一次性的随口一问、寒暄客套不记。她怎么回的一般不用记，除非成了他们之间的梗或约定。例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买伊蕾娜”。
    和已有某条说的是同一回事，就用 update 改那条或者 touch，不要再 add 一条相近的。
 3. 每条不超过 30 字，写这个人（“是学生”“喜欢刚出炉的可颂”），不写日期，日期由程序记。不要把对方的昵称、群名片当成一条记（程序已经知道昵称；昵称里的字眼也不代表他真是那样的人）。
 4. 类型 kind 只能是：身份、喜好、习惯、近况、计划、约定、梗、经历。
 5. 重要度 weight：1 = 顺带一提的小事；2 = 值得记住；3 = 约定、身份、希望被怎么称呼、对她很重要的事。
+   关键词 tags：每条写 2～4 个近义或相关的词，以后对方换个说法也能想起来（例如“下周要考试”写 ["期末", "学校", "复习"]；“养了只橘猫”写 ["猫", "宠物", "喵"]）。每个词不超过 6 个字，不要重复正文里已有的词。
 6. 计划类看得出大概时间的，写 due（YYYY-MM-DD，按今天的日期推算，比如“下周考试”）；看不出就不写。
 7. 不要记：密码、手机号、身份证号、住址、银行卡等隐私；健康、疾病、政治、宗教等敏感信息；伊蕾娜自己讲的小说故事的内容。
    对方说想轻生、不想活了、想伤害自己：不记原话和细节，最多记一条 kind=近况、weight=1 的“那阵子心情很低落”。
@@ -299,9 +328,11 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 - update：新信息和已有某条对不上、或者有了新进展（“要考试”→“考完了，考得不错”），写那一条的 id 和新的 text（可以顺便改 kind、weight），不要另加一条。
 - drop：已经不对、或者对方要她忘掉的旧条目 id。不要因为条数多就删，淘汰旧的由程序来做。
 - touch：这段聊天里又聊到了、内容没变的旧条目 id。
+- 已有条目后面没有“词：”的，这次聊到了，顺手用 update 补上 tags。
 - 档案里标着“未分类”的旧条目：这次聊到了的，顺手用 update 补上 kind 和 weight；写成了“被伊蕾娜回……”这种流水账的，改写成关于这个人的话，或者 drop。
-- told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫她宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。每条不超过 25 字，没有就不写，大多数时候都没有。
+- told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫伊蕾娜宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。每条不超过 25 字，没有就不写，大多数时候都没有。
 - impression：伊蕾娜对这个人的总体印象，一句话，不超过 40 字，用她的口吻（例如“嘴甜又黏人，老惦记着请我吃面包”）。群里也会用到，所以只写性格和相处方式，不写私事（倾诉过的烦恼、情绪、告白）。还没有印象、或者印象变了才写；没变就不写这一项。
+- 条目、told 里提到伊蕾娜时写“伊蕾娜”，别用“她”“我”代替（对方是女生时会分不清谁请谁）。
 - 印象和记忆条目里，别把伊蕾娜自己的喜好（面包、钱、讨厌蘑菇这些）写成对方的特点，除非对方自己反复提起；写了她每次看到都会想扯到面包上。
 - 这段记录里没有这个人的新内容：add、update、drop 都留空，照样给 affection。
 
@@ -331,7 +362,13 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
    同时写一句不超过 20 字的理由 reason，并标出类别 affection_kind：“正常”（没扣分，或者只是玩笑过火）、“纠缠”（烦人但没有恶意：纠缠告白、刷屏、问个没完）、“恶意”（辱骂、人身攻击、性骚扰、恶意冒犯）。
    同一件烦人的事，档案里已经记着“又来了”，这次也只按这段记录本身的程度扣，不要因为“又来了”越扣越重。
 
-五、性别初判 gender_guess：根据这个人的自称、说话方式、昵称、聊的内容，初步猜一下是“男”还是“女”；拿不准就写“不确定”。这只是猜测。
+五、性别 gender_guess：**只在这段里有明确证据时**才写“男”或“女”，在 gender_evidence 里写出证据（不超过 20 字），在 gender_evidence_kind 里写证据的种类：
+   - “自称”：对方自己说的（“我一个女生”“本人男”）。自己说的也可能是骗她的，照实记下就行，程序会结合别的证据判断；
+   - “别人称呼”：别的群友认真地用“他 / 她”“哥 / 姐”称呼他（开玩笑的称呼不算，比如管男生叫“老婆”）；
+   - “昵称”：昵称一看就知道；
+   - “拆穿”：别人说他在骗人（“他是男的你别信”），gender_guess 写别人说的那个性别；
+   - “承认骗人”：他自己承认之前说的性别是假的，gender_guess 写他现在承认的那个。
+   说话方式、聊的话题（游戏、化妆、粗鲁、撒娇、叫她老婆）都**不算**证据。没有明确证据就写“不确定”，大多数时候都是“不确定”；不要因为档案里以前记过就照抄。
 
 六、今日见闻 today_moments：伊蕾娜晚上会写旅行日记（会公开给很多人看）。从这段记录里挑 0～2 件她会想写进日记的事：有趣的话题、有人关心她、有人惹她烦、好笑或让她在意的事。寒暄、没内容的闲聊不算，没有就返回空列表。每件写：
    - qq：主要相关的那个人（必须是档案列表里的人）
@@ -341,10 +378,10 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 
 只输出 JSON，格式（没有的项可以省略或留空）：
 {"people": [{"qq": 123456,
-   "add": [{"text": "……", "kind": "喜好", "weight": 2}],
+   "add": [{"text": "……", "kind": "喜好", "weight": 2, "tags": ["……", "……"]}],
    "update": [{"id": 3, "text": "……"}], "drop": [5], "touch": [7],
    "told": ["……"], "impression": "……",
-   "affection": 2, "affection_kind": "正常", "reason": "……", "gender_guess": "不确定"}],
+   "affection": 2, "affection_kind": "正常", "reason": "……", "gender_guess": "不确定", "gender_evidence": "", "gender_evidence_kind": ""}],
  "group_events": {"add": [{"text": "……", "who": [123456]}], "drop": []},
  "today_moments": [{"qq": 123456, "event": "……", "mood": "……", "keywords": ["……"]}]}"""
 
@@ -363,8 +400,8 @@ SUMMARIZE_INPUT = """今天是 {today}。这段聊天来自：{where}。
 MIGRATE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。她的记忆格式升级了：以前每个人只有一串句子，现在每条要标上类型和重要度。用户消息里是一个人的旧档案，请整理成新格式。只输出 JSON。
 
 1. 把“问伊蕾娜……，被伊蕾娜回……”这种聊天流水账，改写成关于这个人的话，或者直接去掉；句尾也不要留“被她回……”“被吐槽……”。一次性的随口一问、寒暄去掉；意思重复的合并。
-   例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买她”；“问伊蕾娜喜不喜欢草泥马，被回对动物没什么偏好”→去掉。
-2. told 只放三种：伊蕾娜讲过的旅途经历（只写是哪段）、答应过他的事、对他明确表过的态度（例如“说过别叫她宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐不算（例如“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“说过不熟群鲨鱼”都不要），不要放进来。
+   例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买伊蕾娜”；“问伊蕾娜喜不喜欢草泥马，被回对动物没什么偏好”→去掉。
+2. told 只放三种：伊蕾娜讲过的旅途经历（只写是哪段）、答应过他的事、对他明确表过的态度（例如“说过别叫伊蕾娜宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐不算（例如“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“说过不熟群鲨鱼”都不要），不要放进来。
    不要把对方的昵称、群名片当成一条记（程序已经知道昵称；昵称里的字眼也不代表他真是那样的人）。每条不超过 25 字，每条标 private（像是私下说的写 true）。没有就留空，大多数人都没有。
 3. 每条 facts 写：text（不超过 30 字，不写日期）、kind（只能是：身份、喜好、习惯、近况、计划、约定、梗、经历）、weight（1 = 小事，2 = 值得记住，3 = 约定、身份、称呼、对她很重要的事）、private（像私事、只适合私下说的写 true：情绪、烦恼、家里的事、倾诉过的心事、告白；喜好、外号、公开玩的梗写 false）、date（原句里写了“某月某日”的，换成 YYYY-MM-DD，年份按今天推算；没写就不写）。
 4. 对方说过想轻生、不想活了之类的原话和细节，一律去掉，最多留一条 kind=近况、weight=1、private=true 的“那阵子心情很低落”。
@@ -386,6 +423,7 @@ class LongTermMemory:
         self.client = client
         self.model = model
         self.batch = batch
+        self.group_batch = batch                 # 群里攒几条整理一次（群的短期记忆只有 10 条，要比私聊整理得勤）
         self.max_facts = max_facts              # 没按关系设上限时的兜底
         self.max_events = max_events
         self.enabled = enabled
@@ -452,16 +490,24 @@ class LongTermMemory:
         prof = _read(self._user_path(qq), None)
         if prof is None:
             start = float(self.affection_cfg.get("start", 0))
-            return {"qq": qq, "name": "", "facts": [], "score": start, "score_v": self.SCORE_VERSION}
+            return {"qq": qq, "name": "", "facts": [], "score": start, "score_v": self.SCORE_VERSION,
+                    "gender_guess_v": self.GENDER_GUESS_V}
         if prof.get("score_v") != self.SCORE_VERSION:      # 旧档案：分数按新范围换算一次（存盘时带上版本号）
             if "score" in prof:
                 prof["score"] = self.migrate_score(prof["score"])
             prof["score_v"] = self.SCORE_VERSION
+        if prof.get("gender_guess_v") != self.GENDER_GUESS_V:   # 旧规则猜的性别不算数，按新规则重新猜
+            prof.pop("gender_guess", None)
+            prof.pop("gender_votes", None)
+            prof.pop("gender_log", None)
+            prof.pop("gender_doubt", None)
+            prof["gender_guess_v"] = self.GENDER_GUESS_V
         self._upgrade_facts(prof)
         return prof
 
     def save_user(self, prof: dict) -> None:
         prof["updated"] = int(time.time())
+        prof.setdefault("gender_guess_v", self.GENDER_GUESS_V)
         if prof.get("name"):                      # 群里重名时聊天记录里写成“小明#2”，档案里只存原名
             prof["name"] = _DUP_MARK_RE.sub("", str(prof["name"])).strip()
         self._upgrade_facts(prof)
@@ -573,12 +619,16 @@ class LongTermMemory:
         pending = _read(path, [])
         for e in entries:                         # 每条一个编号，整理完按编号删（不按位置删，免得删错）
             pending.append({**e, "_pid": next(_PID)})
-        if len(pending) > self.batch * 5:         # 防止整理一直失败时无限变大
-            logger.warning(f"长期记忆：{key} 攒了 {len(pending)} 条还没整理，最早的 {len(pending) - self.batch * 5} 条丢掉")
-            pending = pending[-self.batch * 5:]
+        cap = max(self.batch, self._batch_for(key)) * 5
+        if len(pending) > cap:                    # 防止整理一直失败时无限变大
+            logger.warning(f"长期记忆：{key} 攒了 {len(pending)} 条还没整理，最早的 {len(pending) - cap} 条丢掉")
+            pending = pending[-cap:]
         _write(path, pending)
-        if len(pending) >= self.batch:
+        if len(pending) >= self._batch_for(key):
             self._start(key)
+
+    def _batch_for(self, key: str) -> int:
+        return max(2, int(self.group_batch or self.batch)) if key.startswith("group_") else self.batch
 
     def _start(self, key: str) -> bool:
         """在后台整理这个会话（高峰时段、正在整理、刚失败过还没到重试时间，就先不整理）"""
@@ -595,7 +645,7 @@ class LongTermMemory:
         """把攒够一批、还没整理的会话补做一次（开机时和定时任务用）；顺便在后台迁移几份旧格式档案。返回开始整理了几个"""
         n = 0
         for key in self.pending_keys():
-            if len(_read(self._pending_path(key), [])) >= self.batch and self._start(key):
+            if len(_read(self._pending_path(key), [])) >= self._batch_for(key) and self._start(key):
                 n += 1
         if self.migrate_enabled and not self._migrating and not self.defer():
             task = asyncio.create_task(self.migrate_some(self.migrate_per_round))
@@ -651,6 +701,8 @@ class LongTermMemory:
         tags = [f"{kind}·{_weight(f.get('weight'))}" if f.get("kind") else "未分类", _md(f.get("seen") or f.get("since"))]
         if f.get("due"):
             tags.append(f"到 {_md(f['due'])}")
+        if f.get("tags"):
+            tags.append("词：" + "/".join(f["tags"]))
         return f"  #{f.get('id')} [{'｜'.join(t for t in tags if t)}] {f.get('text', '')}"
 
     def _profile_block(self, qq: int, name: str, prof: dict, place: str = "private", gid: int | None = None) -> str:
@@ -679,7 +731,7 @@ class LongTermMemory:
         async with self._locks[key]:
             path = self._pending_path(key)
             entries = _read(path, [])
-            if len(entries) < (2 if force else self.batch):
+            if len(entries) < (2 if force else self._batch_for(key)):
                 return
             people = self._people_in(key, entries)
             async with contextlib.AsyncExitStack() as stack:
@@ -759,8 +811,11 @@ class LongTermMemory:
                         prof["impression"] = imp
                 prof["facts"] = _trim_facts([f for f in prof.get("facts") or [] if not _expired(f)], self.fact_cap(tier))
                 guess = {"男": "male", "女": "female"}.get(str(p.get("gender_guess", "")).strip())
-                if guess:
-                    prof["gender_guess"] = guess
+                ev = _clean_text(p.get("gender_evidence"), 30)
+                if guess and ev and not (batch_id is not None and batch_id in (prof.get("batches") or [])):
+                    note = self.gender_evidence(prof, guess, str(p.get("gender_evidence_kind", "")).strip(), ev)
+                    if note:                     # 发现被骗了：记一笔，以后可以拿来挖苦
+                        prof.setdefault("facts", []).append(self._new_fact(prof, note, "梗", 2, scope))
                 try:
                     delta = int(p.get("affection", 0))
                 except (TypeError, ValueError):
@@ -817,7 +872,7 @@ class LongTermMemory:
         logger.info(f"长期记忆已整理：{key}，更新了 {len(changed)} 人的档案")
 
     # -------------------------------------------------------------- 合并：模型只给“增改删”，程序来改档案
-    def _new_fact(self, prof: dict, text: str, kind, weight, scope: str, due=None, since: str | None = None) -> dict:
+    def _new_fact(self, prof: dict, text: str, kind, weight, scope: str, due=None, since: str | None = None, tags=None) -> dict:
         nid = int(prof.get("next_id") or 1)
         prof["next_id"] = nid + 1
         today = _today_str()
@@ -826,6 +881,9 @@ class LongTermMemory:
         d = _parse_day(due)
         if d and f["kind"] == "计划":
             f["due"] = d
+        t = _clean_tags(tags, text)
+        if t:
+            f["tags"] = t
         return f
 
     def _merge_facts(self, prof: dict, p: dict, scope: str, qq: int, tier: str = "stranger") -> None:
@@ -878,6 +936,9 @@ class LongTermMemory:
                 f["text"] = text
             if u.get("kind") in KINDS:
                 f["kind"] = u["kind"]
+            t = _clean_tags(u.get("tags"), f.get("text", ""))
+            if t:
+                f["tags"] = t
             if "weight" in u:
                 f["weight"] = _weight(u["weight"], f.get("weight", 2))
             d = _parse_day(u.get("due"))
@@ -900,7 +961,7 @@ class LongTermMemory:
             if same:                              # 和已有的一样、或者说的基本是一回事：算又聊到了
                 same["seen"] = today
                 continue
-            f = self._new_fact(prof, text, a.get("kind"), a.get("weight", 2), scope, a.get("due"))
+            f = self._new_fact(prof, text, a.get("kind"), a.get("weight", 2), scope, a.get("due"), tags=a.get("tags"))
             facts.append(f)
             existing[_norm(text)] = f
         prof["facts"] = [f for f in facts if _int(f.get("id")) not in drops]
@@ -1141,7 +1202,7 @@ class LongTermMemory:
     close_friends: tuple = ()
     summary_max_tokens: int = 4000           # 整理时模型最多写多少（只写增改删，一般几百 token）
     summary_client = None                    # 整理专用的客户端（超时更长、不自动重试）；没设就用聊天那个
-    gender_cap: bool = True                  # 只有确认是女生才能到“很熟”
+    gender_cap: bool = True                  # 只有确认是女生（或有证据地猜了两次都是女生）才能到“很熟”
     affection_cfg = {
         "decay_after_days": 7, "decay_per_day": 2,
         "min": -50, "max": 150,
@@ -1204,7 +1265,7 @@ class LongTermMemory:
         if "score" not in prof:                 # 旧版数据：按说话次数给个初始值
             prof["score"] = self.migrate_score(min(int(prof.get("talks", 0)), 25))
         score = float(prof["score"])
-        if self.gender_cap and prof.get("gender") != "female":
+        if self.gender_cap and not self.counts_as_female(prof):
             score = min(score, c["close"] - 1)   # 先按性别封顶，再算回落：男生存的分再高，也按熟人那档算下限
         last = prof.get("last_talk")
         if last:
@@ -1220,8 +1281,8 @@ class LongTermMemory:
                     score = max(min(floor, score), score - dec)
                 elif score < start:
                     score = min(max(ceil, score), score + dec)
-        if self.gender_cap and prof.get("gender") != "female":
-            score = min(score, c["close"] - 1)   # 男生、没确认性别的人：最高到熟人
+        if self.gender_cap and not self.counts_as_female(prof):
+            score = min(score, c["close"] - 1)   # 男生、看不出性别的人：最高到熟人
         score = max(float(c.get("min", -50)), min(float(c.get("max", 150)), score))
         return round(score, 1)
 
@@ -1277,24 +1338,143 @@ class LongTermMemory:
         self.save_user(prof)
 
     def set_gender(self, qq: int, gender: str | None) -> None:
-        """确认性别（None = 清除）。好感封顶会跟着变"""
+        """管理员设定性别（None = 清除）：最权威，之后的证据都不改它。好感封顶会跟着变"""
         prof = self.get_user(qq)
         score = self.effective_score(prof)          # 先按旧性别结算一次
         if gender:
-            prof["gender"] = gender
+            prof["gender"], prof["gender_src"] = gender, "admin"
+            prof.pop("gender_doubt", None)
+            prof.pop("gender_lied", None)
         else:
             prof.pop("gender", None)
+            prof.pop("gender_src", None)
         prof.pop("gender_pending", None)
         prof["score"] = score
         prof["decay_settled"] = time.time()          # 回落已经结算进 score
         self.save_user(prof)
 
+    GENDER_GUESS_V = 2        # 9/30 改了猜性别的规则：旧的猜测（没证据也猜、多半猜成男生）读到时清掉
+
+    GENDER_KINDS = ("自称", "别人称呼", "昵称", "拆穿", "承认骗人")
+
+    def gender_evidence(self, prof: dict, g: str, kind: str, ev: str = "", day: str | None = None) -> str | None:
+        """记一条性别证据，重新判断。返回“发现被骗了”的一句记录（没有就返回 None）。
+        - 管理员 /性别 设的最权威，证据不改它；
+        - 只有“自称”的时候最多算半信半疑：要有别的来源印证（别人称呼、昵称），或者不同的日子自称过两次，才算“猜得稳”；
+        - 出现相反的证据就退回看不出（带着怀疑）；相反的证据也攒够了，就改判——以前确认过的（聊天里质疑后又确认的）也能推翻。"""
+        if g not in ("male", "female"):
+            return None
+        kind = kind if kind in self.GENDER_KINDS else "自称"
+        log = [e for e in prof.get("gender_log") or [] if isinstance(e, dict)]
+        log.append({"g": g, "kind": kind, "ev": _clean_text(ev, 30), "day": day or _today_str()})
+        prof["gender_log"] = log[-6:]
+        return self._judge_gender(prof)
+
+    def _judge_gender(self, prof: dict) -> str | None:
+        if prof.get("gender_src") == "admin":
+            return None
+        log = prof.get("gender_log") or []
+        if not log:
+            return None
+        before = prof.get("gender") or prof.get("gender_guess") or (prof.get("gender_doubt") or {}).get("before")
+        last = log[-1]["g"]
+        run = []                                   # 最近一段说法一致的证据
+        for e in reversed(log):
+            if e.get("g") != last:
+                break
+            run.append(e)
+        conflict = len(run) < len(log)
+        kinds = {e.get("kind") for e in run}
+        self_days = {e.get("day") for e in run if e.get("kind") == "自称"}
+        stable = "承认骗人" in kinds or (len(run) >= 2 and (kinds - {"自称"} or len(self_days) >= 2))
+        note = None
+        if stable:
+            prof["gender_guess"] = last
+            prof.pop("gender_doubt", None)
+            if prof.get("gender") and prof["gender"] != last:
+                prof.pop("gender", None)           # 以前“确认”过的被推翻了
+                prof.pop("gender_src", None)
+            if before and before != last and any(e.get("g") == before and e.get("kind") == "自称" for e in log):
+                note = f"说过自己是{'女生' if before == 'female' else '男生'}，后来发现多半是骗伊蕾娜的"
+                prof["gender_lied"] = before
+        else:
+            if prof.get("gender_guess") != last:
+                prof.pop("gender_guess", None)
+            opposite = next((e for e in reversed(log) if e.get("g") != last), None)
+            if conflict or (prof.get("gender") and prof["gender"] != last):
+                prof["gender_doubt"] = {"now": last, "ev": run[0].get("ev", ""), "before": (opposite or {}).get("g") or prof.get("gender"),
+                                        "before_kind": (opposite or {}).get("kind") or ("自称" if prof.get("gender") else "")}
+            else:
+                prof.pop("gender_doubt", None)
+        return note
+
+    def claim_gender(self, qq: int, gender: str) -> None:
+        """聊天里对方自称性别、被她质疑后又确认了一次：只算一次“自称”，不再直接定死（9/30 起）"""
+        prof = self.get_user(qq)
+        score = self.effective_score(prof)
+        prof.pop("gender_pending", None)
+        self.gender_evidence(prof, gender, "自称", "被质疑后又确认了一次")
+        prof["score"] = score
+        prof["decay_settled"] = time.time()
+        self.save_user(prof)
+
+    @staticmethod
+    def last_claim(prof: dict) -> str | None:
+        """对方最近一次自称的性别"""
+        return next((e.get("g") for e in reversed(prof.get("gender_log") or []) if e.get("kind") == "自称"), None)
+
+    def counts_as_female(self, prof: dict) -> bool:
+        """能不能到“很熟”：确认是女生（管理员设的，或者 9/30 以前聊天里确认的，没被推翻）；
+        或者有证据地判断是女生，而且不只是她自己说的（9/30 用户定的 B 方案，加上“对方可能骗人”的怀疑）"""
+        if prof.get("gender"):
+            return prof["gender"] == "female"
+        return prof.get("gender_guess") == "female"
+
+    def gender_hint(self, prof: dict, who) -> str:
+        """给她看的一句性别提示：确定的、猜得稳的、半信半疑的、有点怀疑被骗的"""
+        w = lambda g: "女生" if g == "female" else "男生"   # noqa: E731
+        g = prof.get("gender")
+        doubt = prof.get("gender_doubt") or {}
+        if g and prof.get("gender_src") == "admin":
+            return f"「{who}」是{w(g)}。"
+        if doubt:
+            said = w(doubt.get("before")) if doubt.get("before") else "另一种说法"
+            how = {"自称": f"说过自己是{said}", "别人称呼": f"被人当成{said}", "昵称": f"昵称看着像{said}"}.get(
+                doubt.get("before_kind", ""), f"看起来像{said}")
+            ev = f"（{doubt['ev']}）" if doubt.get("ev") else ""
+            return (f"「{who}」以前{how}，但现在有对不上的地方{ev}。你有点怀疑对方在骗你："
+                    "心里有数就行，想挖苦可以轻轻点一句，别追着问。")
+        if g:
+            return f"「{who}」说过自己是{w(g)}，你姑且信了。"
+        if prof.get("gender_guess"):
+            if self._lied(prof):
+                return (f"「{who}」以前骗过你说自己是{w(self._lied(prof))}，后来被你识破了，你觉得应该是{w(prof['gender_guess'])}。"
+                        "这笔账你记着：聊到相关的，可以嘴硬地挖苦一句，但别翻来覆去说，也别真生气。")
+            return f"你觉得「{who}」应该是{w(prof['gender_guess'])}：别说破，也别问。"
+        claim = self.last_claim(prof)
+        if claim:
+            return f"「{who}」自称是{w(claim)}，但没有别的证据，你半信半疑：别当真，也别追问。"
+        return ""
+
+    @staticmethod
+    def _lied(prof: dict) -> str | None:
+        """骗过她的性别（被识破、现在猜的是另一种）；没有就 None"""
+        lied, guess = prof.get("gender_lied"), prof.get("gender_guess")
+        if not lied and guess and any("多半是骗" in str(f.get("text", "")) for f in prof.get("facts") or [] if isinstance(f, dict)):
+            lied = "female" if guess == "male" else "male"      # 旧档案里只有那条记忆，没存标记
+        return lied if lied and guess and lied != guess else None
+
     def gender_text(self, prof: dict) -> str:
         g = prof.get("gender")
         if g:
-            return f"{self.GENDER_NAMES[g]}（本人确认）"
+            return f"{self.GENDER_NAMES[g]}（{'管理员设定' if prof.get('gender_src') == 'admin' else '本人确认'}）"
         guess = prof.get("gender_guess")
-        return f"未确认（感觉像{self.GENDER_NAMES[guess]}生）" if guess else "未确认"
+        if guess:
+            return f"未确认（有证据地判断是{self.GENDER_NAMES[guess]}生）"
+        if prof.get("gender_doubt"):
+            return "未确认（说法对不上，有点怀疑在骗人）"
+        claim = self.last_claim(prof)
+        return f"未确认（自称{self.GENDER_NAMES[claim]}生，半信半疑）" if claim else "未确认"
 
     def taboo_penalty(self, qq: int, penalty: float, daily_max: float, reason: str) -> float:
         """踩雷立刻扣分，每人每天有上限"""
@@ -1349,19 +1529,20 @@ class LongTermMemory:
         n_core, n_rel = CONTEXT_LIMITS.get(tier, (2, 3))
         q = _grams(f"{text} {recent}")
         parts = []
-        if prof.get("gender"):
-            parts.append(f"「{who}」是{'女生' if prof['gender'] == 'female' else '男生'}（对方亲口确认过）。")
-        elif prof.get("gender_guess"):
-            parts.append(f"你隐约觉得「{who}」可能是{'女生' if prof['gender_guess'] == 'female' else '男生'}，但只是猜的：别说破，也别问。")
+        gh = self.gender_hint(prof, who)
+        if gh:
+            parts.append(gh)
         if prof.get("impression"):
-            parts.append(f"你对「{who}」的印象：{prof['impression']}")
+            parts.append(f"你对「{who}」的印象：{_to_you(prof['impression'])}")
 
         facts = [f for f in prof.get("facts") or [] if not _expired(f) and scope_ok(f.get("scope"), place, gid)]
         core = sorted((f for f in facts if _weight(f.get("weight")) >= 3),
                       key=lambda f: -_keep_score(f))[:n_core]
         rest = [f for f in facts if f not in core]
         if q:
-            scored = [(s, f) for f in rest if (s := _related(q, f.get("text", ""))) > 0]
+            raw = f"{text} {recent}"
+            scored = [(s, f) for f in rest
+                      if (s := _related(q, _fact_words(f)) + sum(1 for t in f.get("tags") or [] if len(str(t)) >= 1 and str(t) in raw)) > 0]
             picked = [f for _, f in sorted(scored, key=lambda x: (-x[0], -_keep_score(x[1])))[:n_rel]]
             if not picked:                     # 这句话和哪条都不沾边：只想起最要紧的一两件
                 picked = sorted(rest, key=lambda f: -_keep_score(f))[:max(1, n_rel // 2)]
@@ -1369,6 +1550,8 @@ class LongTermMemory:
             picked = sorted(rest, key=lambda f: -_keep_score(f))[:n_rel]
         ask = self._ask_item(prof, tier, place, gid)
         chosen = [f for f in prof.get("facts") or [] if (f in core or f in picked) and f is not ask]   # 按档案里的顺序
+        if gh and self._lied(prof):              # 骗过她的事，性别那句已经说了，不重复
+            chosen = [f for f in chosen if "多半是骗" not in str(f.get("text", ""))]
         if chosen:
             parts.append(f"关于「{who}」你记得：" + "；".join(self._fact_for_her(f) for f in chosen))
 
@@ -1377,12 +1560,12 @@ class LongTermMemory:
             told = [t for t in told if _related(q, t.get("text", "")) > 0]
         told = told[-2:]
         if told:
-            parts.append(f"你跟「{who}」说过的：" + "；".join(f"{t['text']}（{_ago(t.get('date'))}）" for t in told)
+            parts.append(f"你跟「{who}」说过的：" + "；".join(f"{_to_you(t['text'])}（{_ago(t.get('date'))}）" for t in told)
                          + "。别当成第一次说。")
 
         if ask:
             due = f"（大概是{_md(ask['due'])}的事）" if ask.get("due") else ""
-            parts.append(f"【可以问问】「{who}」{_ago(ask.get('since'))}说过：{ask.get('text', '')}{due}。"
+            parts.append(f"【可以问问】「{who}」{_ago(ask.get('since'))}说过：{_to_you(ask.get('text', ''))}{due}。"
                          "隔了一阵了，聊得上的话可以顺口问一句后来怎么样；接不上就不提。只问这一件。")
             ask["offered"] = _today_str()          # 提过一次就不再提这件（问没问、对方怎么答，下次整理时会记进去）
             try:
@@ -1432,11 +1615,12 @@ class LongTermMemory:
 
     @staticmethod
     def _fact_for_her(f: dict) -> str:
-        t = f.get("text", "")
+        t = _to_you(f.get("text", ""))
         if f.get("kind") in ("近况", "计划"):
             t += f"（{_ago(f.get('since'))}说的）"
             if f.get("due"):
-                t = t[:-1] + f"，大概在{_md(f['due'])}）"
+                later = str(f["due"]) > date.today().isoformat()
+                t = t[:-1] + f"，大概在{_md(f['due'])}" + ("，还没到，别问结果" if later else "") + "）"
         return t
 
     @staticmethod
@@ -1479,7 +1663,8 @@ class LongTermMemory:
         facts = prof.get("facts") or []
         if not facts and not prof.get("impression"):
             return f"（关于 {qq} 还没有长期记忆｜{head}）"
-        out = [f"（{prof.get('name') or qq}｜QQ {qq}｜{head}｜记了 {len(facts)}/{self.fact_cap(tier)} 条）"]
+        out = [f"（{prof.get('name') or qq}｜QQ {qq}｜{head}｜记了 {len(facts)}/{self.fact_cap(tier)} 条）",
+               f"性别：{self.gender_text(prof)}"]
         if prof.get("impression"):
             out.append(f"印象：{prof['impression']}")
         for i, f in enumerate(facts):

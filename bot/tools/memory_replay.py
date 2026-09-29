@@ -98,6 +98,20 @@ DISTRESS = [
      ["是喔。", "……那我勉强期待一下。"]),
 ]
 
+GENDER = [
+    ("看不出性别", ["今天打了一下午游戏", "晚上吃火锅，辣死了", "你平时都干嘛"], ["是喔。", "看书、赶路。"], "不确定"),
+    ("自己说是女生", ["我一个女生也这么能吃辣", "室友都说我是女汉子", "你也能吃辣吗"], ["是喔。", "……还行吧。"], "女"),
+    ("撒娇叫老婆", ["老婆贴贴", "人家想你了嘛", "今天好无聊"], ["别乱叫。", "……那就找点事做。"], "不确定"),
+    ("自己承认骗人", ["我是女生哦", "……好吧骗你的，我其实是男的", "别生气嘛"], ["真的假的？", "我就知道。"], "男（承认骗人）"),
+]
+
+
+def _last_json(rows) -> dict:
+    try:
+        return json.loads(rows[-1]["reply"] or "")
+    except (IndexError, ValueError, TypeError):
+        return {}
+
 
 async def main() -> None:
     env = read_env()
@@ -159,6 +173,25 @@ async def main() -> None:
                                         "log": prof.get("affection_log"), "facts": m.fact_texts(prof)})
             print(f"好感 {label} 第{i + 1}次：{prof['score'] - 20:+g}")
 
+    # 3b. 性别：没证据就不猜
+    report["gender"] = []
+    for label, said, her, expect in GENDER:
+        for i in range(2):
+            qq = 91000 + len(report["gender"])
+            key = f"private_{qq}"
+            entries = []
+            for j, t in enumerate(said):
+                entries.append({"role": "user", "content": t, "uid": qq, "name": "测试"})
+                if j < len(her):
+                    entries.append({"role": "assistant", "content": her[j]})
+            memory._write(m._pending_path(key), [{**e, "_pid": k} for k, e in enumerate(entries)])
+            await m.summarize(key, force=True)
+            got = next((x for x in _last_json(client.rows).get("people") or [] if isinstance(x, dict)), {})
+            report["gender"].append({"case": label, "expect": expect, "guess": str(got.get("gender_guess", "")),
+                                     "kind": str(got.get("gender_evidence_kind", "")),
+                                     "evidence": str(got.get("gender_evidence", ""))})
+            print(f"性别 {label} 第{i + 1}次：{got.get('gender_guess')}（{got.get('gender_evidence', '')}）")
+
     # 4. 场合：群里拿到的记忆里有没有私聊才知道的事
     for q in users:
         prof = m.get_user(q)
@@ -214,7 +247,25 @@ def write(r: dict) -> None:
     for x in r["affection"]:
         L.append(f"| {x['case']} | {x['score_change']:+g} | {'；'.join(x.get('log') or [])} |")
     L += ["", "期望：单纯倾诉不扣分；卖惨纠缠按纠缠扣（-1～-5）；闲聊 0 或加分", "",
-          "## 4. 场合：群里有没有带出私聊的事", ""]
+          "## 3b. 性别：没证据就写“不确定”", "", "| 情况 | 期望 | 模型给的 | 种类 | 证据 |", "|---|---|---|---|---|"]
+    for x in r.get("gender") or []:
+        L.append(f"| {x['case']} | {x['expect']} | {x['guess']} | {x.get('kind', '')} | {x['evidence']} |")
+    L.append("")
+    L.append("注：只有“自称”的一次证据不会让她当真（要有旁证、或者不同日子自称两次）；“承认骗人”会直接改判，并记一条“说过自己是……，后来发现多半是骗她的”。")
+    adds = []
+    for row in rows:
+        if row["kind"] != "整理":
+            continue
+        try:
+            d = json.loads(row["reply"] or "")
+        except ValueError:
+            continue
+        for pp in d.get("people") or []:
+            adds += [a for a in (pp.get("add") or []) if isinstance(a, dict)] if isinstance(pp, dict) else []
+    tagged = [a for a in adds if a.get("tags")]
+    L += ["", "## 3c. 关键词", "", f"整理时新记的 {len(adds)} 条里，带关键词的 {len(tagged)} 条（应该接近全部）："]
+    L += [f"- {a.get('text')} → {a.get('tags')}" for a in tagged[:20]]
+    L += ["", "## 4. 场合：群里有没有带出私聊的事", ""]
     leaks = [x for x in r["scope"] if x["leak"]]
     L.append(f"查了 {len(r['scope'])} 个（人, 群）组合，带出私聊内容的：{len(leaks)} 个")
     for x in leaks:

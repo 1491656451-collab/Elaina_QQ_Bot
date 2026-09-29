@@ -285,9 +285,10 @@ async def test_recall_injected(app: App):
 
 # ---------------------------------------------------------------- 长期记忆
 @pytest.mark.asyncio
-async def test_long_term_memory(app: App):
+async def test_long_term_memory(app: App, monkeypatch):
     import plugins.roleplay_chat as p
     global MEM_REPLY
+    monkeypatch.setattr(p.ltm, "group_batch", 8)       # 这个测试按“8 条一批”写的；群的 5 条一批另有测试
     MEM_REPLY = {"people": [{"qq": 111, "facts": ["喜欢吃辣", "下周要考试"], "affection": 3, "reason": "聊得开心"},
                             {"qq": 404, "facts": ["不该出现"], "affection": -10}],
                  "group_events": ["9月25日：大家一起聊了第四卷"]}
@@ -326,7 +327,7 @@ async def test_long_term_memory(app: App):
         bot = mkbot(ctx)
         ev = gev(Message("/记忆 ") + MessageSegment.at(111), True, uid=999, mid=201)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "（阿明｜QQ 111｜说过 10 次话｜好感 26｜记了 2/8 条）\n1. 喜欢吃辣（经历｜★★｜群555｜今天）\n2. 下周要考试（经历｜★★｜群555｜今天）", result=None, bot=bot)
+        ctx.should_call_send(ev, "（阿明｜QQ 111｜说过 10 次话｜好感 26｜记了 2/8 条）\n性别：未确认\n1. 喜欢吃辣（经历｜★★｜群555｜今天）\n2. 下周要考试（经历｜★★｜群555｜今天）", result=None, bot=bot)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = gev("/记忆 本群", True, uid=999, mid=202)
@@ -1098,17 +1099,19 @@ async def test_gender_doubt_then_confirm(app: App):
     hint = await say("今天天气不错", 3001)
     assert "【性别】" not in hint and p.ltm.get_user(7901).get("gender") is None
     hint = await say("真的啦，骗你干嘛", 3002)
-    assert "你接受了" in hint and p.ltm.get_user(7901)["gender"] == "female"
-    hint = await say("我是女生", 3003)                                 # 已经确认过，不再质疑
+    assert "姑且信了" in hint and p.ltm.get_user(7901).get("gender") is None, "9/30 起质疑后再确认只算一次自称"
+    assert p.ltm.last_claim(p.ltm.get_user(7901)) == "female" and "半信半疑" in p.ltm.gender_text(p.ltm.get_user(7901))
+    hint = await say("我是女生", 3003)                                 # 已经说过、质疑过，不再质疑
     assert "【性别】" not in hint
-    # 确认后才能到很熟
+    # 只有自称：到不了很熟
     p.ltm.adjust(7901, set_to=140)
-    assert p.familiarity_of(7901) == "close"
+    assert p.familiarity_of(7901) == "acquaintance"
+    assert "自称是女生，但没有别的证据，你半信半疑" in p.ltm.context_for(7901, "小王", None)
     # 改口说自己是男的：重新质疑，还提到之前的说法；说是开玩笑就作罢
     hint = await say("其实我是男的", 3004)
     assert "你不会马上相信" in hint and "以前明明说自己是女生" in hint
     hint = await say("开玩笑的", 3005)
-    assert "开玩笑" in hint and p.ltm.get_user(7901)["gender"] == "female"
+    assert "开玩笑" in hint and p.ltm.last_claim(p.ltm.get_user(7901)) == "female"
     # 陌生人说一次“我是女生”，隔了太久才确认 → 不算
     await say("我是女生", 3006, uid=7902)
     prof = p.ltm.get_user(7902); prof["gender_pending"]["ts"] -= 3600; p.ltm.save_user(prof)
@@ -1123,27 +1126,109 @@ async def test_gender_guess_and_command(app: App):
     MEM_REPLY = {"people": [{"qq": 222, "facts": ["喜欢面包"], "affection": 2, "reason": "聊得来", "gender_guess": "男"}],
                  "group_events": []}
     p.client.chat.completions.create = fake_create("嗯")
-    for i in range(4):
-        async with app.test_matcher() as ctx:
-            bot = mkbot(ctx)
-            ev = pev(f"第{i}句", mid=3100 + i)
-            ctx.receive_event(bot, ev)
-            ctx.should_call_send(ev, "嗯", result=None, bot=bot)
-    await asyncio.gather(*list(p.ltm._tasks))
+
+    async def rounds(start):
+        for i in range(4):
+            async with app.test_matcher() as ctx:
+                bot = mkbot(ctx)
+                ev = pev(f"第{i}句", mid=start + i)
+                ctx.receive_event(bot, ev)
+                ctx.should_call_send(ev, "嗯", result=None, bot=bot)
+        await asyncio.gather(*list(p.ltm._tasks))
+    await rounds(3100)
+    assert "gender_guess" not in p.ltm.get_user(222), "没写证据的猜测不算（9/30 起）"
+    assert "gender_guess" in mem_prompt(MEM_CALLS[0]) and "gender_evidence" in mem_prompt(MEM_CALLS[0])
+    MEM_REPLY["people"][0]["gender_evidence"] = "群友叫他哥"
+    MEM_REPLY["people"][0]["gender_evidence_kind"] = "别人称呼"
+    await rounds(3110)
+    assert "gender_guess" not in p.ltm.get_user(222), "有证据的只猜了一次：还不算"
+    await rounds(3120)
     prof = p.ltm.get_user(222)
-    assert prof["gender_guess"] == "male" and prof.get("gender") is None   # 只是猜测，不算确认
-    assert "可能是男生" in p.ltm.context_for(222, "小王", None)
-    assert "gender_guess" in mem_prompt(MEM_CALLS[0])
+    assert prof["gender_guess"] == "male" and prof.get("gender") is None   # 两次都猜男生：算猜得稳，但不算确认
+    assert "你觉得「小王」应该是男生" in p.ltm.context_for(222, "小王", None)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = pev("/性别 222 女", uid=999, mid=3200)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "（小王｜性别：女（本人确认）｜好感 22｜陌生人）", result=None, bot=bot)
+        ctx.should_call_send(ev, "（小王｜性别：女（管理员设定）｜好感 26｜陌生人）", result=None, bot=bot)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = pev("/性别 222 清除", uid=999, mid=3201)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "（小王｜性别：未确认（感觉像男生）｜好感 22｜陌生人）", result=None, bot=bot)
+        ctx.should_call_send(ev, "（小王｜性别：未确认（有证据地判断是男生）｜好感 26｜陌生人）", result=None, bot=bot)
+
+
+def test_gender_skeptical_and_revisable(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    from plugins.roleplay_chat.memory import _write
+    _write(m._user_path(7), {"qq": 7, "facts": [], "score": 140, "score_v": 2, "gender_guess": "male", "last_talk": time.time()})
+    assert "gender_guess" not in m.get_user(7), "旧规则猜的性别读到时清掉"
+    prof = m.get_user(7)
+    m.gender_evidence(prof, "female", "自称", "我一个女生")
+    m.gender_evidence(prof, "female", "自称", "又说自己是女生")          # 同一天自称两次：还是半信半疑
+    m.save_user(prof)
+    assert "gender_guess" not in m.get_user(7) and m.familiarity(7) == "acquaintance"
+    assert "半信半疑" in m.gender_hint(m.get_user(7), "a")
+    prof = m.get_user(7); m.gender_evidence(prof, "female", "别人称呼", "群友用“她”称呼"); m.save_user(prof)
+    assert m.get_user(7)["gender_guess"] == "female" and m.familiarity(7) == "close", "有旁证：算数，可以到很熟"
+    prof = m.get_user(7); note = m.gender_evidence(prof, "male", "拆穿", "群友说他是男的"); m.save_user(prof)
+    assert note is None and "gender_guess" not in m.get_user(7) and m.familiarity(7) == "acquaintance", "被拆穿一次：退回看不出"
+    assert "有点怀疑对方在骗你" in m.gender_hint(m.get_user(7), "a")
+    prof = m.get_user(7); note = m.gender_evidence(prof, "male", "承认骗人", "承认之前是骗她的"); m.save_user(prof)
+    assert m.get_user(7)["gender_guess"] == "male" and note == "说过自己是女生，后来发现多半是骗伊蕾娜的"
+    # 自称两次、在不同的日子：算数
+    prof = m.get_user(8)
+    m.gender_evidence(prof, "female", "自称", "a", day=date_str(3)); m.gender_evidence(prof, "female", "自称", "b")
+    assert prof["gender_guess"] == "female"
+
+
+def test_gender_legacy_confirmed_can_be_overturned(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    from plugins.roleplay_chat.memory import _write
+    # 9/30 以前聊天里确认过的（A 方案：先保留）
+    _write(m._user_path(9), {"qq": 9, "facts": [], "score": 140, "score_v": 2, "gender": "female", "last_talk": time.time()})
+    assert m.familiarity(9) == "close" and "姑且信了" in m.gender_hint(m.get_user(9), "a")
+    prof = m.get_user(9); m.gender_evidence(prof, "male", "别人称呼", "群友叫他哥"); m.save_user(prof)
+    assert m.get_user(9)["gender"] == "female" and "怀疑" in m.gender_hint(m.get_user(9), "a"), "一次相反的：先怀疑，不马上推翻"
+    prof = m.get_user(9); note = m.gender_evidence(prof, "male", "别人称呼", "又有人叫他哥"); m.save_user(prof)
+    p9 = m.get_user(9)
+    assert "gender" not in p9 and p9["gender_guess"] == "male" and m.familiarity(9) == "acquaintance", "相反的攒够了：推翻"
+    # 管理员设的：证据改不了
+    m.set_gender(10, "female")
+    prof = m.get_user(10); m.gender_evidence(prof, "male", "别人称呼", "x"); m.gender_evidence(prof, "male", "拆穿", "y"); m.save_user(prof)
+    assert m.get_user(10)["gender"] == "female" and m.gender_text(m.get_user(10)) == "女（管理员设定）"
+
+
+@pytest.mark.asyncio
+async def test_gender_lie_noted_as_fact(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 5, "affection": 0, "gender_guess": "男",
+                                                  "gender_evidence": "承认之前是骗她的", "gender_evidence_kind": "承认骗人"}]})
+    prof = m.get_user(5)
+    m.gender_evidence(prof, "female", "自称", "a", day=date_str(3)); m.gender_evidence(prof, "female", "自称", "b")
+    m.save_user(prof)
+    await _feed(m, "private_5", uid=5, name="x")
+    assert "说过自己是女生，后来发现多半是骗伊蕾娜的" in m.fact_texts(m.get_user(5))
+    ctx = m.context_for(5, "阿明", None, text="你还在生我气吗")
+    assert "以前骗过你说自己是女生" in ctx and "挖苦" in ctx and "别说破" not in ctx
+    assert "多半是骗" not in ctx, "性别那句说过了，记忆里不再重复"
+
+
+def test_memory_refers_to_her_as_you_0930(tmp_path):
+    from plugins.roleplay_chat.memory import _to_you
+    assert _to_you("约好下次请她吃可颂") == "约好下次请你吃可颂"
+    assert _to_you("爱拿面包收买伊蕾娜") == "爱拿面包收买你"
+    assert _to_you("时区与我不同") == "时区与你不同"
+    assert _to_you("说“我将离去”，被伊蕾娜劝去有人陪的地方") == "说“我将离去”，被你劝去有人陪的地方", "引号里的原话不动"
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [
+        {"text": "约好下次请她吃可颂", "kind": "约定", "weight": 3, "scope": "private", "since": date_str(3)},
+        {"text": "下个月要去考驾照", "kind": "计划", "weight": 2, "scope": "private", "since": date_str(2), "due": date_str(-30)},
+    ], score=100)
+    prof = m.get_user(111); prof["impression"] = "老惦记着请我吃面包"; prof["gender"] = "female"; m.save_user(prof)
+    ctx = m.context_for(111, "阿明", None, text="好久不见 考驾照")
+    assert "约好下次请你吃可颂" in ctx and "请她" not in ctx and "请你吃面包" in ctx
+    assert "还没到，别问结果" in ctx
+
 
 
 # ---------------------------------------------------------------- 节奏：一次只回一个人
@@ -4007,7 +4092,7 @@ def test_memory_context_scope_and_selection(tmp_path):
         {"text": "以前记的事", "kind": "", "weight": 2, "scope": "legacy"},
     ], impression="爱聊面包的家伙")
     grp = m.context_for(111, "阿明", 555, text="今天的可颂好香")
-    assert "爱聊面包的家伙" in grp and "可颂" in grp and "约好请她吃面包" in grp
+    assert "爱聊面包的家伙" in grp and "可颂" in grp and "约好请你吃面包" in grp
     assert "工作压力" not in grp, "私聊知道的事不在群里说"
     assert "橘猫" not in grp, "别的群知道的事不带"
     assert "以前记的事" not in grp, "还没迁移的旧条目只在私聊用"
@@ -4315,3 +4400,34 @@ def test_ask_later_guidance_0930():
         assert "【可以问问】" not in p.FAMILIARITY_HINT[fam], fam
     assert "【可以问问】" in p.LETTER_PROMPT
 
+
+
+# ---------------------------------------------------------------- 长期记忆：关键词、群里整理得勤一点（9/30 第 3、4 项）
+@pytest.mark.asyncio
+async def test_memory_tags_help_recall(tmp_path):
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "add": [
+        {"text": "下周要考试", "kind": "计划", "weight": 2, "tags": ["期末", "复习", "学校", "考试", "太长的一个关键词啊"]}],
+        "update": [{"id": 1, "tags": ["猫", "喵"]}], "affection": 0}]})
+    _prof_with(m, 111, [{"text": "养了一只橘色的", "kind": "经历", "weight": 2, "scope": "private", "seen": date_str(20)},
+                        {"text": "是学生会干部", "kind": "身份", "weight": 2, "scope": "private"}])
+    await _feed(m, "private_111")
+    f = {x["text"]: x for x in m.get_user(111)["facts"]}
+    assert f["下周要考试"]["tags"] == ["期末", "复习", "学校", "太长的一个关"], "最多 4 个、每个 6 个字，正文里有的不重复"
+    assert f["养了一只橘色的"]["tags"] == ["猫", "喵"], "旧条目用 update 补关键词"
+    assert "system" == calls[0]["messages"][0]["role"] and "关键词 tags" in calls[0]["messages"][0]["content"]
+    ctx = m.context_for(111, "阿明", None, text="期末好难")
+    assert "下周要考试" in ctx, "“期末”靠关键词对上“考试”"
+    ctx = m.context_for(111, "阿明", None, text="我家喵最近很黏人")
+    assert "橘色" in ctx
+
+
+@pytest.mark.asyncio
+async def test_memory_group_batch_smaller(tmp_path):
+    m, calls = _mem(tmp_path, lambda kw: {"people": [], "group_events": {}})
+    m.batch, m.group_batch = 8, 5
+    for i in range(5):
+        m.add_pending("private_1", [{"role": "user", "content": f"a{i}", "uid": 1}])
+        m.add_pending("group_9", [{"role": "user", "content": f"b{i}", "uid": 1}])
+    await asyncio.gather(*list(m._tasks))
+    assert len(calls) == 1 and not m._pending_path("group_9").exists(), "群里 5 条就整理"
+    assert len(json.loads(m._pending_path("private_1").read_text(encoding="utf-8"))) == 5, "私聊还是 8 条"

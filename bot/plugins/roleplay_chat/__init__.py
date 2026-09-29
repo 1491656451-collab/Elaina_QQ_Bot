@@ -119,6 +119,7 @@ ltm = LongTermMemory(
 )
 ltm.affection_cfg = ltm_affection
 ltm.facts_by_tier = {**ltm.facts_by_tier, **cfg.memory_facts_by_tier}   # 每档关系最多记几条
+ltm.group_batch = cfg.memory_batch_group            # 群里攒几条整理一次
 ltm.close_friends = tuple(cfg.close_friends)
 ltm.gender_cap = cfg.gender_cap
 ltm.summary_max_tokens = cfg.memory_summary_max_tokens
@@ -1013,18 +1014,20 @@ def gender_step(qq: int, text: str) -> str:
                 return gender_step(qq, text)
             return "【性别】对方承认刚才说自己是" + word[value] + "是开玩笑的。你就当没听过。"
         if claim == value or _YES_RE.search(text.strip()):
-            ltm.set_gender(qq, value)
-            logger.info(f"性别已确认：{qq} → {word[value]}")
-            return (f"【性别】对方又确认了一次，说自己确实是{word[value]}。你接受了（可以嘴上说一句“好吧，姑且信你”之类），"
-                    "以后就这么认为，不要再质疑。")
+            ltm.claim_gender(qq, value)             # 9/30 起只算一次“自称”，要有别的证据印证才算数（对方可能在骗她）
+            logger.info(f"性别：{qq} 自称{word[value]}（质疑后又确认）")
+            return (f"【性别】对方又确认了一次，说自己确实是{word[value]}。你姑且信了（可以嘴上说一句“好吧，姑且信你”之类），"
+                    "这一轮别再追问；心里留个问号就行。")
         return ""                         # 聊别的去了：先不管，等窗口过期
-    if not claim or claim == prof.get("gender"):
+    if not claim or claim == prof.get("gender") or claim == ltm.last_claim(prof):   # 已经说过、质疑过的，不再每次都质疑
         return ""
     prof["gender_pending"] = {"value": claim, "ts": time.time()}
     ltm.save_user(prof)
     extra = ""
     if prof.get("gender") and prof["gender"] != claim:
         extra = f"而且对方以前明明说自己是{word[prof['gender']]}。"
+    elif ltm.last_claim(prof) and ltm.last_claim(prof) != claim:
+        extra = f"而且对方以前明明说自己是{word[ltm.last_claim(prof)]}。"
     elif prof.get("gender_guess") and prof["gender_guess"] != claim:
         extra = f"而且你一直觉得对方更像{word[prof['gender_guess']]}。"
     return (f"【性别】对方说自己是{word[claim]}。{extra}你不会马上相信，用你的方式质疑一句，让对方再确认一次"

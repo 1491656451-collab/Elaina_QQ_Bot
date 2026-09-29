@@ -82,6 +82,7 @@ class Config(BaseModel):
     memory_enabled: bool = True
     memory_dir: str = "data/memory"
     memory_batch: int = 8                 # 每轮对话都加进待整理，攒够这么多条就在后台整理一次
+    memory_batch_group: int = 5           # 群里攒够这么多条就整理（群的短期记忆只有 10 条，比私聊勤一点，免得刚说的事还没记下就被挤掉；9/30 起）
     memory_max_facts: int = 20            # 每人档案最多几条；9/30 起按关系分（memory_facts_by_tier），这个只在表里没写到的档位时用
     memory_facts_by_tier: dict[str, int] = {"disliked": 8, "stranger": 8, "friend": 12, "acquaintance": 20, "close": 30}   # 按关系：每人最多记几条（9/30 起；越熟记得越多，满了先忘又旧又不重要的）
     memory_max_events: int = 12           # 每个群往事最多几条（9/27 从 8 加到 12）
