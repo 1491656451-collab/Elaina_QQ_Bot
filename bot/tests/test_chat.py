@@ -4268,3 +4268,50 @@ async def test_budget_crossed_between_rounds_wraps_up_open_question(monkeypatch)
     assert bot.sent[1:] == ["挺好的。", "私聊再见"], bot.sent     # 先把话回完，再告别
     await p.converse(bot, pev("拜拜", uid=9731, mid=7302))
     assert bot.sent[1:] == ["挺好的。", "私聊再见"], bot.sent
+
+
+# ---------------------------------------------------------------- 长期记忆：【可以问问】（9/30 第 3 步）
+def test_memory_ask_followup(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    old = time.time() - 8 * 3600
+    _prof_with(m, 111, [
+        {"text": "下周要期末考试", "kind": "计划", "weight": 2, "scope": "private", "since": date_str(8), "due": date_str(1)},
+        {"text": "最近在搬家", "kind": "近况", "weight": 2, "scope": "private", "since": date_str(4)},
+        {"text": "那阵子心情很低落", "kind": "近况", "weight": 1, "scope": "private", "since": date_str(5)},
+    ], score=100, last_msg=old)
+    ctx = m.context_for(111, "阿明", None, text="我回来了")
+    assert "【可以问问】「阿明」1 周前说过：下周要期末考试（大概是" in ctx and "搬家" not in ctx.split("【可以问问】")[1]
+    assert m.get_user(111)["facts"][0]["offered"] == date_str(), "提过一次就记下"
+    ctx2 = m.context_for(111, "阿明", None, text="我回来了")
+    assert "【可以问问】「阿明」4 天前说过：最近在搬家" in ctx2, "考试那件提过了，换下一件"
+    assert "【可以问问】" not in m.context_for(111, "阿明", None, text="我回来了"), "重要度 1 的近况（心情低落）不拿来问"
+
+
+def test_memory_ask_only_when_close_and_after_gap(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    plan = {"text": "下周要期末考试", "kind": "计划", "weight": 2, "scope": "group:555", "since": date_str(8), "due": date_str(1)}
+    _prof_with(m, 1, [dict(plan)], score=20, last_msg=time.time() - 8 * 3600)          # 陌生人
+    assert "【可以问问】" not in m.context_for(1, "a", None)
+    _prof_with(m, 2, [dict(plan)], score=100, last_msg=time.time() - 600)             # 熟人，但刚聊过（冷场搭话）
+    assert "【可以问问】" not in m.context_for(2, "b", None)
+    _prof_with(m, 3, [dict(plan)], score=100, last_msg=time.time() - 8 * 3600)
+    assert "【可以问问】" not in m.context_for(3, "c", None, place="qzone"), "空间评论是公开的，不问"
+    assert "【可以问问】" in m.context_for(3, "c", 555), "群里知道的计划，群里也可以问"
+    _prof_with(m, 4, [{**plan, "scope": "private"}], score=100, last_msg=time.time() - 8 * 3600)
+    assert "【可以问问】" not in m.context_for(4, "d", 555), "私聊知道的，群里不问"
+
+
+def test_summary_prompt_no_bread_as_trait():
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
+    assert "别把伊蕾娜自己的喜好（面包、钱、讨厌蘑菇这些）写成对方的特点" in SUMMARIZE_PROMPT
+
+
+def test_ask_later_guidance_0930():
+    """【可以问问】只在熟人、很熟两档和写信里教她怎么用；陌生人、普通朋友不提"""
+    import plugins.roleplay_chat as p
+    for fam in ("acquaintance", "close"):
+        assert "【可以问问】" in p.FAMILIARITY_HINT[fam], fam
+    for fam in ("disliked", "stranger", "friend"):
+        assert "【可以问问】" not in p.FAMILIARITY_HINT[fam], fam
+    assert "【可以问问】" in p.LETTER_PROMPT
+

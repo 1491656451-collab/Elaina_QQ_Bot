@@ -71,6 +71,10 @@ FORGET_DAYS = {1: 30, 2: 90}                # 这么多天没再聊到就忘（�
 RECENT_DAYS = 14                            # “近况”过这么多天就不算近况了
 PLAN_GRACE_DAYS = 30                        # 计划到期后再留这么多天
 MAX_TOLD = 8
+# 【可以问问】：对方隔了一阵才来时，提醒她一件可以问后续的事（计划到时间了、之前说过的近况）
+ASK_TIERS = ("acquaintance", "close")      # 只给熟人、很熟（不熟的人被问“你上次说的考试”会觉得被盯着）
+ASK_GAP_HOURS = 6                          # 对方隔了这么久才来找她（写信本来就隔了一天以上）
+ASK_RECENT_MIN_DAYS = 3                    # 近况要过了这么多天才问“后来怎么样了”
 SCOPE_NAMES = {"private": "私聊", "qzone": "空间", "public": "群里", "legacy": "未分类"}
 
 _PUNCT_RE = re.compile(r"[\s，。、！？!?,.；;：:“”\"'‘’（）()【】\[\]~～…—\-]+")
@@ -298,6 +302,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 - 档案里标着“未分类”的旧条目：这次聊到了的，顺手用 update 补上 kind 和 weight；写成了“被伊蕾娜回……”这种流水账的，改写成关于这个人的话，或者 drop。
 - told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫她宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。每条不超过 25 字，没有就不写，大多数时候都没有。
 - impression：伊蕾娜对这个人的总体印象，一句话，不超过 40 字，用她的口吻（例如“嘴甜又黏人，老惦记着请我吃面包”）。群里也会用到，所以只写性格和相处方式，不写私事（倾诉过的烦恼、情绪、告白）。还没有印象、或者印象变了才写；没变就不写这一项。
+- 印象和记忆条目里，别把伊蕾娜自己的喜好（面包、钱、讨厌蘑菇这些）写成对方的特点，除非对方自己反复提起；写了她每次看到都会想扯到面包上。
 - 这段记录里没有这个人的新内容：add、update、drop 都留空，照样给 affection。
 
 三、群往事 group_events（私聊、空间评论时 add 留空）
@@ -1362,7 +1367,8 @@ class LongTermMemory:
                 picked = sorted(rest, key=lambda f: -_keep_score(f))[:max(1, n_rel // 2)]
         else:
             picked = sorted(rest, key=lambda f: -_keep_score(f))[:n_rel]
-        chosen = [f for f in prof.get("facts") or [] if f in core or f in picked]   # 按档案里的顺序
+        ask = self._ask_item(prof, tier, place, gid)
+        chosen = [f for f in prof.get("facts") or [] if (f in core or f in picked) and f is not ask]   # 按档案里的顺序
         if chosen:
             parts.append(f"关于「{who}」你记得：" + "；".join(self._fact_for_her(f) for f in chosen))
 
@@ -1373,6 +1379,16 @@ class LongTermMemory:
         if told:
             parts.append(f"你跟「{who}」说过的：" + "；".join(f"{t['text']}（{_ago(t.get('date'))}）" for t in told)
                          + "。别当成第一次说。")
+
+        if ask:
+            due = f"（大概是{_md(ask['due'])}的事）" if ask.get("due") else ""
+            parts.append(f"【可以问问】「{who}」{_ago(ask.get('since'))}说过：{ask.get('text', '')}{due}。"
+                         "隔了一阵了，聊得上的话可以顺口问一句后来怎么样；接不上就不提。只问这一件。")
+            ask["offered"] = _today_str()          # 提过一次就不再提这件（问没问、对方怎么答，下次整理时会记进去）
+            try:
+                self.save_user(prof)
+            except OSError as e:
+                logger.warning(f"长期记忆：记下“可以问问”失败：{e}")
 
         if gid and place == "group":
             events = [e for e in self.get_group(gid).get("events") or [] if not self._event_expired(e)]
@@ -1387,6 +1403,32 @@ class LongTermMemory:
             "【长期记忆】以下是你从以前的聊天里记住的事，自然地运用，别逐条复述，"
             "也别说“我记录里写着”。记错了就以对方现在说的为准。\n" + "\n".join(parts)
         )
+
+    def _ask_item(self, prof: dict, tier: str, place: str, gid: int | None) -> dict | None:
+        """挑一件可以问后续的事：计划到时间了的优先，其次是几天前说过的近况（重要度 2 以上）。
+        只给熟人、很熟；空间评论（公开）不给；对方隔了 ASK_GAP_HOURS 以上才来才给；每件只提一次"""
+        if tier not in ASK_TIERS or place == "qzone":
+            return None
+        seen = prof.get("last_msg") or prof.get("last_talk")
+        try:
+            if seen and time.time() - float(seen) < ASK_GAP_HOURS * 3600:
+                return None
+        except (TypeError, ValueError):
+            return None
+        today = date.today().isoformat()
+        plans, recents = [], []
+        for f in prof.get("facts") or []:
+            if not isinstance(f, dict) or f.get("offered") or _expired(f) or not scope_ok(f.get("scope"), place, gid):
+                continue
+            if f.get("kind") == "计划" and f.get("due") and str(f["due"]) <= today:
+                plans.append(f)
+            elif f.get("kind") == "近况" and _weight(f.get("weight")) >= 2 and _days_since(f.get("since")) >= ASK_RECENT_MIN_DAYS:
+                recents.append(f)
+        if plans:
+            return max(plans, key=lambda f: str(f.get("due")))
+        if recents:
+            return max(recents, key=lambda f: (_weight(f.get("weight")), -_days_since(f.get("since"))))
+        return None
 
     @staticmethod
     def _fact_for_her(f: dict) -> str:
