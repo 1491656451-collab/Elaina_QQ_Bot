@@ -55,6 +55,10 @@ class Config(BaseModel):
     knowledge_summary_dir: str = "knowledge/summaries"   # 章节摘要（相对 bot 目录）
     knowledge_novel_dir: str = "../novel"                # 小说 txt 所在文件夹
     knowledge_characters_file: str = "knowledge/characters.md"   # 角色档案（经原文核实）
+    knowledge_places_file: str = "knowledge/places.md"   # 地名表：给“记混检查”用（9/29）
+    story_check: bool = True              # 讲长故事时，再调一次模型拿查到的资料核对（人、地点、谁做了什么、结局）；讲错了就重说一次（9/29）
+    story_check_min_chars: int = 40       # 回复至少这么多字、而且在讲往事（带了回忆资料，或者提到了小说里的人 / 地方）才核对
+    fact_check: bool = True               # 记混检查：回复里把某人和一段没有他的经历放在一起（比如“在梦回之城遇上艾姆妮西亚”），就重说一次（9/29）
     knowledge_cache: str = "data/novel_index.pkl"
     knowledge_top_characters: int = 2                    # 话里点名的角色，最多带几人的档案
     knowledge_top_summaries: int = 2                     # 每次最多带几条摘要

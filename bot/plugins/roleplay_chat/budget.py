@@ -20,9 +20,9 @@ from nonebot import logger
 from . import peak
 
 # 聊天类：受 chat_limit 限制；其余（memory、qzone_post、gallery、sticker……）是后台类，可以用到 total
-CHAT_KINDS = {"chat", "judge", "vision", "interject", "bubble", "letter", "nudge", "qzone_reply", "qzone_friend"}
+CHAT_KINDS = {"chat", "judge", "verify", "vision", "interject", "bubble", "letter", "nudge", "qzone_reply", "qzone_friend"}
 KIND_NAMES = {
-    "chat": "回消息", "judge": "判断是不是在跟她说话", "vision": "看图", "interject": "插话", "bubble": "冒泡",
+    "chat": "回消息", "judge": "判断是不是在跟她说话", "verify": "核对讲的往事", "vision": "看图", "interject": "插话", "bubble": "冒泡",
     "letter": "写信", "nudge": "冷场搭话", "qzone_reply": "回空间评论", "qzone_friend": "评论好友说说",
     "memory": "长期记忆整理", "qzone_post": "写说说", "gallery": "给说说配图写描述", "sticker": "给表情写描述",
 }

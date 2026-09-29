@@ -40,7 +40,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule, to_me
 from openai import AsyncOpenAI
 
-from . import budget, knowledge, peak
+from . import budget, factcheck, knowledge, peak
 from .memory import LongTermMemory
 from .stickers import EMOTIONS, StickerStore
 from .stickers import normalize as sticker_normalize
@@ -174,6 +174,7 @@ def system_prompt() -> str:
 
 # ------------------------------------------------------------------ 小说知识库
 _kb: "knowledge.KnowledgeBase | None" = None
+_fc: "factcheck.FactChecker | None" = None     # 记混检查（人和地方对不对得上）
 
 RECALL_RULES = (
     "【回忆参考】以下是你旅行日记里可能和当前话题有关的内容，供你回想，不是对方说的话。\n"
@@ -182,10 +183,94 @@ RECALL_RULES = (
     "- 标注“角色资料”的是这个人的确切资料（外貌、喜好等以它为准）；“摘要”是整段经历的梗概；“原文”是当时的片段；"
     "“刚才聊到的”是你们刚才在聊的那段经历。\n"
     "- 对方说起这段经历里的细节、别人说过的话，而片段里没有写：别断然否认，也别编一个结局，说记不太清、或者问对方是谁说的。\n"
+    "- 片段和你上面自己说过的话对不上（比如地方、人对不上）：以片段为准，自然地改口（“啊，不对，是在……”），别顺着说错的继续编。\n"
     "- 这些都是你以前旅途里的事，不是今天发生的；别把它们说成今天的经历，也别和今天的日记混在一起。\n"
     "- 对方只是在闲聊、没问起往事时，一般用不上这些片段；真要提，得先讲清楚是哪件事，"
     "别像对方早就知道一样突然冒出片段里的细节（比如没头没脑地说“我又没拿那张券……”）。"
 )
+
+
+# ------------------------------------------------------------------ 核对讲的往事（9/29）
+# 讲长故事时再调一次模型，拿查到的资料核对：人、地点、谁做了什么、结局有没有和资料矛盾。讲错了就告诉她哪里错、重说一次
+STORY_CHECK_PROMPT = """下面是角色扮演里“伊蕾娜”（小说《魔女之旅》的主角）刚写好的一条回复，以及她旅行日记里的相关资料。
+请核对：回复里讲到的往事，有没有和资料**矛盾**的地方——人物张冠李戴、地点弄错、把两段经历拼在一起、谁做了什么说反、结局说错。
+
+规则：
+- 只看和资料矛盾的地方。资料里没写到的细节、她的感想和语气、玩笑和夸张，都不算错。
+- 回复没有在讲往事（闲聊、说现在的事），直接算没问题。
+- 拿不准就算没问题。
+
+只输出 JSON：没问题就 {{"ok": true}}；有问题就 {{"ok": false, "problems": ["一句话说清哪里错了、资料里其实是怎样（不超过 50 字）"]}}，最多 3 条。
+
+【资料】
+{evidence}
+
+【伊蕾娜的回复】
+{reply}"""
+
+STORY_FIX_PROMPT = ("【讲错了】你刚才讲的往事和日记对不上：\n{problems}\n"
+                    "请重新回复这条消息：按日记里的来讲，拿不准的细节就说记不太清了。不要道歉，也不要提自己刚才讲错了。")
+
+
+def _story_evidence(reply: str, memo: str) -> str:
+    """核对用的资料：这一轮带给她的回忆片段 + 回复里提到的人的档案、提到的地方那几段经历、按回复内容再查的摘要"""
+    parts, seen = [], set()
+    body = memo.split("\n\n", 1)[1] if memo.startswith(RECALL_RULES) and "\n\n" in memo else memo
+    if body:
+        parts.append(body[:1500])
+    if _fc is not None:
+        lines = _fc.overview_for(reply)
+        if lines:
+            parts.append("旅途总览：\n" + "\n".join(lines))
+    if _kb is not None:
+        for d in _kb.characters_in(reply)[:2]:
+            if d.label not in body and d.label not in seen:
+                seen.add(d.label)
+                parts.append(f"【{d.label}】{d.content[:700]}")
+        for score, d in _kb.search(reply, "summary", 2):
+            if score >= cfg.knowledge_min_summary_score and d.label not in body and d.label not in seen:
+                seen.add(d.label)
+                parts.append(f"【{d.label}】{d.content[:600]}")
+    return "\n\n".join(parts)[:3500]
+
+
+def _tells_story(reply: str, memo: str) -> bool:
+    if len(re.sub(r"\s", "", reply)) < cfg.story_check_min_chars:
+        return False
+    if memo:
+        return True
+    if _fc is not None:
+        places, people = _fc.mentions(reply)
+        if places or people:
+            return True
+    return bool(_kb is not None and _kb.characters_in(reply))
+
+
+async def story_check(reply: str, memo: str, user_id: int | None = None, group_id: int | None = None) -> list[str] | None:
+    """讲长故事时核对一遍。返回讲错的地方；没问题、不用核对、核对出错都返回 None（出错不影响回复）"""
+    if not cfg.story_check or not reply or not _tells_story(reply, memo):
+        return None
+    evidence = _story_evidence(reply, memo)
+    if not evidence:
+        return None
+    try:
+        r = await client.chat.completions.create(
+            model=cfg.deepseek_model,
+            messages=[{"role": "user", "content": STORY_CHECK_PROMPT.format(evidence=evidence, reply=reply)}],
+            temperature=0,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        budget.track(r, "verify", user=user_id, group=group_id)
+        data = json.loads(r.choices[0].message.content or "{}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"核对往事失败，照原样发：{e}")
+        return None
+    if not isinstance(data, dict) or data.get("ok", True) is not False:
+        return None
+    problems = [str(x).strip()[:80] for x in (data.get("problems") or []) if str(x).strip()][:3]
+    return problems or None
 
 
 _FOLLOWUP_WORDS = (
@@ -2171,6 +2256,50 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
                 if ooc_words(reply, text):
                     reply = drop_ooc_sentences(reply, text)   # 还出戏就删掉出戏的句子；删光了就不发
+            wrong = _fc.check(reply) if (_fc is not None and cfg.fact_check) else []
+            if wrong:
+                # 把某人和一段没有他的经历拼在一起了（比如“在梦回之城遇上艾姆妮西亚”）：告诉她哪里记混了，重说一次
+                logger.info(f"回复记混了（{'、'.join(f'{m.place}+{m.person}' for m in wrong)}），重新生成：{reply[:40]}")
+                resp = await client.chat.completions.create(
+                    model=cfg.deepseek_model,
+                    messages=messages + [
+                        {"role": "assistant", "content": reply},
+                        {"role": "system", "content": _fc.correction(wrong)},
+                    ],
+                    temperature=cfg.llm_temperature,
+                    max_tokens=max_tokens_for(mode),
+                    extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
+                )
+                budget.track(resp, "chat", user=event.user_id, group=gid_q)
+                choice = resp.choices[0]
+                reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
+                still = _fc.check(reply)
+                if still:                                 # 还是混：删掉那几句；删光了就说记不清
+                    logger.info(f"重说以后还是记混（{'、'.join(f'{m.place}+{m.person}' for m in still)}），删掉这几句")
+                    for m in still:
+                        reply = reply.replace(m.sentence, "")
+                    reply = reply.strip() or "那段我记不太清了。"
+            problems = await story_check(reply, memo, event.user_id, gid_q) if not busy else None
+            if problems:
+                # 讲的往事和资料对不上：告诉她哪里讲错了，重说一次（不再核对第二遍，省钱）
+                logger.info(f"讲的往事和资料对不上（{'；'.join(problems)[:80]}），重新生成：{reply[:40]}")
+                resp = await client.chat.completions.create(
+                    model=cfg.deepseek_model,
+                    messages=messages + [
+                        {"role": "assistant", "content": reply},
+                        {"role": "system", "content": STORY_FIX_PROMPT.format(problems="\n".join(f"- {x}" for x in problems))},
+                    ],
+                    temperature=cfg.llm_temperature,
+                    max_tokens=max_tokens_for(mode),
+                    extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
+                )
+                budget.track(resp, "chat", user=event.user_id, group=gid_q)
+                choice = resp.choices[0]
+                reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
+                if _fc is not None and cfg.fact_check:
+                    for m in _fc.check(reply):
+                        reply = reply.replace(m.sentence, "")
+                    reply = reply.strip() or "那段我记不太清了。"
         except Exception as e:  # noqa: BLE001
             # 出错时不在聊天里发任何东西；余额不足 / Key 失效私信管理员
             kind = classify_error(e)
@@ -3757,7 +3886,7 @@ async def _():
 
 @get_driver().on_startup
 async def _():
-    global _kb, _letter_task, _bubble_task, _memory_task, _nudge_task, _sleep_task
+    global _kb, _fc, _letter_task, _bubble_task, _memory_task, _nudge_task, _sleep_task
     if cfg.sleep_enabled:
         _sleep_task = asyncio.create_task(_sleep_loop())
     if cfg.nudge_enabled and cfg.enable_private:
@@ -3781,6 +3910,11 @@ async def _():
             )
         except Exception as e:  # noqa: BLE001
             logger.exception(f"知识库加载失败，将不使用小说检索：{e}")
+    if cfg.fact_check:
+        _fc = await asyncio.to_thread(
+            factcheck.load, BOT_DIR / cfg.knowledge_summary_dir, BOT_DIR / cfg.knowledge_characters_file,
+            BOT_DIR / cfg.knowledge_places_file, _persona,
+        )
     if not cfg.deepseek_api_key:
         logger.warning("未配置 DEEPSEEK_API_KEY，机器人会提示未配置")
     year = str(datetime.now(peak.BEIJING).year)
