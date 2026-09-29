@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 from collections import OrderedDict
@@ -62,6 +64,42 @@ _REWRITE = [
     (re.compile(r"角色"), "人物"),
 ]
 
+# 交给模型前先在本机缩小：DeepSeek 看图时本来也会缩小，原图几 MB 传上去只是更慢、更容易超时
+LOOK_MAX_SIDE = 1536          # 长边超过这个就缩小
+KEEP_AS_IS_BYTES = 2 * 1024 * 1024   # 本来就不大（长边不超过上面的值、文件不超过 2 MB）的图原样用，动图也保留
+MAX_DECODE_PIXELS = 16_000_000       # PNG 等格式要整张解码，超过约 1600 万像素就不看（JPEG 能按比例解码，不受这个限制）
+_shrink_lock = threading.Lock()      # 一次只缩一张，免得两张大图同时解码占内存
+
+
+class TooBig(Exception):
+    pass
+
+
+def shrink(raw: bytes) -> bytes:
+    """把图缩成长边 ≤ 1536 的 JPEG（透明背景垫白、动图取第一帧）；本来就小的原样返回。太大没法处理时抛 TooBig"""
+    from PIL import Image
+
+    with _shrink_lock:
+        img = Image.open(io.BytesIO(raw))            # 只读文件头，还没解码
+        w, h = img.size
+        if max(w, h) <= LOOK_MAX_SIDE and len(raw) <= KEEP_AS_IS_BYTES:
+            return raw
+        if img.format == "JPEG":
+            img.draft("RGB", (LOOK_MAX_SIDE, LOOK_MAX_SIDE))   # 按缩小的比例解码，再大的 JPEG 也只占很少内存
+        elif w * h > MAX_DECODE_PIXELS:
+            raise TooBig(f"{w}×{h}")
+        img.seek(0)
+        img.thumbnail((LOOK_MAX_SIDE, LOOK_MAX_SIDE), Image.LANCZOS)
+        if img.mode in ("RGBA", "LA", "P", "PA"):
+            img = img.convert("RGBA")
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(bg, img)
+        img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=88)
+        return buf.getvalue()
+
+
 _MAGIC = {
     b"\xff\xd8\xff": "image/jpeg",
     b"\x89PNG": "image/png",
@@ -93,7 +131,7 @@ def sanitize(desc: str) -> str:
 
 class Vision:
     def __init__(self, client, model: str, cache_file: Path, *, tagger=None, maybe: float = 0.35,
-                 max_bytes: int = 5 * 1024 * 1024, max_tokens: int = 120, timeout: float = 15.0):
+                 max_bytes: int = 20 * 1024 * 1024, max_tokens: int = 120, timeout: float = 30.0):
         self.client = client
         self.maybe = maybe          # 伊蕾娜置信度在 maybe～门槛之间：让 deepseek-flash 再确认一次
         self.model = model
@@ -165,26 +203,51 @@ class Vision:
 
     # ------------------------------------------------------------ 下载
     def _download_sync(self, url: str) -> bytes | None:
-        # 只用 Python 自带的 urllib，不依赖额外的库
+        # 只用 Python 自带的 urllib，不依赖额外的库；最多读 max_bytes+1 字节，超了就停，不会把大文件整个读进内存
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             data = r.read(self.max_bytes + 1)
         if len(data) > self.max_bytes:
-            logger.info(f"识图：图片太大（超过 {self.max_bytes // 1024 // 1024} MB），跳过")
-            return None
+            raise TooBig(f"超过 {self.max_bytes // 1024 // 1024} MB")
         return data
 
+    def _mark_big(self, key: str, why: str) -> None:
+        """太大没法看的图记下来，下次别再下载一遍（说说配图每轮都会再查）"""
+        logger.info(f"识图：图片太大（{why}），跳过")
+        if key:
+            entry = self._cache.setdefault(key, {})
+            entry["big"] = 1
+            self._save()
+
     async def _get_raw(self, data: dict, key: str) -> bytes | None:
+        """下载并缩小好的图（交给模型和本机认人的都是这份）"""
         if key and key in self._raw:
             return self._raw[key]
+        if key and self._cache.get(key, {}).get("big"):
+            return None
         url = data.get("url") or (data.get("file") if str(data.get("file", "")).startswith("http") else None)
         if not url:
             return None
         try:
             raw = await asyncio.to_thread(self._download_sync, url)
+        except TooBig as e:
+            self._mark_big(key, str(e))
+            return None
         except Exception as e:  # noqa: BLE001
             logger.warning(f"识图：图片下载失败：{e}")
             return None
+        if raw and _mime(raw):
+            size0 = len(raw)
+            try:
+                raw = await asyncio.to_thread(shrink, raw)
+            except TooBig as e:
+                self._mark_big(key, str(e))
+                return None
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"识图：图片缩小失败（{e}），这张不看")
+                return None
+            if len(raw) != size0:
+                logger.debug(f"识图：缩小后交给模型（{size0 // 1024} KB → {len(raw) // 1024} KB）")
         if raw and key:
             self._raw[key] = raw
             while len(self._raw) > 8:
