@@ -58,6 +58,7 @@ class Config(BaseModel):
     knowledge_places_file: str = "knowledge/places.md"   # 地名表：给“记混检查”用（9/29）
     story_check: bool = True              # 讲长故事时，再调一次模型拿查到的资料核对（人、地点、谁做了什么、结局）；讲错了就重说一次（9/29）
     story_check_min_chars: int = 40       # 回复至少这么多字、而且在讲往事（带了回忆资料，或者提到了小说里的人 / 地方）才核对
+    unprompted_words: list[str] = ["蘑菇|菇"]   # 对方和最近几条聊天都没提到，她自己也别突然提（她讨厌蘑菇，模型爱硬扯）；含这些词的句子删掉。用 | 隔开的算一组，上文提到其中一个就都能说（9/29）
     fact_check: bool = True               # 记混检查：回复里把某人和一段没有他的经历放在一起（比如“在梦回之城遇上艾姆妮西亚”），就重说一次（9/29）
     knowledge_cache: str = "data/novel_index.pkl"
     knowledge_top_characters: int = 2                    # 话里点名的角色，最多带几人的档案

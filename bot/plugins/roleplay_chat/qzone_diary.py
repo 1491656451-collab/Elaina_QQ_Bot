@@ -433,6 +433,9 @@ async def publish(draft: dict) -> str:
     img = gallery.items.get(draft["image"])
     if not img:
         raise RuntimeError("草稿里的图不在图库里了")
+    # 先读一下自己的说说列表，顺便验证凭证：旧了会在这里重新要（上传图片的接口凭证过期时不报 -3000，直接失败）。
+    # 刚重新要到凭证时，下面的发布会被闸门挡住，过几分钟再发
+    await qz.list_posts(1)
     tid = await qz.publish(draft["text"], [gallery.image_bytes(img)], right=RIGHT_PUBLIC)
     gallery.mark_used(draft["image"])
     posts = _read(POSTS_FILE, [])
@@ -775,7 +778,12 @@ async def poll_comments(force: bool = False) -> str:
         if _quota_left() <= 0 or _round_full():
             break                                           # 剩下的留到下一轮
         await _gap_between_replies(i)                       # 连着回几条时隔开几分钟
-        res = await reply_comment(me, t["post"], t["root"], t["item"], earlier=t["earlier"])
+        try:
+            res = await reply_comment(me, t["post"], t["root"], t["item"], earlier=t["earlier"])
+        except QzoneError as e:
+            if e.kind == "limit":            # 这一条不再重试：9/29 同一条连着两次 -10049，恢复后又去回它、又熔断
+                _mark_seen([t["key"]] + t["also_keys"])
+            raise
         if res == "retry":
             continue
         _mark_seen([t["key"]] + t["also_keys"])
@@ -880,11 +888,16 @@ async def poll_mentions() -> str:
         d = t["d"]
         if d["tid"] not in pics:
             pics[d["tid"]] = await _pic_hint(post_pics(d))
-        if t["kind"] == "post":
-            res = await reply_post_mention(me, t["owner"], t["owner_nick"], d, pics[d["tid"]])
-        else:
-            res = await reply_comment(me, d, t["root"], t["item"], owner=t["owner"],
-                                      owner_nick=t["owner_nick"], pic=pics[d["tid"]], earlier=t["earlier"])
+        try:
+            if t["kind"] == "post":
+                res = await reply_post_mention(me, t["owner"], t["owner_nick"], d, pics[d["tid"]])
+            else:
+                res = await reply_comment(me, d, t["root"], t["item"], owner=t["owner"],
+                                          owner_nick=t["owner_nick"], pic=pics[d["tid"]], earlier=t["earlier"])
+        except QzoneError as e:
+            if e.kind == "limit":            # 同上：这一条不再重试
+                _mark_seen([t["key"]] + t["also_keys"])
+            raise
         if res == "retry":
             pending_feeds.update(t["feed_keys"])
             continue
@@ -1305,7 +1318,9 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
                 await _warm_cookie()
                 await diary_cmd.finish(f"（先不发：{write_block() or why}）")
             d = await make_post()
+            _last_draft = d                  # 被闸门挡住（比如刚重新要了凭证）：过几分钟发 /说说 发预览 就能发这条，不用重写
             tid = await publish(d)
+            _last_draft = None
             await diary_cmd.finish(_draft_msg(d, f"（已发出 tid={tid}。离这条不到 {cfg.qzone_post_min_gap_hours:g} 小时的定时说说会跳过）"))
         elif cmd == "删除最新":
             posts = _read(POSTS_FILE, [])
@@ -1368,7 +1383,8 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             await diary_cmd.finish(USAGE)
     except QzoneError as e:
         if e.kind == "hold":
-            await diary_cmd.finish(f"（先不动空间：{e.msg}）")
+            tail = "。写好的这条留着，到时候发 /说说 发预览" if cmd == "立即发" and _last_draft else ""
+            await diary_cmd.finish(f"（先不动空间：{e.msg}{tail}）")
         await diary_cmd.finish(f"（QQ 空间接口出错：{e}。详细记录在 data\\qzone\\qzone.log）")
     except RuntimeError as e:
         await diary_cmd.finish(f"（没成：{e}）")

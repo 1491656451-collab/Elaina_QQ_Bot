@@ -463,7 +463,11 @@ class Qzone:
             "base64": "1", "picfile": base64.b64encode(image).decode(),
         })
         if d.get("ret") != 0:
-            raise QzoneError("api", f"上传图片失败：ret={d.get('ret')} {d.get('msg', '')}")
+            # 9/29 21:24 服务器上连着两次 ret=None，紧接着读说说列表报 -3000：凭证旧了，上传接口却不按 -3000 报。
+            # 把原样返回记进日志；凭证作废，下次先重新要（写请求本身不自动重试）
+            self._log("上传图片", URL_UPLOAD, 200, f"没成功，原样返回：{_snip(json.dumps(d, ensure_ascii=False), 300)}")
+            self._ctx = None
+            raise QzoneError("api", f"上传图片失败：ret={d.get('ret')} {d.get('msg', '')}（多半是空间凭证过期了，下次会重新要）")
         info = d.get("data") or {}
         url = str(info.get("url") or "")
         m = re.search(r"[?&]bo=([^&]+)", url)
@@ -518,8 +522,11 @@ class Qzone:
             "topicId": f"{host}_{tid}__1", "uin": c.uin, "hostUin": host, "feedsType": 100,
             "inCharset": "utf-8", "outCharset": "utf-8", "plat": "qzone", "source": "ic",
             "platformid": 52, "format": "fs", "ref": "feeds", "content": body,
-            "commentId": root.tid, "commentUin": target.uin, "richval": "", "richtype": "",
-            "private": "0", "paramstr": 2, "qzreferrer": f"https://user.qzone.qq.com/{c.uin}/main",
+            # commentUin 是这一楼楼主（不是被回复的人；被回复的人靠正文里的 @ 标记）。
+            # 9/26 19:24、9/29 18:47、21:36 三次 -10049 全是“楼主和被回复的人不是同一个”的回复（比如别人回她的评论），
+            # 其余回复都是楼主本人，全部成功：原来填成被回复的人，多半是参数不对，不是真被限流
+            "commentId": root.tid, "commentUin": root.uin, "richval": "", "richtype": "",
+            "private": "0", "paramstr": 2, "qzreferrer": f"https://user.qzone.qq.com/{host}",
         })
         await asyncio.sleep(2)
         try:

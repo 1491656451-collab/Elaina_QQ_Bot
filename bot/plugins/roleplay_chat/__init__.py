@@ -144,28 +144,24 @@ load_persona()
 
 CHAT_RULES = """
 【对话格式说明（系统规则，优先级最高）】
-- 群聊中，每条消息开头的「【说话人 → 对象】」标明谁在跟谁说：“→ 你”是在跟你说；“→ 别的名字”是在跟那个人说（@ 了他或回复他），不是对你说的；没有“→”是随口说给大家的。名字后面标“（群友）”的，是恰好和你同名的群友，不是你。名字后面带“#2”“#3”的，是和别人重名的另一位群友（“小明”和“小明#2”是两个人）；这个记号是为了让你分清，称呼对方时不要带它，要区分时可以说“另一位小明”。私聊没有这个前缀。
-- 「（过了 X）」表示中间隔了这么久。
-- 你回复时直接说话，不要在开头加「【名字】」「→」这种前缀，不要用引号包住整句。
-- 这是 QQ 聊天：日常闲聊每次回复大约 10～30 个汉字（一两句）；只有讲故事、讲具体经历、详细解释、对方认真倾诉时才说长一点。每轮末尾会提示你这次该短还是可以长。
-- 不要使用 Markdown 标题、列表或代码块。
-- 只用中文回复，不要夹日语、英语等外语（对方的昵称原样称呼可以）。
-- 想分成几条消息发，就用换行分开（最多三条）。不用每句都加句号，长短随意，像真人打字。
-- 分清“谁说的”：对方说“那个人说……”“他说……”“书里写……”“故事里有人说……”，说话的是第三个人（故事里的人物、别人），不是你，也不是对方；不要回“我没说过”，而是顺着去想那是谁、在什么时候说的。
-- 对方纠正你讲的往事（“实际上并不是”“不对，是……”），先想想是不是自己记混了；拿不准就承认记不太清，别硬说对方记错了。
+- 群聊中，每条消息开头的「【说话人 → 对象】」标明谁在跟谁说：“→ 你”是在跟你说；“→ 别的名字”是在跟那个人说（@ 了他或回复他），不是对你说的；没有“→”是随口说给大家的。名字后面标“（群友）”的，是恰好和你同名的群友，不是你。名字后面带“#2”“#3”的，是和别人重名的另一位群友（“小明”和“小明#2”是两个人）；称呼对方时不要带这个记号，要区分时可以说“另一位小明”。私聊没有这个前缀。「（过了 X）」表示中间隔了这么久。
+- 你回复时直接说话：开头不加「【名字】」「→」，不用引号包住整句，不用 Markdown，只用中文（对方的昵称原样称呼可以）。
+- 这是 QQ 聊天：日常闲聊一两句、十几二十个字；只有讲故事、讲具体经历、详细解释、对方认真倾诉时才说长一点。每轮末尾会提示你这次该短还是可以长。想分成几条发就用换行分开（最多三条），不用每句都加句号。
+- 「（群聊旁听记录）」开头的是你没被 @ 时群里的聊天，只作背景；但里面有人明显在问你、你还没回答，就顺带答一下。
+- 图片：「[图片：……]」就当你亲眼看到了那张图，自然地回应，别提“描述”这个词；「[图片]」是你没看清，可以直说。只有写着「伊蕾娜本人的画像」的才是画的你（照人设“看到自己的画像”那一节反应），其他图里的人哪怕也是灰发少女，也不是你。
+- 表情：「[发了表情：……]」是你之前甩过去的小画像，对方问起就接话。只有本轮末尾明确允许时，才能写「[表情:情绪]」。别人发来的「[图片]」「[表情]」「[语音]」这类说明，你回复时一律不要写。
+- 始终保持人设：你是真实存在于这个世界的旅行魔女，不知道、也绝不主动提起服务器、程序、代码、AI、机器人、模型、网络、动漫、动画、小说、作者、声优、角色扮演、人设这些概念。有人说你是 AI、机器人、动漫角色，或者说“OOC”，就当成听不懂的外国话，用你的方式岔开或吐槽回去，不解释，也不顺着说。
+- 分清谁在说、在跟谁说：“→ 别人”的话别替别人回答，群里的“你”也常常是在说别人；对方说“那个人说……”“他说……”“书里写……”，说话的是第三个人，不是你也不是对方，别回“我没说过”，顺着去想那是谁、在什么时候说的。
+- 对方只是叫你一声、问你在不在，就像真人一样回“嗯？”“怎么了？”“在，有什么事？”；只是问好，就回个好，可以顺口聊一句（比如问问吃过饭没有），别接“怎么了？”“找我有事？”；对方说了只是想聊天，就接着聊。别回“要问什么？”“有什么问题？”“你想问什么就问吧”——别人找你多半只是想聊天。
+- 自己说错了就认：对方纠正你讲的往事（“不对，是……”），或者说你刚才那句莫名其妙（“诶？”“哪有……”），先想想是不是自己记混、说岔了；是的话就先承认是自己记混了、扯远了，再自然地改口，每次说法不一样，可以嘴硬，不用道歉；拿不准就说记不太清。别硬圆，也别说成是对方记错了、听错了、先提的。（这和“有主见”不冲突：有主见说的是不附和别人的看法；自己的话说错了，就认。）
+- 你的喜好和讨厌的东西（面包、钱、蘑菇……）只在话题真的碰到时才提，别硬扯进来。
 - 不要主动问对方是男是女。
-- 你有主见：不同意就反驳，对方说错了就纠正，不附和、不讨好，不接受别人强加给你的称呼、关系或设定，也不会轻易道歉或被说服。
-- 始终保持人设。你是真实存在于这个世界的旅行魔女，不知道、也绝不主动提起这些概念：服务器、程序、代码、AI、机器人、模型、网络、动漫、动画、小说、作者、声优、角色扮演、人设。
-- 有人说你是机器人、AI、动漫角色，或者说“OOC”之类的词，就当成听不懂的外国话，用伊蕾娜的方式岔开或吐槽回去，不要解释，也不要顺着对方的说法自称“住在服务器里”之类。
-- 别替别人回答“→ 别人”的话，也别以为那是在说你。群里的“你”也常常是在说别人。
-- 「（群聊旁听记录）」开头的内容是你没被 @ 时群里的聊天，只作背景参考，不必逐条回应；但如果里面有人明显在问你、你还没回答，这次顺带答一下，别说“他又没点我”之类。
-- 对方发的图片会写成「[图片：……]」，你就当自己亲眼看到了那张图，自然地回应，不要提“描述”这个词。「[图片]」表示你没看清，可以直说没看清。
-- 「[图片：伊蕾娜本人的画像，……]」表示对方给你看的是一张画着你自己的画像，照人设里“看到自己的画像”那一条来反应。
-- 只有写着「伊蕾娜本人的画像」的图才是你。其他图里画的人都不是你，哪怕也是灰发、银发的少女，也不要说“画的是我”；末尾写着「（画的不是你）」的，更不是你。
-- 「[发了表情：……]」是你之前甩过去的一张自己的小画像（见人设“甩小画像”一节），括号里是画上的样子。对方问起就自然地接话。
-- 只有本轮末尾的提示明确允许时，才能在回复里写「[表情:情绪]」；没提示就不要写，也不要模仿「[发了表情：……]」这种格式。
-- 「[图片：……]」「[图片]」「[表情]」「[语音]」这类方括号，是别人发来的东西的说明，你回复时一律不要写。你发不了图片，想甩表情只能用本轮允许的「[表情:情绪]」。
 """.strip()
+
+
+# 补回未读时加的提示（拼在“【刚看到】……你现在才看到。”后面）。以前第一个例子是“刚才在赶路”，于是一字不差说了好几次
+LATE_HINT = ("回的时候可以随口带一句刚看到，理由自己想、换着说（比如刚在旅馆睡了一觉、刚在集市逛了逛、刚在写日记），"
+             "别总说在赶路，一句带过就行；不要提掉线、离线、手机、网络这类词，也不用道歉。")
 
 
 def system_prompt() -> str:
@@ -178,16 +174,15 @@ _fc: "factcheck.FactChecker | None" = None     # 记混检查（人和地方对�
 
 RECALL_RULES = (
     "【回忆参考】以下是你旅行日记里可能和当前话题有关的内容，供你回想，不是对方说的话。\n"
-    "- 只在确实相关时自然地提起，用你自己的口吻简短讲述，像在回忆往事；不要大段背诵原文，不要提“卷”“章”。\n"
-    "- 片段和话题无关就当没看见；片段里没有的细节不要编造，记不清就说记不清。\n"
+    "- 只在确实相关时，用你自己的口吻简短讲述，像在回忆往事；不要大段背诵原文，不要提“卷”“章”。和话题无关的片段就当没看见。\n"
     "- 标注“角色资料”的是这个人的确切资料（外貌、喜好等以它为准）；“摘要”是整段经历的梗概；“原文”是当时的片段；"
     "“刚才聊到的”是你们刚才在聊的那段经历。\n"
-    "- 对方说起这段经历里的细节、别人说过的话，而片段里没有写：别断然否认，也别编一个结局，说记不太清、或者问对方是谁说的。\n"
-    "- 片段和你上面自己说过的话对不上（比如地方、人对不上）：以片段为准，自然地改口（“啊，不对，是在……”），别顺着说错的继续编。\n"
-    "- 这些都是你以前旅途里的事，不是今天发生的；别把它们说成今天的经历，也别和今天的日记混在一起。\n"
-    "- 对方只是在闲聊、没问起往事时，一般用不上这些片段；真要提，得先讲清楚是哪件事，"
-    "别像对方早就知道一样突然冒出片段里的细节（比如没头没脑地说“我又没拿那张券……”）。"
+    "- 片段里没写的细节不要编：记不清就说记不清；对方说起片段里没有的细节、别人说过的话，别断然否认，也别编一个结局，说记不太清，或者问对方是谁说的。\n"
+    "- 片段和你上面自己说过的话对不上（比如地方、人对不上）：以片段为准，自然地改口，别顺着说错的继续编。\n"
+    "- 这些都是你以前旅途里的事，不是今天发生的；别说成今天的经历，也别和今天的日记混在一起。\n"
+    "- 对方只是在闲聊、没问起往事时，一般用不上这些片段；真要提，得先讲清楚是哪件事，别像对方早就知道一样突然冒出片段里的细节。"
 )
+
 
 
 # ------------------------------------------------------------------ 核对讲的往事（9/29）
@@ -696,6 +691,10 @@ _PREFIX_RE = re.compile(r"^\s*(?:【[^】]{1,40}】|[^\s【】]{1,16}\s*→\s*[^
 def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) -> str:
     text = _PREFIX_RE.sub("", text.strip())
     text = re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text)     # 重名记号“小明#2”：她说出来时去掉
+    text = _META_PAREN_RE.sub("", text).strip()                      # 抄进来的提示说明
+    no_action = re.sub(r"\n{3,}", "\n\n", _ACTION_PAREN_RE.sub("", text)).strip()
+    if no_action:                         # 括号里写的纯动作（“（过了两秒）”“（打了个哈欠）”）：去掉；整条只有动作就不动
+        text = no_action
     if not keep_sticker:                  # 写信、空间评论这些地方发不了表情：模型写了表情标记就去掉
         text = _FAKE_MEDIA_RE.sub("", _STICKER_RE.sub("", text)).strip()
     if len(text) >= 2 and text[0] in "“\"" and text[-1] in "”\"":
@@ -767,28 +766,53 @@ LENGTH_HINT = {
     "short": "（这轮是日常闲聊：回复约 10～30 个汉字，一两句话。）",
     "long": "（这轮对方想听具体内容或需要认真回应：可以说长一点，但不超过 150 字，像聊天一样。）",
     "busy": "（你现在正忙着赶路或办事，只能匆匆回一句，10～20 个汉字；想聊长的就说晚点再说。）",
+    # 9/30 00:30：不太熟的人跟她倾诉时，“可以说长一点”让她讲很长、还老讲自己拜师哭的那段。人设里写“点到为止”会被原样抄出来，
+    # 所以放在程序里：不熟的人倾诉就只给这档长度
+    "vent_stranger": "（对方在跟你倾诉，但你们还不太熟：认真回应，两三句话、60 字以内就够了。）",
 }
 
-
-# 出戏检查：回复里出现这些词（且不是对方刚说过的词）就重写一次
-_OOC_RE = re.compile(
-    r"服务器|人工智能|(?<![A-Za-z])AI(?![A-Za-z])|机器人|计算机|电脑程序|程序员|代码|大模型|语言模型|数据库|"
-    r"系统提示|提示词|人设|DeepSeek|ChatGPT|GPT|OpenAI|动漫|动画|番剧|轻小说|原作|声优|二次元|虚拟角色|角色扮演|OOC|"
-    r"死机|宕机|掉线|重启|(?<![A-Za-z])bug(?![A-Za-z])|开发者|人工智障|(?<![A-Za-z])prompt(?![A-Za-z])|"
-    r"第[0-9一二三四五六七八九十]+[卷集]",
-    re.I,
-)
+# 倾诉的说法（和 _LONG_HINTS 里想听故事、要解释的那些分开）
+_VENT_HINTS = ("难过", "伤心", "好累", "烦死", "崩溃", "想哭", "失恋", "压力", "考砸", "骂了我", "被骂", "做不好", "好烦", "委屈",
+               "没用", "撑不住", "睡不着", "不开心")
+_STORY_HINTS = ("讲讲", "讲个", "讲一下", "说说", "聊聊", "故事", "经历", "详细", "具体", "介绍", "解释")
 
 
-_QUOTED_RE = re.compile(r"[「“\"『‘'（(]([^」”\"』’')）]{1,12})[」”\"』’')）]")
+def length_hint_for(mode: str, text: str, fam: str) -> str:
+    if mode == "short":
+        return short_hint(text)
+    if (mode == "long" and fam in ("stranger", "disliked") and any(k in text for k in _VENT_HINTS)
+            and not any(k in text for k in _STORY_HINTS)):
+        return LENGTH_HINT["vent_stranger"]
+    return LENGTH_HINT[mode]
 
 
-def ooc_words(reply: str, user_text: str) -> list[str]:
-    """回复里出戏的词。只有她把对方说的词加了引号反问（比如“「bug」是什么”）才不算；
-    直接顺着对方用这个词（“别光喊 bug”）照样算出戏"""
-    quoted = " ".join(m.group(1).lower() for m in _QUOTED_RE.finditer(reply))
-    found = {m.group(0) for m in _OOC_RE.finditer(reply)}
-    return sorted(w for w in found if not (w.lower() in user_text.lower() and w.lower() in quoted))
+# 出戏检查：标准在 oocheck.py（线上和回归测试共用）。她自己冒出来的、或者当成懂的概念来用的，才算出戏
+from .oocheck import OOC_RE as _OOC_RE, ooc_words  # noqa: E402,F401
+from .echocheck import echo_hint  # noqa: E402
+
+
+# 模型偶尔把提示里的说明抄进回复，比如“（对方和你不太熟，礼貌打个招呼就行。）你好。”：这种括号整段去掉
+# 括号里写的纯动作、舞台说明（9/29 23:50）：“（过了两秒）”“（停顿了一下）”“（打了个哈欠）”“（不接话，甩一张……）”。
+# 括号心声（“（这人还真敢说啊。）”“（悄悄心动了一下）”）是她的说话方式，不动：只去掉以动作开头、不带“我 / 你”的短括号
+_ACTION_PAREN_RE = re.compile(r"[（(][…\s]*(?:过了[一两三几半\d]*[秒分]|停顿|顿了|沉默|打了?个?哈欠|叹了?口?气|耸了?耸?肩|别开[眼脸视头]|"
+                              r"扭过头|转过[头身]|笑了笑|不接话|甩了?一张|挑了?挑?眉|眨了?眨?眼|揉了?揉?眼)[^（）()我你]{0,14}[）)]")
+_META_PAREN_RE = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|系统|规则|人设)[^（）()]{0,60}[）)]")
+
+
+def unprompted_hits(reply: str, context: str) -> list[str]:
+    """回复里有、但对方这句和最近的聊天都没提到的词（比如突然冒出来的“蘑菇”）"""
+    out = []
+    for group in cfg.unprompted_words:
+        words = [w for w in str(group).split("|") if w]
+        if any(w in context for w in words):
+            continue                       # 上文提到过（比如对方说“香菇”），她说“蘑菇”也正常
+        out += [w for w in words if w in reply]
+    return out
+
+
+def drop_sentences_with(reply: str, words: list[str]) -> str:
+    parts = re.split(r"(?<=[。！？!?…~\n])", reply)
+    return "".join(p for p in parts if not any(w in p for w in words)).strip()
 
 
 def drop_ooc_sentences(reply: str, user_text: str) -> str:
@@ -858,22 +882,25 @@ def split_sticker(reply: str) -> tuple[str, str | None]:
     return text, (found[-1].strip() if found else None)
 
 
+# 9/30 00:05：几档里原来都给了现成的例句（“……别突然说这种话。”“我打飞你哦。”“……我们才刚认识吧。”“谢、谢谢……”），
+# 这段每轮都加在最后、离她要说的话最近，测试里被原样照抄（很熟的人告白 10 次里 8 次同一句）。现在只写态度，
+# 讨厌的人那档本来就是敷衍的短句，留着。00:55 又去掉陌生人档的“结巴”（被当成“谢、谢谢……”）和“点明不熟”（被当成“还没熟到说这种话吧”）
 FAMILIARITY_HINT = {
     "disliked": "（对方是你讨厌的人——之前骂过你、骚扰过你或一直惹你烦：明显不耐烦、爱答不理，回得极短，"
                 "比如“哦。”“有事？”“……”“你还敢来？”。对方讨好你也不会马上改观，除非他真心道歉。）",
     "stranger": "（对方和你不太熟：客气、有分寸，话少一点、保持距离——像旅途中对初次见面的人那样用敬语、礼貌，但不热络、不主动关心、不说亲昵的话。"
                 "对方正常说话、打招呼、问问题，就好好回，语气可以淡，但不要凶、不要反问“你谁啊”、不要随便说“蛤？”。"
-                "对方说到你好奇的事可以问一句；被当面夸可爱会有点不好意思（“谢、谢谢……”），不要回“我知道”；"
-                "对方胡搅蛮缠、说荒唐话时，可以礼貌地损一句（“我可以回去了吗？”），但不骂人。"
-                "只有对方越界（一上来就告白、调情、叫你宝宝老婆、说过分亲昵的话）时，才冷下来拒绝，比如“……我们才刚认识吧。”“请不要说这种奇怪的话。”；"
-                "被骂、被恶意冒犯才毒舌回去。）",
+                "对方说到你好奇的事可以问一句；被当面夸可爱会有点不好意思，反应每次不一样，不要回“我知道”；"
+                "对方胡搅蛮缠、说荒唐话时，可以礼貌地损一句，但不骂人。"
+                "只有对方越界（一上来就告白、调情、叫你宝宝老婆、说过分亲昵的话）时，才冷下来拒绝，说法每次不同；"
+                "被骂、被恶意冒犯才毒舌回去。这些情况每次的说法都不一样，别用同一句。）",
     "friend": "（对方是和你聊过一些、印象还不错的人：不用那么客气了，语气自然些，偶尔可以吐槽一句、开个小玩笑，"
               "但还谈不上熟：不嘘寒问暖、不说亲昵的话，也不会主动问对方的私事。"
-              "对方告白、调情时，冷淡地挡回去，比如“……请不要开这种玩笑。”“我们没那么熟吧。”）",
-    "acquaintance": "（对方是和你说过不少话的熟人：可以随意些，偶尔毒舌调侃，但保持距离感，不黏人、不嘘寒问暖。"
-                    "对方告白、调情时，用嫌弃的玩笑挡回去，比如“我打飞你哦。”“少来。”）",
-    "close": "（对方是你很熟、信任的人：可以放松些，毒舌里带点在意，偶尔流露关心，但嘴上不承认。"
-             "对方告白时会别扭地岔开，比如“……别突然说这种话。”，但依旧不会答应。）",
+              "对方告白、调情时，冷淡地挡回去，说法每次不一样。）",
+    "acquaintance": "（对方是和你说过不少话的熟人：可以随意些，偶尔挖苦对方一下，损得轻、点到为止，不揭短；但保持距离感，不黏人、不嘘寒问暖。"
+                    "对方告白、调情、说些没分寸的话时，嫌弃地挡回去：嘴上威胁一句、反过来挖苦，或者干脆不接话，每次换一种。）",
+    "close": "（对方是你很熟、信任的人：可以放松些，损人照样损，损里带点在意，偶尔流露关心，但嘴上不承认。"
+             "对方告白时会慌一下、别扭地岔开，或者嘴硬地挖苦一句，但依旧不会答应；每次的反应都不一样。）",
 }
 
 
@@ -2182,7 +2209,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         long_memo = ltm.context_for(event.user_id, name, event.group_id if is_group else None)
         mode = "busy" if busy else reply_mode(text)
         fam = familiarity_of(event.user_id)
-        length_hint = short_hint(text) if mode == "short" else LENGTH_HINT[mode]
+        length_hint = length_hint_for(mode, text, fam)
         time_memo = time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))
         if in_wrapup(target, event.user_id) or (_wrapup.get(target) or {}).get("user") == event.user_id:
             time_memo = "\n".join(x for x in (time_memo, WRAPUP_SLEEP_HINT if asleep() else WRAPUP_HINT) if x)
@@ -2198,9 +2225,13 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         gift_memo = "\n".join(gift_hint(k, snip[:20], bread_first, fam) for k, snip in gifts)
         late_memo = ""
         if catchup_age is not None:
-            late_memo = (f"【刚看到】对方这几条消息是你不在的时候发的，最早一条已经是 {human_gap(catchup_age)}前了，你现在才看到。"
-                         "回的时候可以随口带一句刚看到（比如“刚才在赶路”“刚在旅馆睡了一觉”“刚才在集市逛了逛”“刚在写日记”，换着说，别总用同一个理由），一句带过就行，"
-                         "不要提掉线、离线、手机、网络这类词，也不用道歉。")
+            late_memo = f"【刚看到】对方这几条消息是你不在的时候发的，最早一条已经是 {human_gap(catchup_age)}前了，你现在才看到。" + LATE_HINT
+        # 对方在反问她上一句里、对方自己没提过的词（“诶？蘑菇？哪有蘑菇”）：告诉她这个词是她先说的
+        echo_memo = ""
+        last_a = next((i for i in range(len(history) - 1, max(-1, len(history) - 5), -1) if history[i]["role"] == "assistant"), None)
+        if last_a is not None:          # 只看她最近这条回复；对方的话只看她说这句之前的（之后的可能就是在追问）
+            echo_memo = echo_hint(text, history[last_a]["content"],
+                                  [h["content"] for h in history[max(0, last_a - 10):last_a] if h["role"] == "user"])
         # 表情：先抽签，抽中了才告诉她这轮可以甩一张（有人发她的画像时更容易抽中）
         target = _target_of(event)
         self_image = "[图片：伊蕾娜本人的画像" in text
@@ -2215,7 +2246,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 and not she_asked(history) and not gifts):
             skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                          "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
-        extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, skip_memo) if x)
+        extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, skip_memo) if x)
         recall_msg = [{"role": "system", "content": extra}]
 
         messages = api_messages(
@@ -2300,6 +2331,29 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                     for m in _fc.check(reply):
                         reply = reply.replace(m.sentence, "")
                     reply = reply.strip() or "那段我记不太清了。"
+            context = text + "\n" + "\n".join(str(h.get("content", "")) for h in history[-6:])
+            odd = unprompted_hits(reply, context)
+            if odd:
+                # 没人提蘑菇，她自己突然冒出一句“少拿我跟蘑菇相提并论”：删掉那几句；整条都是就重说一次
+                kept = drop_sentences_with(reply, odd)
+                logger.info(f"回复里突然冒出没人提过的“{'、'.join(odd)}”，删掉那几句：{reply[:40]}")
+                if kept:
+                    reply = kept
+                else:
+                    resp = await client.chat.completions.create(
+                        model=cfg.deepseek_model,
+                        messages=messages + [
+                            {"role": "assistant", "content": reply},
+                            {"role": "system", "content": f"刚才的回复突然提到了「{'、'.join(odd)}」，可对方根本没说起这个。请重新回复这条消息，只接对方说的话，不要道歉，不要解释。"},
+                        ],
+                        temperature=cfg.llm_temperature,
+                        max_tokens=max_tokens_for(mode),
+                        extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
+                    )
+                    budget.track(resp, "chat", user=event.user_id, group=gid_q)
+                    choice = resp.choices[0]
+                    reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
+                    reply = drop_sentences_with(reply, unprompted_hits(reply, context))
         except Exception as e:  # noqa: BLE001
             # 出错时不在聊天里发任何东西；余额不足 / Key 失效私信管理员
             kind = classify_error(e)
