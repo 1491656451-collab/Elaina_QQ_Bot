@@ -9,7 +9,7 @@
 - 长期记忆：每个人的档案 + 群往事，每轮对话攒够一批就在后台整理而成
 - 出错时不在群里发消息；余额不足 / Key 失效会私信管理员
 - 时间感：知道对方隔了多久才来找她、上一段聊天是多久以前
-- 写信：好感到“很熟”的好友，隔一段时间没来找她时，她偶尔会主动私聊寄一封信
+- 写信：好感到“熟人”及以上的好友（很熟的人收得更勤），隔一段时间没来找她时，她偶尔会主动私聊寄一封信
 - 节奏：同一时间只给一个人打字（其他人排队）；按字数算打字时间；不在线时的私聊，上线后补回
 - 表情包：有一定概率用小号收藏表情里的伊蕾娜表情表达情绪（跟在文字后面，或者只发一张），见 stickers.py
 """
@@ -101,12 +101,11 @@ if (cfg.affection_dislike, cfg.affection_acquaintance, cfg.affection_close) == (
                    "请把这三行删掉或改成新值（见 .env.example）")
     cfg.affection_dislike, cfg.affection_acquaintance, cfg.affection_close = 0, 90, 130
 ltm_affection = {
-    "base_gain": cfg.affection_chat_gain, "daily_cap": cfg.affection_daily_cap,
     "decay_after_days": cfg.affection_decay_after_days, "decay_per_day": cfg.affection_decay_per_day,
     "min": cfg.affection_min, "max": cfg.affection_max, "start": cfg.affection_start,
     "dislike": cfg.affection_dislike, "friend": cfg.affection_friend,
     "acquaintance": cfg.affection_acquaintance, "close": cfg.affection_close,
-    "summary_daily_cap": cfg.affection_summary_daily_cap,
+    "summary_daily_cap": cfg.affection_summary_daily_cap, "nag_daily_cap": cfg.affection_nag_daily_cap,
 }
 ltm = LongTermMemory(
     BOT_DIR / cfg.memory_dir,
@@ -119,6 +118,7 @@ ltm = LongTermMemory(
     defer=in_peak,            # 高峰时段先不整理长期记忆，攒到低峰再说
 )
 ltm.affection_cfg = ltm_affection
+ltm.facts_by_tier = {**ltm.facts_by_tier, **cfg.memory_facts_by_tier}   # 每档关系最多记几条
 ltm.close_friends = tuple(cfg.close_friends)
 ltm.gender_cap = cfg.gender_cap
 ltm.summary_max_tokens = cfg.memory_summary_max_tokens
@@ -766,7 +766,7 @@ LENGTH_HINT = {
     "short": "（这轮是日常闲聊：回复约 10～30 个汉字，一两句话。）",
     "long": "（这轮对方想听具体内容或需要认真回应：可以说长一点，但不超过 150 字，像聊天一样。）",
     "busy": "（你现在正忙着赶路或办事，只能匆匆回一句，10～20 个汉字；想聊长的就说晚点再说。）",
-    # 9/30 00:30：不太熟的人跟她倾诉时，“可以说长一点”让她讲很长、还老讲自己拜师哭的那段。人设里写“点到为止”会被原样抄出来，
+    # 9/30 00:05：不太熟的人跟她倾诉时，“可以说长一点”让她讲很长、还老讲自己拜师哭的那段。人设里写“点到为止”会被原样抄出来，
     # 所以放在程序里：不熟的人倾诉就只给这档长度
     "vent_stranger": "（对方在跟你倾诉，但你们还不太熟：认真回应，两三句话、60 字以内就够了。）",
 }
@@ -792,7 +792,7 @@ from .echocheck import echo_hint  # noqa: E402
 
 
 # 模型偶尔把提示里的说明抄进回复，比如“（对方和你不太熟，礼貌打个招呼就行。）你好。”：这种括号整段去掉
-# 括号里写的纯动作、舞台说明（9/29 23:50）：“（过了两秒）”“（停顿了一下）”“（打了个哈欠）”“（不接话，甩一张……）”。
+# 括号里写的纯动作、舞台说明（9/29 23:44）：“（过了两秒）”“（停顿了一下）”“（打了个哈欠）”“（不接话，甩一张……）”。
 # 括号心声（“（这人还真敢说啊。）”“（悄悄心动了一下）”）是她的说话方式，不动：只去掉以动作开头、不带“我 / 你”的短括号
 _ACTION_PAREN_RE = re.compile(r"[（(][…\s]*(?:过了[一两三几半\d]*[秒分]|停顿|顿了|沉默|打了?个?哈欠|叹了?口?气|耸了?耸?肩|别开[眼脸视头]|"
                               r"扭过头|转过[头身]|笑了笑|不接话|甩了?一张|挑了?挑?眉|眨了?眨?眼|揉了?揉?眼)[^（）()我你]{0,14}[）)]")
@@ -882,9 +882,9 @@ def split_sticker(reply: str) -> tuple[str, str | None]:
     return text, (found[-1].strip() if found else None)
 
 
-# 9/30 00:05：几档里原来都给了现成的例句（“……别突然说这种话。”“我打飞你哦。”“……我们才刚认识吧。”“谢、谢谢……”），
+# 9/29 23:50：几档里原来都给了现成的例句（“……别突然说这种话。”“我打飞你哦。”“……我们才刚认识吧。”“谢、谢谢……”），
 # 这段每轮都加在最后、离她要说的话最近，测试里被原样照抄（很熟的人告白 10 次里 8 次同一句）。现在只写态度，
-# 讨厌的人那档本来就是敷衍的短句，留着。00:55 又去掉陌生人档的“结巴”（被当成“谢、谢谢……”）和“点明不熟”（被当成“还没熟到说这种话吧”）
+# 讨厌的人那档本来就是敷衍的短句，留着。9/30 00:16 又去掉陌生人档的“结巴”（被当成“谢、谢谢……”）和“点明不熟”（被当成“还没熟到说这种话吧”）
 FAMILIARITY_HINT = {
     "disliked": "（对方是你讨厌的人——之前骂过你、骚扰过你或一直惹你烦：明显不耐烦、爱答不理，回得极短，"
                 "比如“哦。”“有事？”“……”“你还敢来？”。对方讨好你也不会马上改观，除非他真心道歉。）",
@@ -1243,6 +1243,15 @@ def rate_limited(user_id: int, group_id: int | None = None, private: bool = Fals
     return None
 
 
+def _crossed_mid_chat(target: str | None) -> bool:
+    """钱用完时，这个群 / 私聊是不是还在聊着、却还没告别过：她最近 FAREWELL_ACTIVE_MINUTES 分钟里在这里说过话，
+    一小时内也没在这里告别过（9/30：记忆整理在两轮之间把合计推过线时，回完那轮的告别检查赶不上）"""
+    a = _active_chats.get(target) if target else None
+    now = time.monotonic()
+    return (bool(a) and cfg.farewell_on_limit and now - a["at"] <= cfg.farewell_active_minutes * 60
+            and now - _farewell_at.get(target, -1e9) > 3600 and now - _farewell_at.get("global", -1e9) > 3600)
+
+
 def _refund(stamp: float, group_id: int | None, user_id: int | None = None) -> None:
     """占了额度最后却没说话（模型出错、她不想接、出戏句子删光了、没发出去）：把这一条退回去"""
     for dq in (_hour_window, _global_window, _scope(group_id, user_id)[0]):
@@ -1545,7 +1554,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     await sticker_cmd.finish(STICKER_USAGE)
 
 
-MEMORY_USAGE = "用法：/记忆 @某人（或 QQ号、我、本群）；/忘记 @某人（或 QQ号、我、本群）"
+MEMORY_USAGE = "用法：/记忆 @某人（或 QQ号、我、本群）；/忘记 @某人（或 QQ号、我、本群）；/忘记 @某人 第3条（只删 /记忆 里的第 3 条）"
 
 mem_show = on_command("记忆", aliases={"查看记忆"}, rule=to_me(), permission=SUPERUSER, priority=5, block=True)
 
@@ -1633,6 +1642,17 @@ mem_forget = on_command("忘记", aliases={"删除记忆"}, rule=to_me(), permis
 
 @mem_forget.handle()
 async def _(event: MessageEvent, arg: Message = CommandArg()):
+    nth = re.search(r"第\s*(\d{1,3})\s*条\s*$", arg.extract_plain_text())
+    if nth:                                   # 只删一条：/忘记 @某人 第3条
+        rest = Message([seg for seg in arg if seg.type != "text"])
+        head = arg.extract_plain_text()[:nth.start()].strip()
+        if head:
+            rest += MessageSegment.text(head)
+        target = _parse_target(event, rest)
+        if not target or target[0] != "user":
+            await mem_forget.finish(MEMORY_USAGE)
+        gone = ltm.forget_fact(target[1], int(nth.group(1)))
+        await mem_forget.finish(f"（已删掉第 {nth.group(1)} 条：{gone}）" if gone is not None else f"（没有第 {nth.group(1)} 条，先用 /记忆 看看）")
     target = _parse_target(event, arg)
     if not target:
         await mem_forget.finish(MEMORY_USAGE)
@@ -2150,6 +2170,20 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         if _inbox_token.get(ik) != token:
             return
         limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group, target=_target_of(event))
+    if limited and limited.startswith("budget") and _crossed_mid_chat(_target_of(event)):
+        # 9/30：线是在两轮之间被跨过去的（多半是回完话后的记忆整理），当时没来得及告别。
+        # 她正在跟这个人聊、而且上一句在问对方：先把话收个尾（最多再回 2 次）；否则就在这里补一句告别
+        target = _target_of(event)
+        if _active_chats[target].get("user_id") == event.user_id and she_asked(get_history(key)) and target not in _wrapup:
+            _wrapup[target] = {"user": event.user_id, "left": WRAPUP_EXTRA, "at": time.time()}
+            logger.info(f"额度在两轮之间用完了，但她刚问了 {event.user_id} 话，先收个尾再走：{target}")
+            limited = rate_limited(event.user_id, event.group_id if is_group else None, private=not is_group, target=target)
+        else:
+            logger.info(f"限流跳过 user={event.user_id} reason={limited}（额度在两轮之间用完了，补一句告别）")
+            _take_inbox(ik)
+            async with _hands:
+                await say_farewells(bot, event, target)
+            return
     if limited:
         logger.info(f"限流跳过 user={event.user_id} reason={limited}")
         _take_inbox(ik)
@@ -2206,7 +2240,8 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             memo = ""
         else:
             memo = recall(text, f"{prev_user[-60:]} {prev_bot[-120:]}", key) if cfg.knowledge_enabled and not busy else ""
-        long_memo = ltm.context_for(event.user_id, name, event.group_id if is_group else None)
+        long_memo = ltm.context_for(event.user_id, name, event.group_id if is_group else None,
+                                    text=text, recent=f"{prev_user[-60:]} {prev_bot[-120:]}")   # 按这句话挑几条；群里不带私聊知道的事
         mode = "busy" if busy else reply_mode(text)
         fam = familiarity_of(event.user_id)
         length_hint = length_hint_for(mode, text, fam)
@@ -3269,11 +3304,16 @@ def _letter_window_now() -> bool:
     return any(a <= minute < b for a, b in peak.parse_ranges(cfg.letter_hours)) and not in_peak()
 
 
-def _letter_prob_per_check() -> float:
+def letter_daily_prob(qq: int) -> float:
+    """这个人每天收到信的概率（按关系取 LETTER_DAILY_PROB；0 = 这个档位不写信）"""
+    return float(tier_value(cfg.letter_daily_prob, familiarity_of(qq), 0.0))
+
+
+def _letter_prob_per_check(daily: float) -> float:
     """把“每天的概率”折算成每次检查的概率（只在可寄信的时段里检查）"""
     window = sum(b - a for a, b in peak.parse_ranges(cfg.letter_hours)) * 60 or 86400
     checks = max(1.0, window / max(60, cfg.letter_check_interval))
-    return 1 - (1 - min(max(cfg.letter_daily_prob, 0.0), 0.999)) ** (1 / checks)
+    return 1 - (1 - min(max(daily, 0.0), 0.999)) ** (1 / checks)
 
 
 def letter_blocker(qq: int, friends: set[int], force: bool = False) -> str | None:
@@ -3286,8 +3326,8 @@ def letter_blocker(qq: int, friends: set[int], force: bool = False) -> str | Non
         return "不在私聊白名单里"
     if force:
         return None
-    if familiarity_of(qq) != "close":
-        return "还没到很熟"
+    if letter_daily_prob(qq) <= 0:
+        return "还没到熟人"
     prof = ltm.get_user(qq)
     seen, letter, now = ltm.last_seen(qq), prof.get("last_letter"), time.time()
     if not seen:
@@ -3377,10 +3417,12 @@ async def check_letters() -> int:
         return 0
     candidates = [qq for qq in set(ltm.user_ids()) | set(cfg.close_friends) if letter_blocker(qq, friends) is None]
     random.shuffle(candidates)
-    sent, p = 0, _letter_prob_per_check()
+    candidates.sort(key=lambda q: familiarity_of(q) != "close")    # 很熟的排前面（同档位内保持随机），每天的名额别被熟人挤掉
+    sent = 0
     for qq in candidates:
         if _letters_sent.get(today, 0) >= cfg.letter_max_per_day:
             break
+        p = _letter_prob_per_check(letter_daily_prob(qq))
         if random.random() < p and await write_letter(bot, qq):
             sent += 1
             await asyncio.sleep(random.uniform(30, 120))    # 连着寄几封时隔开一点
@@ -3575,10 +3617,12 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     except Exception:  # noqa: BLE001
         friends = set()
     if arg.extract_plain_text().strip() == "检查":
-        close = [qq for qq in sorted(set(ltm.user_ids()) | set(cfg.close_friends)) if familiarity_of(qq) == "close"]
+        close = [qq for qq in sorted(set(ltm.user_ids()) | set(cfg.close_friends)) if letter_daily_prob(qq) > 0]
         if not close:
-            await letter_cmd.finish("（现在还没有“很熟”的人，不会自动写信）")
-        lines = [f"· {ltm.get_user(qq).get('name') or qq}（{qq}）：{letter_blocker(qq, friends) or '符合，随时可能收到信'}" for qq in close]
+            await letter_cmd.finish("（现在还没有“熟人”及以上的人，不会自动写信）")
+        close.sort(key=lambda q: familiarity_of(q) != "close")
+        lines = [f"· {ltm.get_user(qq).get('name') or qq}（{qq}｜{ltm.TIER_NAMES.get(familiarity_of(qq), '')}｜每天 {letter_daily_prob(qq):.0%}）："
+                 f"{letter_blocker(qq, friends) or '符合，随时可能收到信'}" for qq in close]
         today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
         head = f"（今天已寄 {_letters_sent.get(today, 0)}/{cfg.letter_max_per_day} 封｜现在{'可以' if _letter_window_now() else '不在'}寄信时段）"
         await letter_cmd.finish(head + "\n" + "\n".join(lines))

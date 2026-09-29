@@ -100,7 +100,7 @@ def character_doc(name: str) -> str:
 def messages(v: dict, case: dict, rng: random.Random) -> tuple[list, int]:
     if case.get("mode") == "long":
         length, max_tokens = v["LENGTH_HINT"]["long"], 200
-        # 不熟的人倾诉（9/30 00:30 起机器人只给两三句的长度）；旧版本没有这一档就照旧
+        # 不熟的人倾诉（9/30 00:05 起机器人只给两三句的长度）；旧版本没有这一档就照旧
         if case.get("vent") and case["fam"] in ("stranger", "disliked") and "vent_stranger" in v["LENGTH_HINT"]:
             length = v["LENGTH_HINT"]["vent_stranger"]
     else:

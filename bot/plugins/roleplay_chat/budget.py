@@ -2,8 +2,10 @@
 
 - 用量分三种算钱：输入命中缓存、输入没命中缓存、输出；DeepSeek 高峰时段（工作日 9-12、14-18，节假日不算）按两倍价。
 - “一天”从北京时间凌晨 reset_hour 点算起（默认 5 点：0～3 点常有人聊天，按 0 点算的话她 23:50 刚告别，0 点又回来了）。
-- 聊天类（回消息、判断是不是在跟她说话、看图、插话、冒泡、写信、搭话、回空间评论）花到 total - reserve 就停；
-  后台类（长期记忆整理、写说说、给图库和表情写描述）可以用到 total，保证晚上的日记和记忆整理不会被聊天挤掉。
+- 聊天类（回消息、判断是不是在跟她说话、看图、插话、冒泡、写信、搭话、回空间评论）：今天**所有调用合计**（聊天 + 后台）
+  花到 total - reserve 就停；后台类（长期记忆整理、写说说、给图库和表情写描述）可以用到 total。
+  这样聊天停下时，最后 reserve 这笔一定还在，只给记忆整理、20:00 日结和写说说用（9/30 改：以前只算聊天自己花的，
+  后台白天花超了预留，聊天就会一直说到 total 花光，最后几段的记忆和当晚的说说都没钱）。
 - 每个人、每个群各自最多占多少（防止一个人刷屏把一天的钱花光）。
 - 账记在 data/usage/日期.json，重启不清零。
 """
@@ -52,8 +54,8 @@ def _usage_numbers(usage) -> tuple[int, int, int] | None:
 
 
 class Budget:
-    def __init__(self, root: Path, *, enabled: bool = True, total: float = 1.0, reserve: float = 0.15,
-                 user_share: float = 0.25, group_share: float = 0.5, reset_hour: int = 5,
+    def __init__(self, root: Path, *, enabled: bool = True, total: float = 1.5, reserve: float = 0.15,
+                 user_share: float = 0.375, group_share: float = 0.75, reset_hour: int = 5,
                  price: dict | None = None, peak_multiplier: float = 2.0,
                  peak_ranges: str = "09:00-12:00,14:00-18:00", holidays=()):
         self.root = Path(root)
@@ -156,11 +158,10 @@ class Budget:
         return max(0.0, self.total - self.reserve)
 
     def chat_left(self) -> float:
+        """聊天还能花多少：今天所有调用合计（聊天 + 后台）花到 total - reserve 就停，最后 reserve 留给后台"""
         if not self.enabled:
             return float("inf")
-        d = self.today()
-        background = d["total"] - d["chat"]
-        return self.chat_limit - d["chat"] - max(0.0, background - self.reserve)   # 后台超出预留的部分从聊天里扣
+        return self.chat_limit - self.today()["total"]
 
     def total_left(self) -> float:
         if not self.enabled:
@@ -196,7 +197,8 @@ class Budget:
         d = self.today()
         names = names or {}
         lines = [f"今天（{self.day_key()} {self.reset_hour}:00 起）花了 {d['total']:.3f} 元"
-                 + (f" / 上限 {self.total:g} 元（聊天 {self.chat_limit:g} 元，留给后台 {self.reserve:g} 元）" if self.enabled else "（没开限额）")]
+                 + (f" / 上限 {self.total:g} 元（合计到 {self.chat_limit:g} 元就不再聊天，最后 {self.reserve:g} 元只给记忆整理和写说说）"
+                    if self.enabled else "（没开限额）")]
         lines.append(f"聊天类 {d['chat']:.3f} 元，后台类 {d['total'] - d['chat']:.3f} 元")
         for kind, k in sorted(d["kinds"].items(), key=lambda x: -x[1]["cost"]):
             lines.append(f"· {KIND_NAMES.get(kind, kind)}：{k['cost']:.3f} 元，{k['calls']} 次"

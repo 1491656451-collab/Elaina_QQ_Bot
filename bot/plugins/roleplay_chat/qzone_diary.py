@@ -578,7 +578,7 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
         return None
     key = f"qzone_{uin}"
     history = get_history(key)
-    extra = "\n\n".join(x for x in (ltm.context_for(uin, nick, None), scene, FAMILIARITY_HINT[fam] + short_hint()) if x)
+    extra = "\n\n".join(x for x in (ltm.context_for(uin, nick, None, place="qzone", text=text), scene, FAMILIARITY_HINT[fam] + short_hint()) if x)
     messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-6:]) + [
         {"role": "system", "content": extra}, {"role": "user", "content": text}]
     try:

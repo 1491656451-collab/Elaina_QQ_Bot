@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class Config(BaseModel):
@@ -82,16 +82,17 @@ class Config(BaseModel):
     memory_enabled: bool = True
     memory_dir: str = "data/memory"
     memory_batch: int = 8                 # 每轮对话都加进待整理，攒够这么多条就在后台整理一次
-    memory_max_facts: int = 20            # 每人档案最多几条（9/27 从 12 加到 20）
+    memory_max_facts: int = 20            # 每人档案最多几条；9/30 起按关系分（memory_facts_by_tier），这个只在表里没写到的档位时用
+    memory_facts_by_tier: dict[str, int] = {"disliked": 8, "stranger": 8, "friend": 12, "acquaintance": 20, "close": 30}   # 按关系：每人最多记几条（9/30 起；越熟记得越多，满了先忘又旧又不重要的）
     memory_max_events: int = 12           # 每个群往事最多几条（9/27 从 8 加到 12）
-    memory_summary_max_tokens: int = 4000 # 后台整理时模型最多写多少（要把每个人的整份档案重写一遍，写不下这次整理就作废；只按实际写的计费）
+    memory_summary_max_tokens: int = 4000 # 后台整理时模型最多写多少（9/30 起只写“增改删”，一般几百 token；写不下这次整理就作废；只按实际写的计费）
     memory_summary_timeout: float = 180.0 # 后台整理的超时（秒）；整理出错不自动重试，失败后隔 5 / 15 / 60 分钟再试
     memory_retry_minutes: float = 15.0    # 每隔多久检查一次有没有攒够一批却没整理的（开机时也查一次）；0 = 不查
 
     # ---- 好感度（决定她对人冷淡还是随意）----
     # 分数 -50～150（9/29 起）：讨厌 -50～0｜陌生人 0～40｜普通朋友 40～90｜熟人 90～130｜很熟 130～150
-    # 长期记忆整理时按对话内容 +5～-15（每人每天加分合计最多 +10）；送面包 +2；踩雷立刻扣分；很久不聊慢慢回落到 0
-    affection_chat_gain: int = 0          # 每条正常聊天加几分；0 = 光聊天不加好感，只看聊了什么
+    # 长期记忆整理时按对话内容 +5～-15（每人每天加分合计最多 +10）；送面包 +2；踩雷立刻扣分；光聊天不加分
+    # 很久不聊慢慢向起步分回落，但不改变档位（9/30 起：很熟最多落到 130，讨厌的人最多回升到 -1）
     affection_min: int = -50              # 最低分
     affection_max: int = 150              # 最高分
     affection_start: int = 20             # 新认识的人从几分起步（很久不聊也会慢慢回到这个分）
@@ -100,9 +101,9 @@ class Config(BaseModel):
     affection_acquaintance: int = 90      # 达到这个分：熟人
     affection_close: int = 130            # 达到这个分：很熟
     affection_summary_daily_cap: int = 10 # 长期记忆整理时，每人每天合计最多加几分（扣分不限）；0 = 不限
-    affection_daily_cap: int = 5          # 靠“正常聊天”每天最多涨几分（AFFECTION_CHAT_GAIN 为 0 时没用）
+    affection_nag_daily_cap: int = 10     # 长期记忆整理时，因为“纠缠”（烦人但没恶意）每人每天合计最多扣几分；辱骂、骚扰这类恶意不限；0 = 不限
     affection_decay_after_days: int = 7   # 多少天没聊开始回落
-    affection_decay_per_day: float = 2.0  # 之后每天回落几分
+    affection_decay_per_day: float = 2.0  # 之后每天回落几分（只在本档位里落，不会因此掉档或升档）
     dislike_ignore_prob: float = 0.4      # 被讨厌的人叫她时，有多大概率直接不理（不调用模型）
     close_friends: list[int] = []         # 直接当作“很熟”的 QQ 号（管理员指定，不受性别限制）
     # 性别：只有确认是女生才能到“很熟”；男生和没确认的人好感最高到熟人（封顶在 AFFECTION_CLOSE - 1）
@@ -120,9 +121,23 @@ class Config(BaseModel):
     gap_notice_hours: float = 6.0         # 对方隔了这么久才来找她，就告诉她隔了多久（她会按关系远近决定提不提）
     context_stale_hours: float = 3.0      # 上一段聊天过去这么久了，就提醒她这是新的一段对话，别硬接旧话题
 
-    # ---- 主动写信（只写给“很熟”的 QQ 好友，私聊发送）----
+    # ---- 主动写信（写给“熟人”及以上的 QQ 好友，私聊发送；9/30 起熟人也会收到）----
     letter_enabled: bool = True
-    letter_daily_prob: float = 0.25       # 每个符合条件的人，每天收到信的概率
+    letter_daily_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.08, "close": 0.25}   # 每个符合条件的人每天收到信的概率，按关系分；0 = 这个档位不写信（9/30 从只写给很熟的 0.25 改）
+
+    @field_validator("letter_daily_prob", mode="before")
+    @classmethod
+    def _letter_prob_old_style(cls, v):
+        """兼容老写法：.env 里只写一个数（如 LETTER_DAILY_PROB=0.25）时，当作很熟的概率，熟人仍用默认 0.08"""
+        if isinstance(v, str):
+            try:
+                v = float(v)
+            except ValueError:
+                return v
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.08, "close": float(v)}
+        return v
+
     letter_min_days: float = 3.0          # 同一个人两封信至少隔几天
     letter_min_silence_hours: float = 24.0   # 对方至少这么久没来找她，她才会写
     letter_hours: str = "10:00-22:00"     # 只在这段时间寄信（北京时间）；高峰时段也不寄
@@ -267,13 +282,13 @@ class Config(BaseModel):
     private_rate_per_hour: int = 0        # 每个人私聊每小时最多发几条（各人分开算）
     # ---- 按钱限额（9/29）：每次调模型都按 DeepSeek 返回的用量记账，data/usage/日期.json ----
     budget_enabled: bool = True           # 关掉就只记账不拦
-    budget_daily_total: float = 1.0       # 每天最多花多少元（所有调用合计）
-    budget_reserve: float = 0.15          # 其中留给后台（长期记忆整理、写说说、给图写描述）的钱：聊天花到 总额 - 这个 就停
-    budget_user_share: float = 0.25       # 每个人每天最多占多少元（群聊私聊合计）；0 = 不限
-    budget_group_share: float = 0.5       # 每个群每天最多占多少元；0 = 不限
+    budget_daily_total: float = 1.5       # 每天最多花多少元（所有调用合计；9/30 从 1.0 调到 1.5）
+    budget_reserve: float = 0.15          # 最后留给后台（长期记忆整理、20:00 日结、写说说）的钱：今天合计（聊天 + 后台）花到 总额 - 这个，聊天就停（9/30 改）
+    budget_user_share: float = 0.375      # 每个人每天最多占多少元（群聊私聊合计；9/30 随总额从 0.25 调到 0.375）；0 = 不限
+    budget_group_share: float = 0.75      # 每个群每天最多占多少元（9/30 随总额从 0.5 调到 0.75）；0 = 不限
     budget_reset_hour: int = 5            # 北京时间几点算新的一天（0～3 点常有人聊天，按 0 点重置她刚告别就又回来了）
     budget_winddown_rounds: int = 8       # 今天的钱（或这个人、这个群的份额）只够这么多轮时，提示她有点累了、把话题往收尾靠；0 = 不提示
-    budget_round_estimate: float = 0.004  # 估一轮聊天大约多少元（只用来换算“还剩几轮”，比如剩最后一轮就不带表情）
+    budget_round_estimate: float = 0.003  # 估一轮聊天大约多少元，连同它引起的记忆整理（只用来换算“还剩几轮”，比如剩最后一轮就不带表情；9/30 按 9/29 实账从 0.004 调到 0.003）
     budget_price: dict[str, float] = {"hit": 0.02, "miss": 1.0, "out": 4.0}   # 元 / 百万 token（空闲价）：输入命中缓存、输入没命中、输出；9/28 查的 deepseek-flash 官方价
     budget_peak_multiplier: float = 2.0   # DeepSeek 高峰时段按几倍价
     budget_peak_ranges: str = "09:00-12:00,14:00-18:00"   # DeepSeek 的高峰时段（北京时间，工作日；节假日不算）

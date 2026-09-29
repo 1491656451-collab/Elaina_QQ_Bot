@@ -25,15 +25,15 @@ echo [4/6] NapCat 日志（最近 2 万行）
 ssh %SERVER% "tail -n 20000 ~/napcat.log" > "%OUT%\napcat.log"
 echo [5/6] 聊天记录（短期记忆）
 scp -r -q %SERVER%:QQBot/bot/data/history "%OUT%\history"
-echo [6/6] 长期记忆、空间记录、表情标签、识图缓存
-ssh %SERVER% "cd QQBot/bot/data && tar -czf - memory qzone/daily qzone/*.json same_names.json stickers/index.json vision_cache.json online_state.json 2>/dev/null" > "%OUT%\data.tgz"
+echo [6/6] 长期记忆、空间记录、表情标签、识图缓存、花费账本
+ssh %SERVER% "cd QQBot/bot/data && tar -czf - memory qzone/daily qzone/*.json same_names.json stickers/index.json vision_cache.json online_state.json usage 2>/dev/null" > "%OUT%\data.tgz"
 mkdir "%OUT%\data" 2>nul
 tar -xzf "%OUT%\data.tgz" -C "%OUT%\data"
 if errorlevel 1 (echo   ！！长期记忆没解压成功，请截图发给 Claude) else (del "%OUT%\data.tgz")
 > "%OUT%\说明.txt" echo 这是服务器在 %STAMP% 的日志和记忆快照，只用来在电脑上排查问题。
 >> "%OUT%\说明.txt" echo 不要把这里的 history、data 复制到 D:\QQBot\bot\data 或传回服务器：服务器上的才是最新的，覆盖了会让她的记忆倒回去。
 >> "%OUT%\说明.txt" echo data\memory\users\QQ号.json = 每个人的档案（印象、好感、性别、聊天次数）；data\memory\groups\群号.json = 群往事；data\memory\pending = 还没整理进档案的消息；
->> "%OUT%\说明.txt" echo data\qzone\daily = 每天的今日见闻；data\qzone\*.json = 发过的说说、看过的评论、空间状态；history = 每个群、每个私聊最近的对话（短期记忆）。
+>> "%OUT%\说明.txt" echo data\qzone\daily = 每天的今日见闻；data\qzone\*.json = 发过的说说、看过的评论、空间状态；data\usage\日期.json = 每天的花费账本（和 /花费 看到的是同一份）；history = 每个群、每个私聊最近的对话（短期记忆）。
 echo.
 echo 完成：%OUT%
 explorer "%OUT%"

@@ -21,6 +21,11 @@ VISION = {"answer": "一只橘猫趴在键盘上", "calls": 0}
 VERIFY = {"answer": '{"ok": true}', "calls": 0}   # 核对讲的往事
 
 
+def mem_prompt(kw) -> str:
+    """整理记忆的调用：固定规则（system）+ 这次的档案和聊天记录（user），合起来看"""
+    return "\n".join(str(m["content"]) for m in kw["messages"])
+
+
 def resp(content, finish="stop"):
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish)])
 
@@ -300,11 +305,12 @@ async def test_long_term_memory(app: App):
     prof = p.ltm.get_user(111)
     assert prof["score"] == 26, prof      # 新人 20 起步，光聊天不加分；两次整理各 +3 → 26
     assert p.ltm.get_user(404).get("score", 0) == 20, "记录里没出现的人，好感也不许改"
-    prompt = MEM_CALLS[0]["messages"][0]["content"]
-    assert "QQ 111（昵称：阿明｜关系：陌生人）" in prompt and "伊蕾娜：嗯嗯" in prompt
-    assert p.ltm.get_user(111)["facts"] == ["喜欢吃辣", "下周要考试"]
+    prompt = mem_prompt(MEM_CALLS[0])
+    assert "QQ 111（昵称：阿明｜关系：陌生人｜最多记 8 条）" in prompt and "伊蕾娜：嗯嗯" in prompt
+    assert MEM_CALLS[0]["messages"][0]["role"] == "system" and "阿明" not in MEM_CALLS[0]["messages"][0]["content"], "固定规则单独放最前面"
+    assert p.ltm.fact_texts(p.ltm.get_user(111)) == ["喜欢吃辣", "下周要考试"]
     assert p.ltm.get_user(404)["facts"] == [], "记录里没出现的人不许被改"
-    assert p.ltm.get_group(555)["events"] == ["9月25日：大家一起聊了第四卷"]
+    assert p.ltm.event_texts(p.ltm.get_group(555)) == ["大家一起聊了第四卷"]
 
     # 下次说话时带上长期记忆
     async with app.test_matcher() as ctx:
@@ -320,7 +326,7 @@ async def test_long_term_memory(app: App):
         bot = mkbot(ctx)
         ev = gev(Message("/记忆 ") + MessageSegment.at(111), True, uid=999, mid=201)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "（阿明｜QQ 111｜说过 10 次话｜好感 26）\n1. 喜欢吃辣\n2. 下周要考试", result=None, bot=bot)
+        ctx.should_call_send(ev, "（阿明｜QQ 111｜说过 10 次话｜好感 26｜记了 2/8 条）\n1. 喜欢吃辣（经历｜★★｜群555｜今天）\n2. 下周要考试（经历｜★★｜群555｜今天）", result=None, bot=bot)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = gev("/记忆 本群", True, uid=999, mid=202)
@@ -490,18 +496,10 @@ def test_affection_tiers_and_decay(monkeypatch):
     import plugins.roleplay_chat as p
     L = p.ltm
     assert p.familiarity_of(6001) == "stranger"
-    # 默认光聊天不加分
-    for _ in range(3):
+    # 光聊天不加分（9/30 删掉了 AFFECTION_CHAT_GAIN）
+    for _ in range(20):
         L.bump_talk(6001, "老熟人")
     assert L.effective_score(L.get_user(6001)) == 20
-    # 打开 AFFECTION_CHAT_GAIN 后：每条 +1，每天最多 +5
-    L.affection_cfg["base_gain"] = 1
-    try:
-        for _ in range(20):
-            L.bump_talk(6001, "老熟人")
-    finally:
-        L.affection_cfg["base_gain"] = 0
-    assert L.effective_score(L.get_user(6001)) == 25
     # 按内容加分到普通朋友、熟人、很熟
     L.adjust(6001, delta=35)
     assert p.familiarity_of(6001) == "friend"
@@ -521,14 +519,15 @@ def test_affection_tiers_and_decay(monkeypatch):
     # 骂人扣分到讨厌；讨厌时光聊天不回暖
     L.adjust(6001, set_to=-30)
     assert p.familiarity_of(6001) == "disliked"
-    prof = L.get_user(6001); prof["gain_day"] = "2000-01-01"; L.save_user(prof)
     L.bump_talk(6001)
     assert L.effective_score(L.get_user(6001)) == -30
-    # 很久不聊：向 0 回落（讨厌也会淡去）
-    prof = L.get_user(6001); prof["last_talk"] = time.time() - 17 * 86400; L.save_user(prof)
+    # 很久不聊：向起步分回落，但不跨档位（9/30 起）
+    prof = L.get_user(6001); prof["last_talk"] = time.time() - 17 * 86400; prof.pop("decay_settled", None); L.save_user(prof)
     assert L.effective_score(L.get_user(6001)) == -10          # 超过 7 天后 10 天 × 2 = 20
+    prof["last_talk"] = time.time() - 70 * 86400; L.save_user(prof)
+    assert L.effective_score(L.get_user(6001)) == -1 and p.familiarity_of(6001) == "disliked"   # 讨厌不会自己淡成陌生人
     prof["score"], prof["last_talk"] = 100, time.time() - 70 * 86400; L.save_user(prof)
-    assert L.effective_score(L.get_user(6001)) == 20          # 回落到新人的起始分
+    assert L.effective_score(L.get_user(6001)) == 90 and p.familiarity_of(6001) == "acquaintance"   # 熟人最多落到 90
     # close_friends 直接很熟；/忘记 不清零好感
     p.cfg.close_friends = [6002]
     try:
@@ -893,7 +892,7 @@ async def test_summarize_tier_aware(app: App, tmp_path):
         def __init__(self, c): self.choices = [type("C", (), {"message": type("M", (), {"content": c})(), "finish_reason": "stop"})()]
 
     async def create(**kw):
-        seen["prompt"] = kw["messages"][0]["content"]
+        seen["prompt"] = mem_prompt(kw)
         return R(_j.dumps({"people": [{"qq": 7401, "facts": [], "affection": 4, "reason": "道歉"}], "group_events": []}))
 
     cli = type("X", (), {})()
@@ -982,14 +981,19 @@ async def test_letter_rules_and_send(app: App, monkeypatch):
     p.client.chat.completions.create = fake_create(letter)
     friends = {7701, 7702, 7703, 7704}
     _set_seen(p, 7701, 2, 140)    # 很熟、两天没来 → 符合
-    _set_seen(p, 7702, 2, 100)    # 熟人 → 不写
+    _set_seen(p, 7702, 2, 100)    # 熟人、两天没来 → 也符合（9/30 起熟人也写，概率低一些）
     _set_seen(p, 7703, 0.2, 140)  # 很熟但刚聊过 → 不写
+    _set_seen(p, 7704, 2, 60)     # 普通朋友 → 不写
     _set_seen(p, 7705, 2, 140)    # 不是好友 → 不写
     assert p.letter_blocker(7701, friends) is None
-    assert p.letter_blocker(7702, friends) == "还没到很熟"
+    assert p.letter_blocker(7702, friends) is None
     assert p.letter_blocker(7703, friends) == "最近刚聊过"
+    assert p.letter_blocker(7704, friends) == "还没到熟人"
     assert p.letter_blocker(7705, friends) == "不是机器人的 QQ 好友"
-    assert 0 < p._letter_prob_per_check() < 0.05
+    assert p.letter_daily_prob(7701) == 0.25 and p.letter_daily_prob(7702) == 0.08 and p.letter_daily_prob(7704) == 0
+    assert 0 < p._letter_prob_per_check(0.08) < p._letter_prob_per_check(0.25) < 0.05
+    assert p._letter_prob_per_check(0) == 0
+    monkeypatch.setattr(p.cfg, "letter_max_per_day", 1)          # 只剩一个名额：很熟的先拿到
 
     monkeypatch.setattr(p, "_letter_window_now", lambda: True)
     monkeypatch.setattr(p.random, "random", lambda: 0.0)          # 必定写
@@ -1012,6 +1016,17 @@ async def test_letter_rules_and_send(app: App, monkeypatch):
     # 他回信了（又来说话）→ 时间提示里会提到信？这里他刚说话，距离不够久，不提；但写信条件重新计算
     p.ltm.bump_talk(7701)
     assert p.letter_blocker(7701, friends) == "最近刚聊过"
+    # 熟人没被写到（名额给了很熟的），还在候选里
+    assert not p.ltm.get_user(7702).get("last_letter") and p.letter_blocker(7702, friends) is None
+
+
+def test_letter_prob_old_style_config():
+    # .env 老写法只写一个数：当作很熟的概率，熟人仍是默认 0.08
+    from plugins.roleplay_chat.config import Config
+    assert Config(letter_daily_prob=0.3).letter_daily_prob["close"] == 0.3
+    assert Config(letter_daily_prob="0.3").letter_daily_prob["acquaintance"] == 0.08
+    assert Config(letter_daily_prob={"acquaintance": 0.1, "close": 0.2}).letter_daily_prob == {"acquaintance": 0.1, "close": 0.2}
+    assert Config().letter_daily_prob["friend"] == 0.0
 
 
 def test_unanswered_letter_hint():
@@ -1035,7 +1050,7 @@ async def test_letter_command(app: App):
         ctx.receive_event(bot, ev)
         ctx.should_call_api("get_friend_list", {}, [{"user_id": 7801}])
         ctx.should_call_api("send_private_msg", {"user_id": 7801, "message": letter}, {"message_id": 1})
-        ctx.should_call_send(ev, "（信已寄给 7801｜平时不会自动写：还没到很熟）", result=None, bot=bot)
+        ctx.should_call_send(ev, "（信已寄给 7801｜平时不会自动写：还没到熟人）", result=None, bot=bot)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = pev("/写信 7802", uid=999, mid=2201)
@@ -1118,7 +1133,7 @@ async def test_gender_guess_and_command(app: App):
     prof = p.ltm.get_user(222)
     assert prof["gender_guess"] == "male" and prof.get("gender") is None   # 只是猜测，不算确认
     assert "可能是男生" in p.ltm.context_for(222, "小王", None)
-    assert "gender_guess" in MEM_CALLS[0]["messages"][0]["content"]
+    assert "gender_guess" in mem_prompt(MEM_CALLS[0])
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = pev("/性别 222 女", uid=999, mid=3200)
@@ -1598,8 +1613,9 @@ async def test_longer_memory_and_summary_cap(app: App):
             ctx.should_call_send(ev, "嗯", result=None, bot=bot)
     await asyncio.gather(*list(p.ltm._tasks))
     assert MEM_CALLS[-1]["max_tokens"] == 4000
-    assert "最多 20 条" in MEM_CALLS[-1]["messages"][0]["content"]
-    assert p.ltm.get_user(222)["facts"] == facts[:20]            # 最多留 20 条
+    assert p.cfg.memory_facts_by_tier == {"disliked": 8, "stranger": 8, "friend": 12, "acquaintance": 20, "close": 30}
+    assert "最多记 8 条" in mem_prompt(MEM_CALLS[-1])            # 陌生人最多记 8 条（越熟记得越多）
+    assert p.ltm.fact_texts(p.ltm.get_user(222)) == facts[:8]
 
 
 @pytest.mark.asyncio
@@ -2343,7 +2359,7 @@ async def test_memory_empty_reply_keeps_everything(monkeypatch):
     p.client.chat.completions.create = empty
     L._retry_at.clear()
     await L.summarize("group_555")
-    assert L.get_group(555)["events"] == ["9月27日：一起聊了面包"]    # 群往事没被清空
+    assert L.event_texts(L.get_group(555)) == ["一起聊了面包"]    # 群往事没被清空
     assert len(json.loads(L._pending_path("group_555").read_text(encoding="utf-8"))) == 8   # 待整理的还在
     assert L._retry_at["group_555"] > time.time() + 200             # 5 分钟后再试
     assert not L._start("group_555")                                # 没到时间，不重试
@@ -2354,8 +2370,8 @@ async def test_memory_empty_reply_keeps_everything(monkeypatch):
     p.client.chat.completions.create = shrink
     L._retry_at.clear()
     await L.summarize("group_555")
-    assert L.get_user(111)["facts"] == ["a", "b", "c", "d", "e", "f"]
-    assert L.get_group(555)["events"] == ["9月27日：一起聊了面包"]
+    assert L.fact_texts(L.get_user(111)) == ["a", "b", "c", "d", "e", "f"]
+    assert L.event_texts(L.get_group(555)) == ["一起聊了面包"]
     assert not L._pending_path("group_555").exists()                 # 这次算整理成功，删掉待整理
 
 
@@ -2626,7 +2642,7 @@ async def test_memory_user_lock_and_batch_once():
     order = []
 
     async def slow(**kw):
-        tag = "群" if "群往事" in kw["messages"][0]["content"] and "【阿明】" in kw["messages"][0]["content"] else "私"
+        tag = "群" if "【阿明】" in mem_prompt(kw) else "私"
         order.append(("开始", tag))
         await asyncio.sleep(0.05)
         order.append(("结束", tag))
@@ -3282,7 +3298,7 @@ def test_budget_accounting(tmp_path):
     # 凌晨 5 点才算新的一天
     assert b.day_key(datetime(2026, 9, 29, 4, 59, tzinfo=peak.BEIJING)) == "2026-09-28"
     assert b.day_key(datetime(2026, 9, 29, 5, 0, tzinfo=peak.BEIJING)) == "2026-09-29"
-    # 聊天花到 0.85 就停；后台可以用到 1.0
+    # 今天合计（聊天 + 后台）花到 0.85 聊天就停；后台可以用到 1.0
     b.peak_multiplier = 1.0
     r = SimpleNamespace(usage=SimpleNamespace(prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=100_000, completion_tokens=0))   # 0.1 元
     b.track(r, "chat", user=1, group=None)
@@ -3292,18 +3308,52 @@ def test_budget_accounting(tmp_path):
     assert b.group_left(9) == pytest.approx(0.4) and b.user_left(2) == pytest.approx(0.15)   # 群里的也算到人头上
     assert b.chat_left() == pytest.approx(0.55) and b.total_left() == pytest.approx(0.7)
     b.track(r, "memory")
-    b.track(r, "memory")                          # 后台 0.2，超出预留 0.05：从聊天里扣
-    assert b.chat_left() == pytest.approx(0.5) and b.can_background()
+    b.track(r, "memory")                          # 后台 0.2：白天的后台也占聊天的额度（9/30 起）
+    assert b.chat_left() == pytest.approx(0.35) and b.can_background()
     b.track(SimpleNamespace(), "chat", user=1)    # 没返回用量：只记次数
     d = b.today()
     assert d["unknown_calls"] == 1 and d["kinds"]["chat"]["calls"] == 4
+    # 聊天花到合计 0.85 停下时，最后 0.15 一定还在，只给后台
+    for _ in range(4):
+        b.track(r, "chat", user=3, group=None)    # 合计 0.9：最后一轮超了一点（允许，对话要说完）
+    assert b.chat_left() <= 0 and b.total_left() == pytest.approx(0.1) and b.can_background()
+    b.track(r, "memory")                          # 收尾的记忆整理照常花
+    assert b.total_left() == pytest.approx(0.0, abs=1e-9)
     # 存在文件里，重启后还在
     b2 = B.Budget(tmp_path, total=1.0, reserve=0.15)
-    assert b2.today()["total"] == pytest.approx(0.5)
+    assert b2.today()["total"] == pytest.approx(1.0)
     assert "长期记忆整理" in b2.report() and "本月合计" in b2.report()
     # 关掉限额：只记账不拦
     b2.enabled = False
     assert b2.chat_left() == float("inf") and b2.can_background()
+
+
+@pytest.mark.asyncio
+async def test_budget_background_counts_and_reserve_kept(monkeypatch):
+    """9/30：白天的记忆整理也占聊天的额度；聊天停下时最后的预留一定还在，只给后台"""
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import budget as B
+    monkeypatch.setattr(p.spend, "total", 0.004)
+    monkeypatch.setattr(p.spend, "reserve", 0.001)
+    monkeypatch.setattr(p.spend, "user_share", 0.0)
+    monkeypatch.setattr(p.spend, "group_share", 0.0)
+    monkeypatch.setattr(p.spend, "peak_multiplier", 1.0)
+    monkeypatch.setattr(p.cfg, "budget_round_estimate", 0.001)
+    monkeypatch.setattr(p.peak, "farewell_line", lambda private=False, avoid=(), fam=None: "私聊再见" if private else "群里再见")
+    monkeypatch.setattr(p.peak, "tired_line", lambda fam=None: "今天累了")
+    r = SimpleNamespace(usage=SimpleNamespace(prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=1000, completion_tokens=0))   # 0.001 元
+    B.track(r, "memory")                          # 白天先整理了一次记忆
+    p.client.chat.completions.create = _with_usage(fake_create("嗯。"))        # 每次 0.001 元
+    bot = _PBot()
+    await p.converse(bot, pev("第一句", uid=9711, mid=7100))
+    await p.converse(bot, pev("第二句", uid=9711, mid=7101))
+    # 聊天 0.002 + 记忆 0.001 = 合计 0.003，到了“总额 - 预留”：第二轮就告别了
+    assert bot.sent == ["嗯。", "嗯。", "私聊再见"], bot.sent
+    assert p.spend.chat_left() <= 0 and p.spend.total_left() == pytest.approx(0.001)
+    assert B.can_background()                     # 预留还在，记忆整理、写说说照常
+    n = len(CALLS)
+    await p.converse(bot, pev("还在吗", uid=9712, mid=7102))
+    assert bot.sent[-1] == "今天累了" and len(CALLS) == n   # 聊天不再调模型，不碰预留
 
 
 @pytest.mark.asyncio
@@ -3523,21 +3573,41 @@ async def test_winddown_hint_in_prompt(monkeypatch):
     assert "【有点累了】测试" in CALLS[-1]["messages"][-2]["content"]
 
 
-def test_chat_gain_keeps_close_above_100():
-    """AFFECTION_CHAT_GAIN 打开时，很熟（130～150）的人说话不会被压回 100"""
+def test_decay_keeps_tier():
+    """9/30：很久不聊只在本档位里回落，不改变熟悉程度；踩雷、整理扣分这些照常，可以掉档"""
     import plugins.roleplay_chat as p
     L = p.ltm
-    L.set_gender(9950, "female")
-    L.adjust(9950, set_to=140)
-    L.affection_cfg["base_gain"] = 1
-    try:
-        L.bump_talk(9950)
-        assert L.effective_score(L.get_user(9950)) == 141 and p.familiarity_of(9950) == "close"
-        L.adjust(9950, set_to=150)
-        L.bump_talk(9950)
-        assert L.effective_score(L.get_user(9950)) == 150      # 最高 150
-    finally:
-        L.affection_cfg["base_gain"] = 0
+    long_ago = time.time() - 100 * 86400                          # 远超过 7 天 + 回落到底需要的天数
+
+    def idle(qq, score, gender=None):
+        if gender:
+            L.set_gender(qq, gender)
+        L.adjust(qq, set_to=score)
+        prof = L.get_user(qq); prof["last_talk"] = prof["last_msg"] = long_ago; prof.pop("decay_settled", None); L.save_user(prof)
+        return L.effective_score(L.get_user(qq)), p.familiarity_of(qq)
+
+    assert idle(9950, 150, "female") == (130, "close")           # 很熟最多落到 130
+    assert idle(9951, 128) == (90, "acquaintance")                # 熟人最多落到 90
+    assert idle(9952, 140) == (90, "acquaintance")                # 没确认性别：先封顶 129，再按熟人算
+    assert idle(9953, 60) == (40, "friend")                       # 普通朋友最多落到 40
+    assert idle(9954, 35) == (20, "stranger")                     # 陌生人照旧回到起步分 20
+    assert idle(9955, 5) == (20, "stranger")                      # 低于起步分的陌生人回升到 20
+    assert idle(9956, -40) == (-1, "disliked")                    # 讨厌的人最多回升到 -1，不会自己变回陌生人
+    # 还没到底的，照常每天 2 分
+    L.set_gender(9957, "female"); L.adjust(9957, set_to=145)
+    prof = L.get_user(9957); prof["last_talk"] = time.time() - 10 * 86400; prof.pop("decay_settled", None); L.save_user(prof)
+    assert L.effective_score(L.get_user(9957)) == 139              # 超过 7 天后 3 天 × 2 = 6
+    # 回落停在 130 以后，别的扣分照扣，可以掉档；扣完以后不会再从很久以前重新落一遍（最后说话还是 100 天前）
+    L.taboo_penalty(9950, 5, 16, "测试扣分")
+    assert L.effective_score(L.get_user(9950)) == 125 and p.familiarity_of(9950) == "acquaintance"
+    assert L.get_user(9950)["last_talk"] == long_ago
+    # 结算以后再过 3 天：只落这 3 天的 6 分
+    prof = L.get_user(9950); prof["decay_settled"] = time.time() - 3 * 86400; L.save_user(prof)
+    assert L.effective_score(L.get_user(9950)) == 119
+    # 以前“光聊天加分”留下的旧字段，说话时顺手清掉
+    prof = L.get_user(9954); prof["gain_day"], prof["gain_today"] = "2026-09-29", 3; L.save_user(prof)
+    L.bump_talk(9954)
+    assert "gain_day" not in L.get_user(9954) and "gain_today" not in L.get_user(9954)
 
 
 # ---------------------------------------------------------------- 9/29 记混检查
@@ -3829,3 +3899,372 @@ def test_vent_length_for_strangers_0930():
     assert p.length_hint_for("busy", vent, "stranger") == p.LENGTH_HINT["busy"]
     assert p.length_hint_for("short", "嗯", "stranger") in {h for _, h in p.SHORT_VARIANTS}
 
+
+
+# ---------------------------------------------------------------- 长期记忆：倾诉不扣分、纠缠每天扣分有上限（9/30）
+def test_summary_prompt_distress_not_penalized():
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
+    assert "倾诉不是冒犯" in SUMMARIZE_PROMPT and "不想活了" in SUMMARIZE_PROMPT
+    assert "不记原话和细节" in SUMMARIZE_PROMPT
+    assert "affection_kind" in SUMMARIZE_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_summary_nag_daily_cap():
+    from plugins.roleplay_chat.memory import LongTermMemory
+    import tempfile
+    cuts = iter([(-4, "纠缠"), (-4, "纠缠"), (-4, "纠缠"), (-4, ""), (-8, "恶意"), (-7, "")])
+
+    async def create(**kw):
+        d, k = next(cuts)
+        return resp(json.dumps({"people": [{"qq": 111, "facts": ["x"], "affection": d, "affection_kind": k}], "group_events": []}))
+    cli = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    m = LongTermMemory(Path(tempfile.mkdtemp()), cli, "m", batch=2)
+    scores = []
+    for i in range(6):
+        m.add_pending("private_111", [{"role": "user", "content": f"a{i}", "uid": 111, "name": "x"}, {"role": "assistant", "content": "b"}])
+        await m.summarize("private_111")
+        scores.append(m.get_user(111)["score"])
+    # 纠缠：-4 -4 -2（到 10 分封顶），没标类别的 -4 也按纠缠算 → 0；恶意 -8 照扣；没标类别的 -7 按恶意照扣
+    assert scores == [16, 12, 10, 10, 2, -5], scores
+
+
+# ---------------------------------------------------------------- 长期记忆第 1、2 步：条目格式、增改删、场合、遗忘（9/30）
+def _mem(tmp, reply_fn):
+    from plugins.roleplay_chat.memory import LongTermMemory
+    calls = []
+
+    async def create(**kw):
+        calls.append(kw)
+        return resp(json.dumps(reply_fn(kw), ensure_ascii=False))
+    cli = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    m = LongTermMemory(Path(tmp), cli, "m", batch=2, max_events=12)
+    return m, calls
+
+
+async def _feed(m, key, uid=111, name="阿明", text="随便聊聊"):
+    m.add_pending(key, [{"role": "user", "content": text, "uid": uid, "name": name}, {"role": "assistant", "content": "嗯"}])
+    await m.summarize(key)
+
+
+@pytest.mark.asyncio
+async def test_memory_ops_add_update_drop_touch(tmp_path):
+    step = {"n": 0}
+
+    def reply(kw):
+        step["n"] += 1
+        if step["n"] == 1:
+            return {"people": [{"qq": 111, "add": [{"text": "是学生", "kind": "身份", "weight": 3},
+                                                  {"text": "下周要考试", "kind": "计划", "weight": 2, "due": "2099-01-01"},
+                                                  {"text": "喜欢猫", "kind": "喜好", "weight": 2},
+                                                  {"text": "问她喜不喜欢草泥马", "kind": "瞎写", "weight": 9}],
+                                "told": ["讲过雪之国的故事"], "impression": "爱半夜来聊天的学生", "affection": 1}]}
+        if step["n"] == 2:
+            return {"people": [{"qq": 111, "update": [{"id": 3, "text": "其实怕猫"}], "drop": [4], "touch": [1],
+                                "add": [{"text": "是学生。", "kind": "身份"}], "affection": 0}]}
+        return {"people": [{"qq": 111, "drop": [1, 2, 3], "affection": 0}]}      # 一下子删太多：不删
+    m, calls = _mem(tmp_path, reply)
+    await _feed(m, "private_111")
+    prof = m.get_user(111)
+    assert m.fact_texts(prof) == ["是学生", "下周要考试", "喜欢猫", "问她喜不喜欢草泥马"]
+    f = {x["id"]: x for x in prof["facts"]}
+    assert f[1]["kind"] == "身份" and f[1]["weight"] == 3 and f[1]["scope"] == "private"
+    assert f[2]["due"] == "2099-01-01" and f[4]["kind"] == "经历" and f[4]["weight"] == 3   # 类型不认识 → 经历；重要度夹到 1～3
+    assert prof["impression"] == "爱半夜来聊天的学生" and prof["told"][0]["text"] == "讲过雪之国的故事"
+    await _feed(m, "private_111")
+    prof = m.get_user(111)
+    assert m.fact_texts(prof) == ["是学生", "下周要考试", "其实怕猫"], "改旧的那条、删掉流水账、重复的不再加"
+    assert prof["impression"] == "爱半夜来聊天的学生", "没给印象就保留原来的"
+    prof["facts"].append({"id": 9, "text": "x", "kind": "梗", "weight": 2, "scope": "private", "since": "2026-09-30", "seen": "2026-09-30"})
+    m.save_user(prof)
+    await _feed(m, "private_111")
+    assert len(m.get_user(111)["facts"]) == 4, "4 条里要删 3 条：不像正常整理，这次不删"
+    # 固定规则放在最前面的 system 消息里，每次一字不差（能命中缓存）
+    assert calls[0]["messages"][0] == calls[1]["messages"][0] and calls[0]["messages"][0]["role"] == "system"
+    assert "#1 [身份·3" in calls[1]["messages"][1]["content"], "给模型的档案带编号和标签"
+
+
+def _prof_with(m, qq, facts, **kw):
+    prof = m.get_user(qq)
+    prof["facts"] = [{"id": i + 1, "since": "2026-09-30", "seen": d.get("seen", date_str()), **d} for i, d in enumerate(facts)]
+    prof["next_id"] = len(facts) + 1
+    prof.update(kw)
+    m.save_user(prof)
+
+
+def date_str(days_ago=0):
+    return (datetime.now().date() - timedelta(days=days_ago)).isoformat()
+
+
+def test_memory_context_scope_and_selection(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [
+        {"text": "最近工作压力很大", "kind": "近况", "weight": 2, "scope": "private"},
+        {"text": "喜欢刚出炉的可颂", "kind": "喜好", "weight": 2, "scope": "group:555"},
+        {"text": "约好请她吃面包", "kind": "约定", "weight": 3, "scope": "group:555"},
+        {"text": "养了一只橘猫", "kind": "经历", "weight": 2, "scope": "group:666"},
+        {"text": "玩原神", "kind": "喜好", "weight": 1, "scope": "qzone"},
+        {"text": "以前记的事", "kind": "", "weight": 2, "scope": "legacy"},
+    ], impression="爱聊面包的家伙")
+    grp = m.context_for(111, "阿明", 555, text="今天的可颂好香")
+    assert "爱聊面包的家伙" in grp and "可颂" in grp and "约好请她吃面包" in grp
+    assert "工作压力" not in grp, "私聊知道的事不在群里说"
+    assert "橘猫" not in grp, "别的群知道的事不带"
+    assert "以前记的事" not in grp, "还没迁移的旧条目只在私聊用"
+    pub = m.context_for(111, "阿明", None, place="qzone", text="你好呀")
+    assert "工作压力" not in pub and "以前记的事" not in pub
+    pri = m.context_for(111, "阿明", None, text="工作好累啊压力好大")
+    assert "工作压力很大（今天说的）" in pri, "私聊都能用；近况带上是什么时候说的"
+    # 陌生人：只带一两条；这句话跟哪条都不沾边时只想起最要紧的
+    none = m.context_for(111, "阿明", None, text="在吗")
+    assert none.count("；") <= 2, none
+
+
+def test_memory_forgetting_and_cap(tmp_path):
+    from plugins.roleplay_chat.memory import _trim, _expired
+    assert _expired({"kind": "近况", "weight": 2, "seen": date_str(15)})
+    assert not _expired({"kind": "近况", "weight": 2, "seen": date_str(10)})
+    assert _expired({"kind": "经历", "weight": 1, "seen": date_str(31)}) and not _expired({"kind": "经历", "weight": 2, "seen": date_str(31)})
+    assert _expired({"kind": "经历", "weight": 2, "seen": date_str(91)}) and not _expired({"kind": "约定", "weight": 3, "seen": date_str(400)})
+    assert _expired({"kind": "计划", "weight": 2, "seen": date_str(1), "due": date_str(31)})
+    items = [{"id": 1, "text": "约定", "weight": 3, "seen": date_str(60)}] + \
+            [{"id": i, "text": f"小事{i}", "weight": 1, "seen": date_str(i)} for i in range(2, 12)]
+    kept = _trim(items, 5)
+    assert [x["id"] for x in kept] == [1, 2, 3, 4, 5], "满了先忘又旧又不重要的；约定不会被挤掉"
+    m, _ = _mem(tmp_path, lambda kw: {})
+    assert m.fact_cap("stranger") == 8 and m.fact_cap("close") == 30
+
+
+@pytest.mark.asyncio
+async def test_memory_group_events_who(tmp_path):
+    def reply(kw):
+        return {"people": [{"qq": 111, "affection": 0}, {"qq": 222, "affection": 0}],
+                "group_events": {"add": [{"text": "阿明请大家猜谜", "who": [111, 999]}, {"text": "小王晒了猫", "who": [222]}]}}
+    m, _ = _mem(tmp_path, reply)
+    m.note_name(555, 111, "阿明")
+    m.note_name(555, 222, "小王")
+    m.add_pending("group_555", [{"role": "user", "content": "【阿明】猜谜", "uid": 111, "name": "阿明"},
+                                {"role": "user", "content": "【小王】猫", "uid": 222, "name": "小王"}])
+    await m.summarize("group_555")
+    ev = m.get_group(555)["events"]
+    assert ev[0]["who"] == [111] and ev[0]["date"] == date_str(), "在场的人只认这段里出现过的"
+    ctx = m.context_for(111, "阿明", 555, text="再猜一个谜")
+    assert "（在场：阿明）：阿明请大家猜谜" in ctx
+    assert "（群 555 的往事）\n1. " in m.describe_group(555)
+
+
+def test_memory_legacy_upgrade(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    from plugins.roleplay_chat.memory import _write
+    _write(m._user_path(5), {"qq": 5, "name": "老档案", "facts": ["喜欢面包", "9月29日问她几点睡"], "score": 30, "score_v": 2})
+    _write(m._group_path(555), {"gid": 555, "events": ["9月27日：大家聊了面包"], "names": {}})
+    prof = m.get_user(5)
+    assert [f["scope"] for f in prof["facts"]] == ["legacy", "legacy"] and prof["facts"][1]["since"].endswith("-09-29")
+    assert m.get_group(555)["events"][0]["text"] == "大家聊了面包" and m.get_group(555)["events"][0]["date"].endswith("-09-27")
+    assert m.legacy_users() == [5]
+    assert "喜欢面包" in m.context_for(5, "老档案", None) and "喜欢面包" not in m.context_for(5, "老档案", 555, text="面包")
+
+
+@pytest.mark.asyncio
+async def test_memory_migrate_legacy(tmp_path):
+    def reply(kw):
+        assert kw["messages"][0]["role"] == "system" and "流水账" in kw["messages"][0]["content"]
+        return {"impression": "爱聊面包", "told": ["讲过雪之国"],
+                "facts": [{"text": "喜欢面包", "kind": "喜好", "weight": 2, "private": False},
+                          {"text": "那阵子心情很低落", "kind": "近况", "weight": 1, "private": True, "date": date_str(2)}]}
+    m, calls = _mem(tmp_path, reply)
+    from plugins.roleplay_chat.memory import _write
+    _write(m._user_path(5), {"qq": 5, "name": "老档案", "facts": ["喜欢面包", "说要离开这个世界", "问她喜不喜欢猫，被回还行"], "score": 30, "score_v": 2})
+    _write(m._group_path(555), {"gid": 555, "events": [], "names": {"老档案": 5}})
+    assert await m.migrate_some(3) == 1
+    prof = m.get_user(5)
+    assert m.fact_texts(prof) == ["喜欢面包", "那阵子心情很低落"]
+    assert [f["scope"] for f in prof["facts"]] == ["group:555", "private"], "只在一个群出现过：公开的事记成那个群的"
+    assert prof["impression"] == "爱聊面包" and prof["told"][0]["text"] == "讲过雪之国"
+    assert (tmp_path / "backup-v1" / "users" / "5.json").exists(), "迁移前备份"
+    assert m.legacy_users() == [] and await m.migrate_some(3) == 0 and len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_forget_one_fact_command(app: App):
+    import plugins.roleplay_chat as p
+    prof = p.ltm.get_user(111)
+    prof["facts"] = ["喜欢面包", "怕猫", "是学生"]
+    p.ltm.save_user(prof)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("/忘记 111 第2条", uid=999, mid=9100)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "（已删掉第 2 条：怕猫）", result=None, bot=bot)
+    assert p.ltm.fact_texts(p.ltm.get_user(111)) == ["喜欢面包", "是学生"]
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("/忘记 111 第9条", uid=999, mid=9101)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "（没有第 9 条，先用 /记忆 看看）", result=None, bot=bot)
+
+
+# ---------------------------------------------------------------- 长期记忆：代码审查时发现的几处（9/30）
+@pytest.mark.asyncio
+async def test_memory_events_keep_newest_when_full(tmp_path):
+    n = {"i": 0}
+
+    def reply(kw):
+        n["i"] += 1
+        return {"people": [{"qq": 111, "affection": 0}], "group_events": {"add": [{"text": f"事件{n['i']}号", "who": [111]}]}}
+    m, _ = _mem(tmp_path, reply)
+    m.max_events = 5
+    for _ in range(8):
+        await _feed(m, "group_555")
+    assert m.event_texts(m.get_group(555)) == [f"事件{i}号" for i in range(4, 9)], "满了留新的，不是把新来的丢掉"
+
+
+@pytest.mark.asyncio
+async def test_memory_string_instead_of_list(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "add": "喜欢刚出炉的可颂", "told": "讲过灰之魔女", "touch": 3,
+                                                  "affection": 0}], "group_events": {"add": "一起聊了面包"}})
+    await _feed(m, "group_555")
+    prof = m.get_user(111)
+    assert m.fact_texts(prof) == ["喜欢刚出炉的可颂"] and [t["text"] for t in prof["told"]] == ["讲过灰之魔女"]
+    assert m.event_texts(m.get_group(555)) == ["一起聊了面包"]
+
+
+@pytest.mark.asyncio
+async def test_memory_bad_output_fails_with_backoff(tmp_path):
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "add": [{"text": "x"}], "affection": 1}],
+                                          "group_events": {"add": [{"text": "y", "who": {"bad": 1}}]}})
+    m._merge_events = lambda *a, **k: (_ for _ in ()).throw(TypeError("boom"))     # 合并时出错
+    m.add_pending("group_555", [{"role": "user", "content": "a", "uid": 111, "name": "阿明"}, {"role": "assistant", "content": "b"}])
+    await m.summarize("group_555")
+    assert m.get_user(111)["facts"] == [] and m.get_user(111)["score"] == 20, "出错了就一个都不写"
+    assert m._pending_path("group_555").exists() and m._retry_at["group_555"] > time.time() + 200, "按失败处理，隔一阵再试"
+    assert not m._start("group_555")
+
+
+@pytest.mark.asyncio
+async def test_memory_legacy_not_trimmed_and_backed_up(tmp_path):
+    from plugins.roleplay_chat.memory import LongTermMemory, _write
+    _write(tmp_path / "users" / "5.json", {"qq": 5, "name": "老", "facts": [f"旧事{i}" for i in range(20)], "score": 20, "score_v": 2})
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 5, "add": [{"text": "新事", "kind": "经历"}], "affection": 0}]})
+    assert (tmp_path / "backup-v1" / "users" / "5.json").exists(), "开机就先备份旧格式的档案"
+    await _feed(m, "private_5", uid=5, name="老")
+    texts = m.fact_texts(m.get_user(5))
+    assert len(texts) == 21 and "旧事19" in texts and "新事" in texts, "还没迁移的旧条目不算进上限、不淘汰"
+
+
+@pytest.mark.asyncio
+async def test_memory_legacy_update_in_group_stays_hidden(tmp_path):
+    from plugins.roleplay_chat.memory import _write
+    _write(tmp_path / "users" / "5.json", {"qq": 5, "name": "老", "facts": ["跟她倾诉过失恋的事"], "score": 20, "score_v": 2})
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 5, "update": [{"id": 1, "kind": "经历", "weight": 2}], "affection": 0}]})
+    await _feed(m, "group_3", uid=5, name="老")
+    assert "失恋" not in mem_prompt(calls[0]), "群里整理时不给模型看私聊（未分类）的事"
+    assert m.get_user(5)["facts"][0]["scope"] == "legacy"
+    assert "失恋" not in m.context_for(5, "老", 3, text="失恋")
+    await _feed(m, "private_5", uid=5, name="老")
+    assert m.get_user(5)["facts"][0]["scope"] == "private", "私聊里又聊到了：算私聊知道的"
+
+
+@pytest.mark.asyncio
+async def test_memory_migrate_respects_forget_and_gives_up(tmp_path):
+    from plugins.roleplay_chat.memory import _write
+    _write(tmp_path / "users" / "5.json", {"qq": 5, "name": "老", "facts": ["是学生", "秘密A", "c"], "score": 20, "score_v": 2})
+    holder = {}
+
+    def reply(kw):
+        holder["m"].forget_user(5)                  # 调用期间被管理员 /忘记 了
+        return {"impression": "x", "facts": [{"text": "是学生", "kind": "身份", "weight": 3, "private": False}]}
+    m, calls = _mem(tmp_path, reply)
+    holder["m"] = m
+    assert await m.migrate_user(5)
+    assert m.get_user(5)["facts"] == [] and "impression" not in m.get_user(5), "删掉的不会被迁移写回来"
+    # 模型老是一条不留：试 3 次就不再花钱，旧条目改成私聊的小事
+    _write(tmp_path / "users" / "6.json", {"qq": 6, "name": "空", "facts": ["a1", "b2", "c3"], "score": 20, "score_v": 2})
+    m2, calls2 = _mem(tmp_path, lambda kw: {"impression": "", "facts": []})
+    for _ in range(3):
+        m2._migrate_fail.clear()
+        await m2.migrate_some(5)
+    assert len(calls2) == 3 and 6 not in m2.legacy_users()
+    assert {f["scope"] for f in m2.get_user(6)["facts"]} == {"private"}
+    m2._migrate_fail.clear()
+    await m2.migrate_some(5)
+    assert len(calls2) == 3, "放弃以后不再调模型"
+
+
+# ---------------------------------------------------------------- 长期记忆：回放测试 0930_0213 发现的几处
+def test_memory_text_cleanup():
+    from plugins.roleplay_chat.memory import _clean_text, _split_date, _similar
+    assert _clean_text("主动认错，被说“这还差不多”") == "主动认错，被说“这还差不多”", "句尾的引号不能被去掉"
+    assert _clean_text("“喜欢面包”") == "喜欢面包" and _clean_text("“a”和“b”") == "“a”和“b”"
+    text, day = _split_date("9月29日问她几点睡")
+    assert text == "问她几点睡" and day.endswith("-09-29")
+    assert _similar("最近生活平淡，会来问伊蕾娜买了什么书", "常来问伊蕾娜今天有什么趣事、买了什么书，最近生活平淡")
+    assert not _similar("喜欢猫", "怕猫") and not _similar("约好请她吃面包", "喜欢刚出炉的可颂")
+
+
+@pytest.mark.asyncio
+async def test_memory_add_near_duplicate_is_touch(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "update": [{"id": 1, "text": "常来问她今天有什么趣事、买了什么书，最近生活平淡"}],
+                                                  "add": [{"text": "最近生活平淡，会来问她买了什么书", "kind": "近况"},
+                                                          {"text": "9月29日说要去看海", "kind": "计划"}], "affection": 0}]})
+    _prof_with(m, 111, [{"text": "常来问她今天有什么趣事", "kind": "习惯", "weight": 1, "scope": "private"}])
+    await _feed(m, "private_111")
+    assert m.fact_texts(m.get_user(111)) == ["常来问她今天有什么趣事、买了什么书，最近生活平淡", "说要去看海"]
+
+
+
+def _tight_budget(monkeypatch, p):
+    monkeypatch.setattr(p.spend, "total", 0.004)
+    monkeypatch.setattr(p.spend, "reserve", 0.001)
+    monkeypatch.setattr(p.spend, "user_share", 0.0)
+    monkeypatch.setattr(p.spend, "group_share", 0.0)
+    monkeypatch.setattr(p.spend, "peak_multiplier", 1.0)
+    monkeypatch.setattr(p.cfg, "budget_round_estimate", 0.001)
+    monkeypatch.setattr(p.peak, "farewell_line", lambda private=False, avoid=(), fam=None: "私聊再见" if private else "群里再见")
+    monkeypatch.setattr(p.peak, "tired_line", lambda fam=None: "今天累了")
+
+
+_MEM_COST = SimpleNamespace(usage=SimpleNamespace(prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=1000, completion_tokens=0))  # 0.001 元
+
+
+@pytest.mark.asyncio
+async def test_budget_crossed_between_rounds_still_says_bye(monkeypatch):
+    """9/30：回完一轮后，记忆整理把合计推过线（当时的告别检查赶不上）：下一条消息来时补告别，群里也不再默不作声"""
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import budget as B
+    _tight_budget(monkeypatch, p)
+    p.client.chat.completions.create = _with_usage(fake_create("嗯。"))        # 每次 0.001 元
+    bot = _PBot()
+    await p.converse(bot, gev("伊蕾娜你好", True, uid=9721, mid=7200, gid=570))
+    await p.converse(bot, pev("你好", uid=9722, mid=7201))
+    assert bot.sent == ["嗯。", "嗯。"]
+    B.track(_MEM_COST, "memory")                  # 回完以后后台整理：合计 0.003，到线了
+    n = len(CALLS)
+    await p.converse(bot, gev("伊蕾娜在吗", True, uid=9721, mid=7202, gid=570))
+    # 群里补一句告别；今天的钱花完了，刚才在聊的私聊也一起告别
+    assert bot.sent[2:] == ["群里再见", (9722, "私聊再见")], bot.sent      # 私聊那句是主动发过去的
+    await p.converse(bot, pev("在吗", uid=9722, mid=7203))
+    assert len(bot.sent) == 4, bot.sent           # 告别过了：不再补“今天累了”
+    assert len(CALLS) == n                        # 都不调模型
+    # 很久没跟她说话的人才来私聊：还是“今天累了”
+    await p.converse(bot, pev("在吗", uid=9723, mid=7204))
+    assert bot.sent[-1] == "今天累了"
+
+
+@pytest.mark.asyncio
+async def test_budget_crossed_between_rounds_wraps_up_open_question(monkeypatch):
+    """线在两轮之间跨过去、而她上一句在问对方：对方回答了就接着回完再走，不是直接甩一句再见"""
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import budget as B
+    _tight_budget(monkeypatch, p)
+    p.client.chat.completions.create = _with_usage(fake_create("那你呢？"))
+    bot = _PBot()
+    await p.converse(bot, pev("我今天去旅行了", uid=9731, mid=7300))
+    assert bot.sent == ["那你呢？"]
+    B.track(_MEM_COST, "memory")
+    B.track(_MEM_COST, "memory")                  # 合计 0.003，到线了
+    p.client.chat.completions.create = _with_usage(fake_create("挺好的。"))
+    await p.converse(bot, pev("我也挺好的", uid=9731, mid=7301))
+    assert bot.sent[1:] == ["挺好的。", "私聊再见"], bot.sent     # 先把话回完，再告别
+    await p.converse(bot, pev("拜拜", uid=9731, mid=7302))
+    assert bot.sent[1:] == ["挺好的。", "私聊再见"], bot.sent
