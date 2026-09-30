@@ -4671,3 +4671,26 @@ async def test_middle_at_me_goes_to_judge_2000(app: App):
     last_user = [m for m in CALLS[-1]["messages"] if m["role"] == "user"][-1]["content"]
     assert last_user.endswith("这个问题问问@伊蕾娜 吧")
     JUDGE["answer"] = "否"
+
+
+@pytest.mark.asyncio
+async def test_slash_messages_ignored_2005(app: App):
+    """9/30 19:52：“/”开头的消息一律不看（给别的机器人的指令、不存在的指令……）：私聊、@她、叫她名字都不回，也不进旁听"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯？")
+    n = len(CALLS)
+    cases = [pev("/签到", uid=223, mid=9990), pev("／help", uid=223, mid=9991), pev("  /不存在的指令", uid=999, mid=9992),
+             gev(Message([MessageSegment.at(123), MessageSegment.text(" /签到")]), True, uid=1813, mid=9993)]
+    for ev in cases:
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ctx.receive_event(bot, ev)
+    assert len(CALLS) == n and p.get_history("private_223") == []
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev(Message([_at(2659, "小明"), MessageSegment.text(" /打劫")]), False, uid=1813, mid=9994))
+        ctx.receive_event(bot, gev("/今日运势", False, uid=1813, mid=9995))
+    assert not any("打劫" in t or "运势" in t for _, _, t, _ in p._passive[555])
+    # 中间带“/”的照常：“1/2”“和/或”
+    ev = pev("我觉得五五开，1/2 吧", uid=223, mid=9996)
+    assert not p.is_slash_message(ev)

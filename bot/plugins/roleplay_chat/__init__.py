@@ -1556,6 +1556,19 @@ ADMIN_COMMANDS = ("重置", "清空记忆", "reset", "重载人设", "认图", "
                   "好感", "好感度", "性别", "忘记", "删除记忆", "写信", "说说", "插话", "冒泡", "搭话", "花费", "花销")
 
 
+_SLASH_STARTS = ("/", "／")
+
+
+def is_slash_message(event: MessageEvent, command_start=None) -> bool:
+    """去掉开头的 @ 和空格后以“/”（或全角“／”）开头的消息：多半是给别的机器人的指令（/签到、/help……），
+    她一律不看：不回、不进旁听、不记。管理员指令由上面的指令处理，不受影响（9/30）"""
+    starts = tuple(set(_SLASH_STARTS) | {c for c in (command_start or ()) if c})
+    msg = event.get_message()
+    edge = edge_at_positions(msg)
+    text = "".join(seg_text(seg) for i, seg in enumerate(msg) if not (seg.type == "at" and i in edge)).strip()
+    return text.startswith(starts)
+
+
 def is_admin_command(text: str, command_start) -> bool:
     t = text.strip()
     for start in command_start or {"/"}:
@@ -1903,7 +1916,7 @@ passive = on_message(rule=Rule(_is_group_not_to_me) & allowed, priority=99, bloc
 async def _(bot: Bot, event: GroupMessageEvent):
     text = message_to_text(event.get_message())
     # 群友转的卡片（B 站视频、链接、名片）也进旁听，只显示标题，不会因为它开口；Markdown、按钮这些机器人消息照旧不要
-    if not text or text.startswith(tuple(bot.config.command_start or {"/"})) or is_bot_like(event, allow_cards=True):
+    if not text or is_slash_message(event, bot.config.command_start) or is_bot_like(event, allow_cards=True):
         return
     body = quote_note(event) + (message_to_text(group_body(event)) or "（只@了一下）")
     line = speaker_head(event) + clean_body(clip_input(body))
@@ -1982,10 +1995,9 @@ async def _judge(event: GroupMessageEvent, line: str) -> bool:
 async def _addressed(bot: Bot, event: MessageEvent) -> bool:
     """@ 她 / 回复她 / 以昵称开头 → 一定回；否则在群里看是否明显在跟她说话"""
     now = time.monotonic()
-    # 不是管理员却发了指令：不回，也不当成聊天
-    if is_admin_command(message_to_text(event.get_message()), bot.config.command_start) \
-            and str(event.user_id) not in bot.config.superusers:
-        logger.info(f"不是管理员，指令不理 user={event.user_id}：{message_to_text(event.get_message())[:20]}")
+    # 以“/”开头的消息（给别的机器人的指令、不是管理员的人发的指令、管理员打错的指令……）：不回，也不当成聊天
+    if is_slash_message(event, bot.config.command_start):
+        logger.info(f"“/”开头的消息，不理 user={event.user_id}：{message_to_text(event.get_message())[:20]}")
         return False
     if is_bot_like(event):                 # 别的机器人（Markdown、卡片消息）：不理，免得两个机器人对着聊
         return False
@@ -4079,7 +4091,8 @@ async def find_unread(bot: Bot, offline_since: float, seen: set[int]) -> list[tu
         # 加好友的验证消息、“已成功添加为好友”这种系统提示不补
         unread = [m for m in unread if not is_friend_verify(qq, message_to_text(_seg_list(m.get("message"))), m.get("time", 0))]
         # 纯指令（/重置 之类）不补
-        unread = [m for m in unread if not message_to_text(_seg_list(m.get("message"))).startswith(tuple(bot.config.command_start or {"/"}))]
+        unread = [m for m in unread if not message_to_text(_seg_list(m.get("message"))).strip()
+                  .startswith(tuple(set(_SLASH_STARTS) | {c for c in (bot.config.command_start or ()) if c}))]
         if unread:
             out.append((qq, unread[-8:]))    # 每人最多看最近 8 条
     out.sort(key=lambda x: x[1][0].get("time", 0))
