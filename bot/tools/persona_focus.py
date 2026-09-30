@@ -4,6 +4,7 @@
   例：.venv\\Scripts\\python tools\\persona_focus.py 0929d N08,S17,S03 10
 - 题目、提示拼法、翻车判定都和 tools\\regression.py 一样（直接调用它的函数）
 - 结果：docs\\人设回归测试\\重点_时间.json 和 重点_时间.md
+- 除了 regression_cases.json 里的题，也能用 tools\\persona_extra_cases.json 里人设这边自己加的题（题号不重复就行）
 """
 import json
 import random
@@ -27,6 +28,9 @@ def main():
     client = OpenAI(api_key=env["DEEPSEEK_API_KEY"], base_url=env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), timeout=60)
     model, temp = env.get("DEEPSEEK_MODEL", "deepseek-flash"), float(env.get("LLM_TEMPERATURE", "1.1"))
     cases = {c["id"]: c for c in json.loads(rg.CASES_FILE.read_text(encoding="utf-8"))["cases"]}
+    extra = Path(__file__).resolve().parent / "persona_extra_cases.json"      # 人设这边自己加的题
+    if extra.exists():
+        cases.update({c["id"]: c for c in json.loads(extra.read_text(encoding="utf-8"))["cases"]})
     vers = {t: rg.load(t) for t in ("before", "after")}
     jobs = []
     for cid in IDS:

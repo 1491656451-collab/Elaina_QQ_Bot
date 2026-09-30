@@ -62,6 +62,8 @@ docs/对话回放测试报告-*.md
 docs/问题排查记录-名片和没发完就被接话.md
 docs/问题排查记录-聊天对象识别.md
 docs/观察记录-*.md
+docs/问题排查记录-说旅行不好.md
+docs/记忆核查-*.md
 bot/tools/replay_cases.json
 
 # ---- QQ 在启动目录里建的数据库文件 ----
