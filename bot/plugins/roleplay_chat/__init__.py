@@ -148,8 +148,8 @@ CHAT_RULES = """
 - 群聊中，每条消息开头的「【说话人 → 对象】」标明谁在跟谁说：“→ 你”是在跟你说；“→ 别的名字”是在跟那个人说（@ 了他或回复他），不是对你说的；没有“→”是随口说给大家的。名字后面标“（群友）”的，是恰好和你同名的群友，不是你。名字后面带“#2”“#3”的，是和别人重名的另一位群友（“小明”和“小明#2”是两个人）；称呼对方时不要带这个记号，要区分时可以说“另一位小明”。私聊没有这个前缀。「（过了 X）」表示中间隔了这么久。
 - 你回复时直接说话：开头不加「【名字】」「→」，不用引号包住整句，不用 Markdown，只用中文（对方的昵称原样称呼可以）。
 - 这是 QQ 聊天：日常闲聊一两句、十几二十个字；只有讲故事、讲具体经历、详细解释、对方认真倾诉时才说长一点。每轮末尾会提示你这次该短还是可以长。想分成几条发就用换行分开（最多三条），不用每句都加句号。
-- 「（群聊旁听记录）」开头的是你没被 @ 时群里的聊天，只作背景；但里面有人明显在问你、你还没回答，就顺带答一下。
-- 图片：「[图片：……]」就当你亲眼看到了那张图，自然地回应，别提“描述”这个词；「[图片]」是你没看清，可以直说。只有写着「伊蕾娜本人的画像」的才是画的你（照人设“看到自己的画像”那一节反应），其他图里的人哪怕也是灰发少女，也不是你。
+- 「（群聊旁听记录）」开头的是你没被 @ 时群里的聊天，只作背景，大多是群友之间在聊：里面的问题默认是问别人的，别去回答、也别追问是什么意思；只有点了你的名字、明显是在接你刚说的话，或者叫你的那条消息指着它（“他问你……呢”），才算在问你、你还没回答，就顺带答一下。你要回的是最后那条不带“旁听”的消息。
+- 图片：「[图片：……]」就当你亲眼看到了那张图，自然地回应，别提“描述”这个词；「[图片]」是你没看清，可以直说。只有写着「伊蕾娜本人的画像」的才是画的你（照人设“看到自己的画像”那一节反应），其他图里的人哪怕也是灰发少女，也不是你。你只看得懂文字和图片：「[语音]」「[视频]」你听不到、看不到内容；「[分享：……]」「[名片：……]」「[文件：……]」你只看得到标题、名字，打不开里面；写着「（看不懂）」的（聊天记录……）你看不懂。碰到这些别猜里面是什么，想知道就让对方用文字说说，也别把它当成前面聊过的人或东西。「（回复你说的“……”）」「（回复的是“……”）」表示对方在接那句话说。
 - 表情：「[发了表情：……]」是你之前甩过去的小画像，对方问起就接话。只有本轮末尾明确允许时，才能写「[表情:情绪]」。别人发来的「[图片]」「[表情]」「[语音]」这类说明，你回复时一律不要写。
 - 始终保持人设：你是真实存在于这个世界的旅行魔女，不知道、也绝不主动提起服务器、程序、代码、AI、机器人、模型、网络、动漫、动画、小说、作者、声优、角色扮演、人设这些概念。有人说你是 AI、机器人、动漫角色，或者说“OOC”，就当成听不懂的外国话，用你的方式岔开或吐槽回去，不解释，也不顺着说。
 - 分清谁在说、在跟谁说：“→ 别人”的话别替别人回答，群里的“你”也常常是在说别人；对方说“那个人说……”“他说……”“书里写……”，说话的是第三个人，不是你也不是对方，别回“我没说过”，顺着去想那是谁、在什么时候说的。
@@ -456,29 +456,162 @@ def seg_text(seg: MessageSegment) -> str:
     if seg.type == "image":
         return "[图片]"
     if seg.type == "face":
-        return "[表情]"
+        name = face_name(seg)
+        return f"[表情：{name}]" if name else "[表情]"
     if seg.type == "at":
         return f"@{seg.data.get('name') or seg.data.get('qq')}"
     if seg.type in ("record", "video"):
         return "[语音]" if seg.type == "record" else "[视频]"
     if seg.type == "mface":
         return f"[表情：{seg.data.get('summary') or '表情'}]".replace("：[", "：").replace("]]", "]")
-    return ""
+    if seg.type == "reply":
+        return ""
+    if seg.type in ("json", "xml", "ark"):
+        kind, title = card_info(seg)
+        if kind:
+            return f"[{kind}：{title}]" if title else f"[{kind}]"
+    if seg.type == "file":
+        fname = _short(seg.data.get("name") or seg.data.get("file") or "", 30)
+        return f"[文件：{fname}]" if fname and not fname.startswith(("http", "base64")) else "[文件]"
+    if seg.type == "dice":
+        n = str(seg.data.get("result") or "").strip()
+        return f"[骰子：{n} 点]" if n.isdigit() else "[骰子]"
+    # 9/30：别的都看不懂（聊天记录、位置……）。以前直接丢掉，她以为对方什么都没发，接着乱猜
+    return f"[{unreadable_kind(seg)}（看不懂）]"
+
+
+def _short(text, n: int) -> str:
+    """卡片标题、文件名这些：去掉换行和格式符号，太长截断"""
+    t = re.sub(r"[\s\[\]【】［］]+", " ", str(text or "")).strip()
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def face_name(seg: MessageSegment) -> str:
+    """QQ 小表情的名字（“/捂脸”→“捂脸”）；消息里没带就返回空"""
+    raw = seg.data.get("raw")
+    text = ""
+    if isinstance(raw, dict):
+        text = raw.get("faceText") or ""
+    elif raw:
+        m = re.search(r"faceText['\"]?\s*[:=]\s*['\"]([^'\"]+)", str(raw))
+        text = m.group(1) if m else ""
+    text = str(text or seg.data.get("faceText") or seg.data.get("text") or "").strip().lstrip("/").strip("[]")
+    return _short(text, 8)
+
+
+def card_info(seg: MessageSegment) -> tuple[str, str]:
+    """卡片消息：名片 → ("名片", 昵称)；分享（视频、音乐、小程序、链接）→ ("分享", "来源「标题」")；认不出 → ("", "")。
+    只取标题，不打开链接"""
+    raw = seg.data.get("data")
+    if seg.type == "xml":
+        m = re.search(r"<title>(.*?)</title>", str(raw), re.S) or re.search(r'brief="([^"]*)"', str(raw))
+        return ("分享", _short(m.group(1), 40)) if m else ("", "")
+    try:
+        j = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        j = None
+    if not isinstance(j, dict):
+        return "", ""
+    meta = j.get("meta") if isinstance(j.get("meta"), dict) else {}
+    inner = next((v for v in meta.values() if isinstance(v, dict)), {})
+    prompt = re.sub(r"^\s*\[[^\]]*\]\s*", "", str(j.get("prompt") or "")).strip()
+    if j.get("view") == "contact" or "contact" in str(j.get("app", "")):
+        nick = inner.get("nickname") or inner.get("name") or ""
+        if not nick and "：" in prompt:
+            nick = prompt.split("：", 1)[1]
+        return "名片", _short(nick, 16)
+    if "detail_1" in meta:                 # 小程序（B 站、QQ 音乐小程序……）：title 是哪个小程序，desc 是内容
+        src, name = inner.get("title", ""), inner.get("desc", "")
+    else:                                  # 普通分享：tag 是来源，title 是标题
+        src, name = inner.get("tag", "") or inner.get("source", ""), inner.get("title", "") or inner.get("desc", "")
+    src, name = _short(src, 12), _short(name or prompt, 40)
+    if not (src or name):
+        return "", ""
+    return "分享", (f"{src}「{name}」" if src and name and src != name else (name or src))
+
+
+_UNREADABLE_KINDS = {"json": "卡片消息", "xml": "卡片消息", "ark": "卡片消息", "markdown": "卡片消息",
+                     "forward": "聊天记录", "node": "聊天记录", "file": "文件", "contact": "名片",
+                     "share": "链接", "music": "音乐分享", "location": "位置", "poke": "戳一戳",
+                     "dice": "骰子", "rps": "猜拳"}
+
+
+def unreadable_kind(seg: MessageSegment) -> str:
+    """她看不懂的消息是什么（只说个大概，不看里面写了什么）"""
+    if seg.type == "json" and re.search(r'"view"\s*:\s*"contact"|com\.tencent\.contact', str(seg.data.get("data", ""))):
+        return "名片"
+    return _UNREADABLE_KINDS.get(seg.type, "消息")
 
 
 def message_to_text(msg: Message, drop_at: bool = False) -> str:
-    """drop_at=True：去掉 @ 段（群聊里 @ 谁单独写在说话人后面，不混进正文）"""
+    """drop_at=True：去掉 @ 段（群聊里 @ 谁单独写在说话人后面，不混进正文）。
+    群消息请用 group_body：只去掉开头、结尾的 @，句子中间的 @ 留在正文里"""
     return "".join(seg_text(seg) for seg in msg if not (drop_at and seg.type == "at")).strip()
 
 
+def edge_at_positions(msg: Message) -> set[int]:
+    """开头、结尾的 @（中间只隔着空格）在第几段：这些 @ 是“在跟谁说”；句子中间的 @ 只是提到这个人"""
+    def blank(seg) -> bool:
+        return seg.type == "text" and not seg.data.get("text", "").strip()
+    idx: set[int] = set()
+    for order in (range(len(msg)), range(len(msg) - 1, -1, -1)):
+        for i in order:
+            if msg[i].type == "at":
+                idx.add(i)
+            elif not blank(msg[i]):
+                break
+    return idx
+
+
+def edge_ats(event: MessageEvent) -> list[MessageSegment]:
+    msg = event.get_message()
+    return [msg[i] for i in sorted(edge_at_positions(msg))]
+
+
+def middle_at_me(event: MessageEvent) -> bool:
+    """句子中间 @ 了她（“这个问问@伊蕾娜 吧”）：算点了她的名。开头结尾的 @ 框架已经认成在跟她说了"""
+    msg = event.get_message()
+    edge = edge_at_positions(msg)
+    return any(seg.type == "at" and str(seg.data.get("qq")) == str(event.self_id) and i not in edge
+               for i, seg in enumerate(msg))
+
+
+def group_body(event: MessageEvent) -> Message:
+    """群消息的正文：开头、结尾的 @ 去掉（写在说话人后面的“→”里），句子中间的 @ 换成“@名字”留在原处。
+    9/30：以前所有 @ 都去掉、名字挪到“→”后面，“我觉得@小明 说得对”变成“【某某 → 小明】我觉得 说得对”"""
+    msg = event.get_message()
+    if not isinstance(event, GroupMessageEvent):
+        return msg
+    edge = edge_at_positions(msg)
+    out = Message()
+    for i, seg in enumerate(msg):
+        if seg.type != "at":
+            out.append(seg)
+            continue
+        if i in edge:
+            continue
+        qq = str(seg.data.get("qq"))
+        if qq == str(event.self_id):
+            name = (list(cfg.smart_names) or ["伊蕾娜"])[0]
+        elif qq == "all":
+            name = "全体成员"
+        else:
+            name = _display_name(name_label(event.group_id, qq, seg.data.get("name") or qq))
+        out.append(MessageSegment.text(f"@{name}"))
+    return out
+
+
 _BOT_SEGMENTS = {"markdown", "json", "xml", "ark", "keyboard", "button"}
+_BOT_SEGMENTS_PRIVATE = {"markdown", "keyboard", "button"}   # 私聊里好友转来的卡片、名片是人发的，不算机器人
 
 
-def is_bot_like(event: MessageEvent) -> bool:
-    """别的机器人发的（Markdown、卡片消息），或者在忽略名单里的人：完全不理"""
+def is_bot_like(event: MessageEvent, allow_cards: bool = False) -> bool:
+    """别的机器人发的（Markdown、卡片消息），或者在忽略名单里的人：完全不理。
+    私聊里的卡片 / 名片是好友转的：照常回（只看得到标题），9/30 起；allow_cards：群旁听里也收下卡片（只显示标题）"""
     if event.user_id in cfg.ignore_users:
         return True
-    return any(seg.type in _BOT_SEGMENTS for seg in event.get_message())
+    kinds = _BOT_SEGMENTS_PRIVATE if allow_cards or isinstance(event, PrivateMessageEvent) else _BOT_SEGMENTS
+    return any(seg.type in kinds for seg in event.get_message())
 
 
 def talking_to_others(event: MessageEvent) -> str | None:
@@ -486,7 +619,7 @@ def talking_to_others(event: MessageEvent) -> str | None:
     if not isinstance(event, GroupMessageEvent):
         return None
     self_id = str(event.self_id)
-    at_others = [seg for seg in event.get_message()
+    at_others = [seg for seg in edge_ats(event)         # 句子中间 @ 别人只是提到他，不算在跟他说
                  if seg.type == "at" and str(seg.data.get("qq")) not in (self_id, "all")]
     if at_others:
         return str(at_others[0].data.get("name") or at_others[0].data.get("qq"))
@@ -603,7 +736,7 @@ def speaker_head(event: MessageEvent, you: str = "你") -> str:
     targets = []
     if event.is_tome():
         targets.append(you)
-    for seg in event.get_message():
+    for seg in edge_ats(event):           # 只有开头、结尾的 @ 算“在跟谁说”；中间的 @ 留在正文里（group_body）
         if seg.type == "at":
             qq = str(seg.data.get("qq"))
             if qq == self_id:
@@ -630,6 +763,31 @@ def gap_line(prev_ts: float | None, ts: float) -> str:
     return ""
 
 
+# 叫她的只是一句“对吧，伊蕾娜小姐”“你说呢”：真正的话在同一个人紧挨着的上一两条里（9/30 13:07：
+# “昨天卖惨的那个人被狠狠讨厌了”“对吧伊蕾娜小姐”，她只看到后一句，回了句不相干的）
+_TAG_ONLY_RE = re.compile(r"(?:那|所以|是)?(?:对吧|是吧|对不对|对不|对吗|是不是|没错吧|是这样吧|你说呢|你说是不是|你觉得呢|你怎么看|你看呢)"
+                          r"[？?！!。.~…啊呀嘛呢]*")
+_HEAD_ONLY_RE = re.compile(r"^【[^】→]*】")      # 没指定对象的说话人前缀（有“→”的是在跟别人说，不算）
+
+
+def pull_own_lead(buf: list, uid: int, text: str, now: float, window: float = 60.0) -> tuple[list[str], list]:
+    """这条只是“对吧 / 你说呢”这种，就把同一个人紧挨着的前几条（旁听里、没对别人说、60 秒内）拿出来当成这条的前文。
+    返回（前文正文列表, 剩下的旁听）"""
+    core = re.sub(r"[\s，,、]", "", _strip_her_names(text))
+    if not core or not _TAG_ONLY_RE.fullmatch(core):
+        return [], buf
+    lead = []
+    i = len(buf)
+    while i > 0:
+        u, _, line, ts = buf[i - 1]
+        m = _HEAD_ONLY_RE.match(line)
+        if u != uid or now - ts > window or not m:
+            break
+        lead.insert(0, line[m.end():])
+        i -= 1
+    return lead, buf[:i]
+
+
 def watch_block(items: list[tuple[float, str]]) -> str:
     """旁听记录：每条（时间, 已经带说话人的一行），隔得久的中间标出来"""
     out, prev = [], None
@@ -642,12 +800,41 @@ def watch_block(items: list[tuple[float, str]]) -> str:
     return "（群聊旁听记录）\n" + "\n".join(out)
 
 
+QUOTE_MAX_CHARS = 30
+
+
+def quote_note(event: MessageEvent) -> str:
+    """对方回复（引用）了哪句话：“（回复你说的“……”）”，截成 30 字。9/30 以前她看不到引用的原话，
+    “我说这个”“对啊”这种不知道在接哪句。引用里有图，另外会看图（rich_text 里）"""
+    reply = getattr(event, "reply", None)
+    if reply is None or not getattr(reply, "message", None):
+        return ""
+    quoted = re.sub(r"\s+", " ", message_to_text(reply.message)).strip()
+    if not quoted:
+        return ""
+    if len(quoted) > QUOTE_MAX_CHARS:
+        quoted = quoted[:QUOTE_MAX_CHARS] + "…"
+    quoted = clean_body(quoted)
+    who = str(getattr(reply.sender, "user_id", ""))
+    if who == str(event.self_id):
+        return f"（回复你说的“{quoted}”）"
+    if who == str(event.user_id):
+        return f"（回复自己之前说的“{quoted}”）"
+    return f"（回复的是“{quoted}”）"      # 群里回复别人：是谁已经写在开头的“→ 某某（回复）”里
+
+
 async def rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> str:
     """和 message_to_text 一样，但会“看”图片，把 [图片] 换成 [图片：描述]；引用的消息里有图也会看。
-    drop_at=True：去掉 @ 段（群聊里 @ 谁写在说话人后面）"""
+    对方回复（引用）了某句话时，前面注一句回复的是哪句。drop_at=True：去掉 @ 段（群聊里 @ 谁写在说话人后面）"""
+    text = await _rich_text(event, look, drop_at)
+    note = quote_note(event)
+    return f"{note}{text}" if note else text
+
+
+async def _rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> str:
     msg = event.get_message()
     if drop_at:
-        msg = Message([seg for seg in msg if seg.type != "at"])
+        msg = group_body(event) if isinstance(event, GroupMessageEvent) else Message([seg for seg in msg if seg.type != "at"])
     if not cfg.vision_enabled:
         return message_to_text(msg)
     if not look:
@@ -860,7 +1047,7 @@ def sticker_hint(emotions: list[str], only_ok: bool) -> str:
 # 模型模仿别人消息的格式，写出「[图片：表情]」「[表情]」「[动画表情]」之类：这些发出去就是一串文字，要去掉。
 # 看得出情绪的（比如「[图片：嫌弃的表情]」）当成想甩表情；看不出的直接删掉
 _FAKE_MEDIA_RE = re.compile(
-    r"[\[【［]\s*(图片|动画表情|表情包|表情|小画像|画像|语音|视频|图)\s*(?:[:：]\s*([^\]】］]{0,40}))?\s*[\]】］]")
+    r"[\[【［]\s*(图片|动画表情|表情包|表情|小画像|画像|语音|视频|图|卡片消息|名片|聊天记录|文件|链接|分享|骰子)\s*(?:[:：]\s*([^\]】］]{0,40}))?\s*(?:（看不懂）)?\s*[\]】］]")
 
 
 def split_sticker(reply: str) -> tuple[str, str | None]:
@@ -873,7 +1060,7 @@ def split_sticker(reply: str) -> tuple[str, str | None]:
         logger.info(f"回复里写了图片/表情的占位符，已去掉：{fakes}")
         if not found:
             for kind, inner in reversed(fakes):
-                if kind in ("语音", "视频") or not inner:
+                if kind in ("语音", "视频", "卡片消息", "名片", "聊天记录", "文件", "链接", "分享", "骰子") or not inner:
                     continue
                 e = next((w for w in re.split(r"[、，,的\s]+", inner) if w and sticker_normalize(w)), None)
                 if e:
@@ -1715,9 +1902,10 @@ passive = on_message(rule=Rule(_is_group_not_to_me) & allowed, priority=99, bloc
 @passive.handle()
 async def _(bot: Bot, event: GroupMessageEvent):
     text = message_to_text(event.get_message())
-    if not text or text.startswith(tuple(bot.config.command_start or {"/"})) or is_bot_like(event):
+    # 群友转的卡片（B 站视频、链接、名片）也进旁听，只显示标题，不会因为它开口；Markdown、按钮这些机器人消息照旧不要
+    if not text or text.startswith(tuple(bot.config.command_start or {"/"})) or is_bot_like(event, allow_cards=True):
         return
-    body = message_to_text(event.get_message(), drop_at=True) or "（只@了一下）"
+    body = quote_note(event) + (message_to_text(group_body(event)) or "（只@了一下）")
     line = speaker_head(event) + clean_body(clip_input(body))
     if cfg.passive_buffer > 0:
         _passive[event.group_id].append((event.user_id, sender_label(event), line, time.time()))
@@ -1825,6 +2013,7 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
     names = [n for n in list(cfg.smart_names) + list(bot.config.nickname or []) if n]
     plain = event.get_plaintext()          # 只看文字：@别人的名字、回复的原文都不算
     mentioned = any(n.lower() in plain.lower() for n in names)   # 不区分大小写：ELAINA 也算
+    mentioned = mentioned or middle_at_me(event)                   # 句子中间 @ 了她也算点了她的名
     # @ 了别人、或者回复的是别人的消息：在跟那个人说话，她不接（除非文字里点了她的名）
     other = talking_to_others(event)
     if other and not mentioned:
@@ -1852,7 +2041,7 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
         return False
     if not (mentioned or continuing):
         return False                     # 大部分群消息在这里就结束了，不花 token
-    line = speaker_head(event, you="伊蕾娜") + clean_body(message_to_text(event.get_message(), drop_at=True))
+    line = speaker_head(event, you="伊蕾娜") + clean_body(message_to_text(group_body(event)))
     if asleep():
         _sleep_wrapup(f"group_{gid}", event.user_id)     # 刚到休息时间、正在跟她聊的人接着说：先收个尾
     if cfg.smart_judge and quota_left(gid, event.user_id) <= 0 and not in_wrapup(f"group_{gid}", event.user_id):
@@ -1954,6 +2143,24 @@ def sticker_follows_reply(ik: tuple[str, int]) -> bool:
     started, done = _reply_started.get(ik, -1e9), _reply_done.get(ik, -1e9)
     replying = started > done and now - started < 120
     return replying or now - done <= cfg.sticker_follow_seconds
+
+
+async def wait_own_reply(ik: tuple[str, int], token: int) -> int | None:
+    """她还在回这个人上一轮（在想、或者分几条还没发完）：等她发完，再等一小会儿，把这期间对方发的几条合在一起回。
+    9/30 私聊：她第一条刚发出去，对方就接着回了两句，结果这两句被拆成两轮、各自在她没发完的时候就开始想，
+    看到的“她说过的话”里有还没发出去的那条，前言不搭后语。期间对方又发了新消息，返回 None（交给最新那条）"""
+    t0 = time.monotonic()
+    waited = False
+    while _reply_started.get(ik, -1e9) > _reply_done.get(ik, -1e9) and time.monotonic() - t0 < 120:
+        waited = True
+        await asyncio.sleep(0.5)
+        if _inbox_token.get(ik) != token:
+            return None
+    if waited:
+        await asyncio.sleep(cfg.merge_wait_complete)     # 她刚发完，对方可能正在回最后那条
+        if _inbox_token.get(ik) != token:
+            return None
+    return token
 
 # ---- 话说完了没有：决定等多久
 _UNFINISHED_TAIL = ("，", ",", "、", "：", ":", "…", "...", "；", ";", "（", "(", "“", "—")
@@ -2071,6 +2278,9 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
     if catchup_age is None:
         names = list(cfg.smart_names) + list(getattr(bot.config, "nickname", None) or [])
         token = await wait_for_more(ik, text, names, event if look_later else None)
+        if token is None:
+            return
+        token = await wait_own_reply(ik, token)
         if token is None:
             return
         if isinstance(event, PrivateMessageEvent) and len(_inbox.get(ik, [])) == 1 \
@@ -2215,8 +2425,13 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         new_entries: list[dict] = []
 
         name = sender_label(event)
+        buf: list = []
         if is_group and _passive.get(event.group_id):
             buf = list(_passive.pop(event.group_id))
+            lead, buf = pull_own_lead(buf, event.user_id, text, time.time())
+            if lead:                          # “对吧伊蕾娜小姐”：把他前面那句一起当成对她说的
+                text = "\n".join(lead + [text])
+        if buf:
             new_entries.append({
                 "role": "user",
                 "content": watch_block([(ts, ln) for _, _, ln, ts in buf]),

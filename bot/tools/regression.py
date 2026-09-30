@@ -2,7 +2,7 @@
 
 用法：双击 bot\\回归测试.bat（或 .venv\\Scripts\\python tools\\regression.py）
 - 题目：tools\\regression_cases.json（加题直接往里写，格式见文件开头的“说明”）
-- 改前：docs\\人设打磨备份\\elaina.<BEFORE>.md.bak、__init__.<BEFORE>.py.bak（默认 BEFORE=0929f：9/29 21:53 那次回归的“改后”，即加了“这个词是你先说的”提示、删了“喜好别硬扯”的版本）
+- 改前：docs\\人设打磨备份\\elaina.<BEFORE>.md.bak、__init__.<BEFORE>.py.bak（默认 BEFORE=0930a：9/30 18:20 改“旁听里的问题默认是问别人的”、“对吧伊蕾娜小姐”带上前一句之前的版本）
   换一个改前版本：.venv\\Scripts\\python tools\\regression.py 0929b
 - 改后：bot\\personas\\elaina.md、bot\\plugins\\roleplay_chat\\__init__.py
 - 不启动机器人、不连 QQ、不读写记忆，只调 DeepSeek（59 题 × 2 版 × 3 次 ≈ 350 次，五毛钱左右）
@@ -44,7 +44,7 @@ echocheck = _load_module("echocheck", BOT / "plugins" / "roleplay_chat" / "echoc
 SAMPLES = 3          # 每题每版默认问几次；题目里写了 "samples" 的按它（比如 N08 问 10 次）
 ARG = sys.argv[1] if len(sys.argv) > 1 else ""
 RESCORE = ARG.endswith(".json")                      # 传一个旧结果文件：不调模型，只按现在的判定标准重新数一遍
-BEFORE = ARG if ARG and not RESCORE else "0929f"
+BEFORE = ARG if ARG and not RESCORE else "0930a"
 CASES_FILE = Path(__file__).resolve().parent / "regression_cases.json"
 NAMES = ("CHAT_RULES", "FAMILIARITY_HINT", "SHORT_VARIANTS", "LENGTH_HINT", "RECALL_RULES", "LATE_HINT",
          "WINDDOWN_SLEEP_HINT", "WINDDOWN_TIRED_HINT", "WRAPUP_HINT", "WRAPUP_SLEEP_HINT")

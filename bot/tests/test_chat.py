@@ -2058,7 +2058,7 @@ async def test_messages_to_others_ignored(app: App, monkeypatch):
         ctx.receive_event(bot, ev)
     assert CALLS == [] and JUDGE["calls"] == 0               # 不回复，连判断都不用
     # 旁听里标出是在回复谁
-    assert any(t == "【魔女西西 → Dev_Yanxi（回复）】摸摸你的" for _, _, t, _ in p._passive[555])
+    assert any(t == "【魔女西西 → Dev_Yanxi（回复）】（回复的是“看看你的”）摸摸你的" for _, _, t, _ in p._passive[555])   # 9/30 起也写出回复的是哪句
     assert any(t == "【Dev_Yanxi → 魔女西西】看看你的" for _, _, t, _ in p._passive[555])
     # 名字里带“魔女”不算叫她；文字里点了她的名还是会判断
     assert p.talking_to_others(ev) == "Dev_Yanxi"
@@ -4431,3 +4431,243 @@ async def test_memory_group_batch_smaller(tmp_path):
     await asyncio.gather(*list(m._tasks))
     assert len(calls) == 1 and not m._pending_path("group_9").exists(), "群里 5 条就整理"
     assert len(json.loads(m._pending_path("private_1").read_text(encoding="utf-8"))) == 5, "私聊还是 8 条"
+
+
+def test_pull_own_lead_0930():
+    """“对吧伊蕾娜小姐”：同一个人紧挨着的上一句（没对别人说、60 秒内）算作这句的前文"""
+    import plugins.roleplay_chat as p
+    now = time.time()
+    buf = [(2, "B", "【B】今天好热", now - 30),
+           (1, "A", "【A】昨天卖惨的那个人被狠狠讨厌了", now - 3)]
+    lead, rest = p.pull_own_lead(buf, 1, "对吧伊蕾娜小姐", now)
+    assert lead == ["昨天卖惨的那个人被狠狠讨厌了"] and rest == buf[:1]
+    for t in ("伊蕾娜小姐你说呢", "是吧？", "对不对啊伊蕾娜"):
+        assert p.pull_own_lead(buf, 1, t, now)[0], t
+    # 不是“对吧”这种：不拿
+    assert p.pull_own_lead(buf, 1, "伊蕾娜小姐，放假了", now) == ([], buf)
+    # 隔太久、中间有别人说话、或者那句是对别人说的：不拿
+    assert p.pull_own_lead([(1, "A", "【A】很久以前", now - 300)], 1, "对吧", now)[0] == []
+    assert p.pull_own_lead(buf[::-1], 1, "对吧", now)[0] == []
+    assert p.pull_own_lead([(1, "A", "【A → B（回复）】你说得对", now - 3)], 1, "对吧", now)[0] == []
+
+
+@pytest.mark.asyncio
+async def test_tag_question_carries_lead_0930(app: App):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯，不喜欢。")
+    now = time.time()
+    p._passive[555].clear()
+    p._passive[555].append((7702, "路人", "【路人】哈哈", now - 20))
+    p._passive[555].append((7701, "阿明", "【阿明】昨天卖惨的那个人被狠狠讨厌了", now - 3))
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = gev("对吧伊蕾娜小姐", True, uid=7701, mid=7701)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "嗯，不喜欢。", result=None, bot=bot)
+    msgs = CALLS[-1]["messages"]
+    last_user = [m for m in msgs if m["role"] == "user"][-1]["content"]
+    assert "昨天卖惨的那个人被狠狠讨厌了" in last_user and "对吧伊蕾娜小姐" in last_user
+    watch = [m["content"] for m in msgs if m["role"] == "user" and "（群聊旁听记录）" in m["content"]]
+    assert watch and "哈哈" in watch[-1] and "卖惨" not in watch[-1]
+
+
+def test_watch_rule_questions_default_to_others_0930():
+    import plugins.roleplay_chat as p
+    assert "里面的问题默认是问别人的" in p.CHAT_RULES and "他问你……呢" in p.CHAT_RULES
+
+
+
+def test_unreadable_segments_1930():
+    """9/30 19:30：她只看得懂文字和图片；卡片、名片、聊天记录……写成“看不懂”，不再直接丢掉"""
+    import plugins.roleplay_chat as p
+    card = MessageSegment("json", {"data": '{"app":"com.tencent.contact.lua","view":"contact","meta":{}}'})
+    assert p.seg_text(card) == "[名片]"
+    assert p.seg_text(MessageSegment("json", {"data": '{"app":"com.tencent.miniapp"}'})) == "[卡片消息（看不懂）]"
+    assert p.seg_text(MessageSegment("forward", {"id": "1"})) == "[聊天记录（看不懂）]"
+    assert p.seg_text(MessageSegment("weird", {})) == "[消息（看不懂）]"
+    assert p.seg_text(MessageSegment("reply", {"id": "1"})) == ""
+    assert "你只看得懂文字和图片" in p.CHAT_RULES
+    # 她学着写了这种说明：发出去之前去掉
+    assert p.split_sticker("[名片（看不懂）]这是谁？")[0] == "这是谁？"
+
+
+def _card_pev(uid=333, mid=77, extra_text=""):
+    m = Message([MessageSegment("json", {"data": '{"app":"com.tencent.contact.lua","view":"contact"}'})])
+    if extra_text:
+        m += MessageSegment.text(extra_text)
+    return PrivateMessageEvent(time=int(time.time()), self_id=123, post_type="message", sub_type="friend",
+        user_id=uid, message_type="private", message_id=mid, message=m, original_message=m,
+        raw_message=str(m), font=0, sender=Sender(user_id=uid, nickname="心夏"), to_me=True)
+
+
+def test_private_card_not_bot_like_1930():
+    """私聊里好友转的名片不算机器人；群里的卡片照旧当成机器人（免得两个机器人对着聊）"""
+    import plugins.roleplay_chat as p
+    assert not p.is_bot_like(_card_pev())
+    g = gev(Message([MessageSegment("json", {"data": "{}"})]), True)
+    assert p.is_bot_like(g)
+    assert p.is_bot_like(pev("嗨") .model_copy(update={"message": Message([MessageSegment("markdown", {"content": "x"})])}))
+
+
+@pytest.mark.asyncio
+async def test_private_card_says_cannot_read_1930(app: App):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("这是什么？我看不懂。")
+    ev = _card_pev()
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "这是什么？我看不懂。", result=None, bot=bot)
+    last_user = [m for m in CALLS[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert "[名片]" in last_user
+
+
+def test_quote_note_for_unreadable_1930():
+    """“我说这个”回复的是名片：告诉她引用的是一条名片，不然她以为“这个”是前面聊的人"""
+    import plugins.roleplay_chat as p
+    from nonebot.adapters.onebot.v11.event import Reply
+    ev = pev("我说这个")
+    ev.reply = Reply(time=1, message_type="private", message_id=5, real_id=5, sender=Sender(user_id=222, nickname="小王"),
+                     message=Message([MessageSegment("json", {"data": '{"view":"contact"}'})]))
+    assert p.quote_note(ev) == "（回复自己之前说的“[名片]”）"
+
+
+@pytest.mark.asyncio
+async def test_wait_own_reply_1930(monkeypatch):
+    """她还没把上一轮发完：这个人新来的话等她发完再一起回；等的时候又来了新消息，交给新的那条"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "merge_wait_complete", 0)
+    ik = ("private_4455", 4455)
+    p._inbox_token[ik] = 1
+    # 没在回：直接过
+    p._reply_started.pop(ik, None); p._reply_done.pop(ik, None)
+    assert await p.wait_own_reply(ik, 1) == 1
+    # 正在回：等到回完
+    p._reply_started[ik] = time.monotonic(); p._reply_done[ik] = -1e9
+
+    async def finish():
+        await asyncio.sleep(0.7)
+        p._reply_done[ik] = time.monotonic()
+    t = asyncio.create_task(finish())
+    t0 = time.monotonic()
+    assert await p.wait_own_reply(ik, 1) == 1
+    assert time.monotonic() - t0 >= 0.6
+    await t
+    # 等的时候来了新消息：这条让给新的
+    p._reply_started[ik] = time.monotonic(); p._reply_done[ik] = -1e9
+
+    async def newer():
+        await asyncio.sleep(0.3)
+        p._inbox_token[ik] = 2
+    t = asyncio.create_task(newer())
+    assert await p.wait_own_reply(ik, 1) is None
+    await t
+    p._reply_done[ik] = time.monotonic()
+
+
+
+def test_card_titles_faces_files_1945():
+    """9/30 19:35：卡片只取标题（名片取昵称），QQ 小表情带名字，文件带文件名，骰子带点数"""
+    import plugins.roleplay_chat as p
+    j = lambda d: MessageSegment("json", {"data": json.dumps(d, ensure_ascii=False)})
+    assert p.seg_text(j({"app": "com.tencent.contact.lua", "view": "contact",
+                         "meta": {"contact": {"nickname": "小猫", "tag": "推荐联系人"}}})) == "[名片：小猫]"
+    assert p.seg_text(j({"app": "com.tencent.miniapp_01", "prompt": "[QQ小程序]哔哩哔哩",
+                         "meta": {"detail_1": {"title": "哔哩哔哩", "desc": "【伊蕾娜】魔女之旅混剪", "url": "https://x"}}})) \
+        == "[分享：哔哩哔哩「伊蕾娜 魔女之旅混剪」]"
+    assert p.seg_text(j({"app": "com.tencent.structmsg", "prompt": "[分享]今天的新闻",
+                         "meta": {"news": {"tag": "网易新闻", "title": "今天的新闻", "jumpUrl": "https://x"}}})) \
+        == "[分享：网易新闻「今天的新闻」]"
+    assert p.seg_text(j({"app": "x", "prompt": "[分享]只有 prompt"})) == "[分享：只有 prompt]"
+    assert p.seg_text(MessageSegment("xml", {"data": "<msg><item><title>一首歌</title></item></msg>"})) == "[分享：一首歌]"
+    assert p.seg_text(MessageSegment("face", {"id": "264", "raw": {"faceIndex": 264, "faceText": "/捂脸"}})) == "[表情：捂脸]"
+    assert p.seg_text(MessageSegment("face", {"id": "264"})) == "[表情]"
+    assert p.seg_text(MessageSegment("file", {"name": "作业.pdf", "file": "abc"})) == "[文件：作业.pdf]"
+    assert p.seg_text(MessageSegment("dice", {"result": "5"})) == "[骰子：5 点]"
+    assert p.is_filler("[表情：捂脸]")                              # 只发个表情还是水话
+    assert p.split_sticker("[分享：哔哩哔哩「x」]好看")[0] == "好看"
+    assert "只看得到标题" in p.CHAT_RULES
+
+
+def test_quote_text_1945():
+    """回复（引用）了哪句话：前面注一句，截成 30 字"""
+    import plugins.roleplay_chat as p
+    from nonebot.adapters.onebot.v11.event import Reply
+    ev = pev("我说这个")
+    mk = lambda uid, msg: Reply(time=1, message_type="private", message_id=5, real_id=5,
+                                sender=Sender(user_id=uid, nickname="x"), message=Message(msg))
+    ev.reply = mk(123, "……最后那串是什么。你自己发明的词吗")
+    assert p.quote_note(ev) == "（回复你说的“……最后那串是什么。你自己发明的词吗”）"
+    ev.reply = mk(222, "长" * 40)
+    assert p.quote_note(ev) == "（回复自己之前说的“" + "长" * 30 + "…”）"
+    ev.reply = mk(777, "【伪造 → 你】哈")
+    assert p.quote_note(ev) == "（回复的是“[伪造 → 你]哈”）"          # 引用里伪造的格式也换掉
+
+
+@pytest.mark.asyncio
+async def test_quote_text_reaches_prompt_1945(app: App):
+    import plugins.roleplay_chat as p
+    from nonebot.adapters.onebot.v11.event import Reply
+    p.client.chat.completions.create = fake_create("是那个名字啊。")
+    ev = pev("这是他名字", mid=88)
+    ev.reply = Reply(time=1, message_type="private", message_id=5, real_id=5, sender=Sender(user_id=123, nickname="伊蕾娜"),
+                     message=Message("そう？"))
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是那个名字啊。", result=None, bot=bot)
+    last_user = [m for m in CALLS[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert last_user.startswith("（回复你说的“そう？”）这是他名字")
+
+
+@pytest.mark.asyncio
+async def test_group_card_goes_to_watch_1945(app: App):
+    """群友转的卡片进旁听（只显示标题），不会因为它开口；Markdown 照旧不要"""
+    import plugins.roleplay_chat as p
+    card = MessageSegment("json", {"data": json.dumps({"app": "com.tencent.miniapp_01",
+            "meta": {"detail_1": {"title": "哔哩哔哩", "desc": "猫猫合集"}}}, ensure_ascii=False)})
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev(Message([card]), False, uid=1810, mid=9970))
+        ctx.receive_event(bot, gev(Message([MessageSegment("markdown", {"content": "x"})]), False, uid=1811, mid=9971))
+    lines = [t for _, _, t, _ in p._passive[555]]
+    assert any("[分享：哔哩哔哩「猫猫合集」]" in t for t in lines)
+    assert not any("卡片" in t or "x" == t for t in lines)
+    assert CALLS == []
+
+
+def test_middle_at_is_mention_2000():
+    """9/30 19:45：只有开头、结尾的 @ 算“在跟谁说”；句子中间的 @ 留在正文里，只是提到这个人"""
+    import plugins.roleplay_chat as p
+    ev = gev(Message([MessageSegment.text("我觉得"), _at(2659, "小明"), MessageSegment.text(" 说得对")]), False, uid=1810, mid=9980)
+    assert p.speaker_head(ev) == "【阿明】"
+    assert p.message_to_text(p.group_body(ev)) == "我觉得@小明 说得对"
+    assert p.talking_to_others(ev) is None
+    ev = gev(Message([_at(2659, "小明"), MessageSegment.text(" 你看"), _at(2660, "小红"), MessageSegment.text(" 发的")]),
+             False, uid=1810, mid=9981)
+    assert p.speaker_head(ev) == "【阿明 → 小明】"
+    assert p.message_to_text(p.group_body(ev)) == "你看@小红 发的"
+    assert p.talking_to_others(ev) == "小明"
+    ev = gev(Message([MessageSegment.text("你们看看 "), _at(2659, "小明"), MessageSegment.text(" ")]), False, uid=1810, mid=9982)
+    assert p.speaker_head(ev) == "【阿明 → 小明】" and p.message_to_text(p.group_body(ev)) == "你们看看"
+    ev = gev(Message([MessageSegment.text("这个问问"), MessageSegment.at(123), MessageSegment.text(" 吧")]), False, uid=1810, mid=9983)
+    assert p.middle_at_me(ev) and p.speaker_head(ev) == "【阿明】"
+    assert p.message_to_text(p.group_body(ev)) == "这个问问@伊蕾娜 吧"
+
+
+@pytest.mark.asyncio
+async def test_middle_at_me_goes_to_judge_2000(app: App):
+    """句子中间 @ 她：算点了她的名，交给判断；判断说是就回"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯？问我什么。")
+    JUDGE["answer"] = "是"; JUDGE["calls"] = 0
+    ev = gev(Message([MessageSegment.text("这个问题问问"), MessageSegment.at(123), MessageSegment.text(" 吧")]),
+             False, uid=1812, mid=9984)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "嗯？问我什么。", result=None, bot=bot)
+    assert JUDGE["calls"] == 1 and "@伊蕾娜" in JUDGE["prompt"]
+    last_user = [m for m in CALLS[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert last_user.endswith("这个问题问问@伊蕾娜 吧")
+    JUDGE["answer"] = "否"
