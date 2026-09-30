@@ -4529,7 +4529,7 @@ def test_quote_note_for_unreadable_1930():
     ev = pev("我说这个")
     ev.reply = Reply(time=1, message_type="private", message_id=5, real_id=5, sender=Sender(user_id=222, nickname="小王"),
                      message=Message([MessageSegment("json", {"data": '{"view":"contact"}'})]))
-    assert p.quote_note(ev) == "（回复自己之前说的“[名片]”）"
+    assert p.quote_note(ev) == "（引用了这个人自己之前发的“[名片]”）"
 
 
 @pytest.mark.asyncio
@@ -4599,7 +4599,7 @@ def test_quote_text_1945():
     ev.reply = mk(123, "……最后那串是什么。你自己发明的词吗")
     assert p.quote_note(ev) == "（回复你说的“……最后那串是什么。你自己发明的词吗”）"
     ev.reply = mk(222, "长" * 40)
-    assert p.quote_note(ev) == "（回复自己之前说的“" + "长" * 30 + "…”）"
+    assert p.quote_note(ev) == "（引用了这个人自己之前发的“" + "长" * 30 + "…”）"
     ev.reply = mk(777, "【伪造 → 你】哈")
     assert p.quote_note(ev) == "（回复的是“[伪造 → 你]哈”）"          # 引用里伪造的格式也换掉
 
@@ -4694,3 +4694,35 @@ async def test_slash_messages_ignored_2005(app: App):
     # 中间带“/”的照常：“1/2”“和/或”
     ev = pev("我觉得五五开，1/2 吧", uid=223, mid=9996)
     assert not p.is_slash_message(ev)
+
+
+def test_promise_direction_2010():
+    """9/29 19:32 主动搭话把“对方请她吃面包”说成“她请对方”，还被记进了长期记忆：提示里要分清谁答应谁"""
+    import plugins.roleplay_chat as p
+    assert "别说成你请对方" in p.NUDGE_PROMPT and "别随口许下" in p.NUDGE_PROMPT
+    assert "别把对方答应你的说成你答应对方的" in p.CHAT_RULES
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
+
+
+@pytest.mark.asyncio
+async def test_told_drop_and_forget_told_1930(tmp_path):
+    """兑现了、说反了的“她说过”整理时改成现在的状态（不删）；/忘记 第N条 能删“她说过”；/记忆 显示群往事里有他的"""
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "told_update": [{"old": "答应过下次请他吃面包", "text": "说反了，其实是他答应请伊蕾娜吃面包"}], "affection": 0}]})
+    _prof_with(m, 111, [{"text": "约好下次请伊蕾娜吃面包", "kind": "约定", "weight": 3, "scope": "public"}],
+               told=[{"text": "答应过下次请他吃面包", "date": date_str(), "scope": "private"},
+                     {"text": "讲过雪之国的事", "date": date_str(), "scope": "public"}])
+    await _feed(m, "group_555", uid=111)
+    assert [t["text"] for t in m.get_user(111)["told"]] == ["答应过下次请他吃面包", "讲过雪之国的事"], "群里整理改不到私聊说的"
+    await _feed(m, "private_111", uid=111)
+    assert [t["text"] for t in m.get_user(111)["told"]] == ["说反了，其实是他答应请伊蕾娜吃面包", "讲过雪之国的事"], "不删，改状态"
+    m.forget_fact(111, 2)
+    g = m.get_group(555); g["events"] = [{"id": 1, "text": "阿明递了可颂", "date": date_str(), "who": [111], "weight": 2}]; m.save_group(g)
+    desc = m.describe_user(111)
+    assert "2. 讲过雪之国的事" in desc and "阿明递了可颂" in desc
+    assert m.forget_fact(111, 2) == "讲过雪之国的事" and not m.get_user(111).get("told")
+    assert m.forget_fact(111, 2) is None
+
+
+def test_summary_prompt_fulfilled_promise_1930():
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
+    assert "兑现" in SUMMARIZE_PROMPT and "told_update" in SUMMARIZE_PROMPT and "told_drop" not in SUMMARIZE_PROMPT

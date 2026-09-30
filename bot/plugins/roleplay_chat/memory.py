@@ -207,6 +207,13 @@ def scope_ok(scope: str, place: str, gid: int | None) -> bool:
     return scope in ("qzone", "public") or scope == f"group:{gid}"
 
 
+def _place_of(scope: str) -> tuple[str, int | None]:
+    """整理的这批聊天在哪儿（scope_of 的结果）→ scope_ok 要的 (place, gid)"""
+    if str(scope).startswith("group:"):
+        return "group", _int(str(scope).split(":", 1)[1])
+    return ("qzone", None) if scope == "qzone" else ("private", None)
+
+
 _WRAP_QUOTES = (("“", "”"), ('"', '"'), ("'", "'"), ("「", "」"))
 
 
@@ -326,11 +333,13 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 二、怎么改（每个人）
 - add：新记下的，每条写 text、kind、weight（计划可加 due）。和已有某条意思一样的不要再加，写进 touch。
 - update：新信息和已有某条对不上、或者有了新进展（“要考试”→“考完了，考得不错”），写那一条的 id 和新的 text（可以顺便改 kind、weight），不要另加一条。
+  约定、计划兑现了、取消了、变了，一定要改：例如“约好请伊蕾娜吃面包”，这段里他已经递了面包 → update 成“兑现过请伊蕾娜吃面包的约定”（kind 改成经历）；她又说还欠一顿，就写成“请伊蕾娜吃过一次面包，她说还欠一顿”。别让已经兑现的旧约定一直挂着。
 - drop：已经不对、或者对方要她忘掉的旧条目 id。不要因为条数多就删，淘汰旧的由程序来做。
 - touch：这段聊天里又聊到了、内容没变的旧条目 id。
 - 已有条目后面没有“词：”的，这次聊到了，顺手用 update 补上 tags。
 - 档案里标着“未分类”的旧条目：这次聊到了的，顺手用 update 补上 kind 和 weight；写成了“被伊蕾娜回……”这种流水账的，改写成关于这个人的话，或者 drop。
 - told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫伊蕾娜宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。每条不超过 25 字，没有就不写，大多数时候都没有。
+- told_update：“她跟他说过”里已经兑现、取消、说反了的，不删，改成现在的状态：old 照抄那条原文，text 写新的（例如“答应过请他吃面包”→“答应请他吃的面包已经请过了”；说反了的写清到底谁请谁）。
 - impression：伊蕾娜对这个人的总体印象，一句话，不超过 40 字，用她的口吻（例如“嘴甜又黏人，老惦记着请我吃面包”）。群里也会用到，所以只写性格和相处方式，不写私事（倾诉过的烦恼、情绪、告白）。还没有印象、或者印象变了才写；没变就不写这一项。
 - 条目、told 里提到伊蕾娜时写“伊蕾娜”，别用“她”“我”代替（对方是女生时会分不清谁请谁）。
 - 印象和记忆条目里，别把伊蕾娜自己的喜好（面包、钱、讨厌蘑菇这些）写成对方的特点，除非对方自己反复提起；写了她每次看到都会想扯到面包上。
@@ -380,7 +389,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 {"people": [{"qq": 123456,
    "add": [{"text": "……", "kind": "喜好", "weight": 2, "tags": ["……", "……"]}],
    "update": [{"id": 3, "text": "……"}], "drop": [5], "touch": [7],
-   "told": ["……"], "impression": "……",
+   "told": ["……"], "told_update": [{"old": "……", "text": "……"}], "impression": "……",
    "affection": 2, "affection_kind": "正常", "reason": "……", "gender_guess": "不确定", "gender_evidence": "", "gender_evidence_kind": ""}],
  "group_events": {"add": [{"text": "……", "who": [123456]}], "drop": []},
  "today_moments": [{"qq": 123456, "event": "……", "mood": "……", "keywords": ["……"]}]}"""
@@ -454,6 +463,10 @@ class LongTermMemory:
 
     def _group_path(self, gid: int) -> Path:
         return self.root / "groups" / f"{gid}.json"
+
+    def _group_ids(self) -> list[int]:
+        d = self.root / "groups"
+        return sorted(g for g in (_int(p.stem) for p in d.glob("*.json")) if g is not None) if d.is_dir() else []
 
     def _pending_path(self, key: str) -> Path:
         return self.root / "pending" / f"{key}.json"
@@ -531,9 +544,14 @@ class LongTermMemory:
         """删掉第 n 条（按 /记忆 里显示的序号）；返回删掉的内容"""
         prof = self.get_user(qq)
         facts = prof.get("facts") or []
-        if not 1 <= n <= len(facts):
+        told = prof.get("told") or []
+        if 1 <= n <= len(facts):
+            gone = facts.pop(n - 1)
+        elif len(facts) < n <= len(facts) + len(told):   # “她说过”接着条目往下编号
+            gone = told.pop(n - len(facts) - 1)
+            prof["told"] = told
+        else:
             return None
-        gone = facts.pop(n - 1)
         prof["mem_gen"] = int(prof.get("mem_gen", 0)) + 1
         self.save_user(prof)
         return gone.get("text", "") if isinstance(gone, dict) else str(gone)
@@ -977,6 +995,18 @@ class LongTermMemory:
     @staticmethod
     def _merge_told(prof: dict, p: dict, scope: str) -> None:
         told = [t for t in prof.get("told") or [] if isinstance(t, dict)]
+        for u in _as_list(p.get("told_update")):   # 兑现了、取消了、说反了：不删，改成现在的状态（忘不忘交给上限）
+            if not isinstance(u, dict):
+                continue
+            old, new = _norm(_item_text(u.get("old"), 40)), _item_text(u.get("text"), 30)
+            if not old or not new:
+                continue
+            for t in told:                        # 只改这段能看到的（群里整理改不到私聊里说的）
+                cur = _norm(t.get("text", ""))
+                if scope_ok(t.get("scope"), *_place_of(scope)) and (cur == old or _similar(cur, old)):
+                    t["text"], t["date"] = new, _today_str()
+                    break
+            prof["told"] = told
         seen = {_norm(t.get("text", "")) for t in told}
         for t in _as_list(p.get("told")):
             text = _item_text(t, 30)
@@ -1669,10 +1699,22 @@ class LongTermMemory:
             out.append(f"印象：{prof['impression']}")
         for i, f in enumerate(facts):
             tags = [f.get("kind") or "未分类", "★" * _weight(f.get("weight")), self._scope_name(f.get("scope")), _ago(f.get("seen") or f.get("since"))]
+            if f.get("tags"):
+                tags.append("词：" + "/".join(map(str, f["tags"])))
             out.append(f"{i + 1}. {f.get('text', '')}（{'｜'.join(tags)}）")
-        told = prof.get("told") or []
+        told = [t for t in prof.get("told") or [] if isinstance(t, dict)]
         if told:
-            out.append("她说过：" + "；".join(t.get("text", "") for t in told))
+            out.append("她说过（也能用 /忘记 第N条 删）：")
+            out += [f"{len(facts) + i + 1}. {t.get('text', '')}（{self._scope_name(t.get('scope'))}｜{_ago(t.get('date'))}）"
+                    for i, t in enumerate(told)]
+        rows = []                              # 群往事里有他的（只是看看；删要用 /忘记 本群）
+        for gid in self._group_ids():
+            for e in self.get_group(gid).get("events") or []:
+                if isinstance(e, dict) and int(qq) in [_int(x) for x in _as_list(e.get("who"))] and not self._event_expired(e):
+                    rows.append((str(e.get("date") or ""), f"群{gid} {_md(e.get('date'))}：{e.get('text', '')}"))
+        if rows:
+            out.append("群往事里有他的（最近 5 条，只读）：")
+            out += ["· " + r for _, r in sorted(rows)[-5:]]
         return "\n".join(out)
 
     def describe_group(self, gid: int) -> str:
