@@ -4726,3 +4726,52 @@ async def test_told_drop_and_forget_told_1930(tmp_path):
 def test_summary_prompt_fulfilled_promise_1930():
     from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
     assert "兑现" in SUMMARIZE_PROMPT and "told_update" in SUMMARIZE_PROMPT and "told_drop" not in SUMMARIZE_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_edit_fact_command_2020(app: App):
+    """/改记忆 @某人 第N条 新内容：改条目，也能改“她说过”（接着条目往下编号）；类型、重要度不变"""
+    import plugins.roleplay_chat as p
+    prof = p.ltm.get_user(111)
+    prof["facts"] = [{"id": 1, "text": "是学生", "kind": "身份", "weight": 3, "scope": "public"},
+                     {"id": 2, "text": "约好下次请伊蕾娜吃面包", "kind": "约定", "weight": 3, "scope": "public", "tags": ["面包", "请客"]}]
+    prof["told"] = [{"text": "答应过下次请他吃面包", "date": "2026-09-29", "scope": "private"}]
+    p.ltm.save_user(prof)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("/改记忆 111 第2条 请伊蕾娜吃过一次面包，她说还欠一顿", uid=999, mid=9200)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "（第 2 条：约好下次请伊蕾娜吃面包 → 请伊蕾娜吃过一次面包，她说还欠一顿）", result=None, bot=bot)
+    f = p.ltm.get_user(111)["facts"][1]
+    assert f["text"] == "请伊蕾娜吃过一次面包，她说还欠一顿" and f["kind"] == "约定" and f["weight"] == 3 and f["tags"] == ["请客"]
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("/改记忆 111 第3条：其实是他答应请伊蕾娜吃面包", uid=999, mid=9201)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "（第 3 条：答应过下次请他吃面包 → 其实是他答应请伊蕾娜吃面包）", result=None, bot=bot)
+    assert p.ltm.get_user(111)["told"][0]["text"] == "其实是他答应请伊蕾娜吃面包"
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("/改记忆 111 第9条 随便", uid=999, mid=9202)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "（没有第 9 条，先用 /记忆 看看）", result=None, bot=bot)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("/改记忆 111 第2条", uid=999, mid=9203)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）", result=None, bot=bot)
+
+
+def test_edit_fact_kind_2030(tmp_path):
+    """/改记忆 内容前写类型加空格：连类型一起换；没写类型、或者只是正文碰巧以类型字开头，不换"""
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [{"text": "约好下次请伊蕾娜吃面包", "kind": "约定", "weight": 3, "scope": "public"},
+                        {"text": "下周考试", "kind": "计划", "weight": 2, "scope": "private", "due": date_str(-7)}])
+    assert m.edit_fact(111, 1, "经历 兑现过请伊蕾娜吃面包的约定") == ("（约定→经历）约好下次请伊蕾娜吃面包", "兑现过请伊蕾娜吃面包的约定")
+    f = m.get_user(111)["facts"][0]
+    assert f["kind"] == "经历" and f["weight"] == 3 and f["scope"] == "public"
+    assert m.edit_fact(111, 2, "近况：考完了，考得不错")[1] == "考完了，考得不错"
+    f2 = m.get_user(111)["facts"][1]
+    assert f2["kind"] == "近况" and "due" not in f2
+    assert m.edit_fact(111, 1, "经历过一次请客") == ("兑现过请伊蕾娜吃面包的约定", "经历过一次请客")
+    assert m.get_user(111)["facts"][0]["kind"] == "经历"

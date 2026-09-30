@@ -540,6 +540,42 @@ class LongTermMemory:
         self.save_user(prof)
         return existed
 
+    def edit_fact(self, qq: int, n: int, text: str) -> tuple[str, str] | None:
+        """把第 n 条（按 /记忆 里的序号，“她说过”接着往下编）改成 text；重要度、在哪儿知道的不变。
+        text 开头写了类型再空一格（“经历 兑现过……”）就连类型一起换，不写类型不变。
+        返回 (改前, 改后)，改了类型的写成“（约定→经历）……”；没有这一条返回 None"""
+        kind = None
+        m = re.match(r"\s*(" + "|".join(KINDS) + r")\s*[\s:：]\s*(.+)$", str(text or ""), re.S)
+        if m:
+            kind, text = m.group(1), m.group(2)
+        new = _clean_text(text, 40)
+        prof = self.get_user(qq)
+        facts = prof.get("facts") or []
+        told = [t for t in prof.get("told") or [] if isinstance(t, dict)]
+        if not new:
+            return None
+        if 1 <= n <= len(facts) and isinstance(facts[n - 1], dict):
+            f = facts[n - 1]
+            old = f.get("text", "")
+            f["text"], f["seen"] = new, _today_str()
+            f.pop("offered", None)
+            f["tags"] = _clean_tags(f.get("tags"), new)
+            if kind and kind != f.get("kind"):
+                old = f"（{f.get('kind') or '未分类'}→{kind}）{old}"
+                f["kind"] = kind
+                if kind != "计划":
+                    f.pop("due", None)
+        elif len(facts) < n <= len(facts) + len(told):
+            t = told[n - len(facts) - 1]
+            old = t.get("text", "")
+            t["text"], t["date"] = new, _today_str()
+            prof["told"] = told
+        else:
+            return None
+        prof["mem_gen"] = int(prof.get("mem_gen", 0)) + 1   # 正在整理的那次不会把旧的写回来
+        self.save_user(prof)
+        return old, new
+
     def forget_fact(self, qq: int, n: int) -> str | None:
         """删掉第 n 条（按 /记忆 里显示的序号）；返回删掉的内容"""
         prof = self.get_user(qq)

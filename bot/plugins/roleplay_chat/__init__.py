@@ -1553,7 +1553,7 @@ async def _is_group_not_to_me(event: MessageEvent) -> bool:
 # ------------------------------------------------------------------ 命令
 # 所有指令都只有管理员能用；别人发指令她当没看见（不回、不当成聊天）
 ADMIN_COMMANDS = ("重置", "清空记忆", "reset", "重载人设", "认图", "表情", "表情包", "记忆", "查看记忆",
-                  "好感", "好感度", "性别", "忘记", "删除记忆", "写信", "说说", "插话", "冒泡", "搭话", "花费", "花销")
+                  "好感", "好感度", "性别", "忘记", "删除记忆", "改记忆", "写信", "说说", "插话", "冒泡", "搭话", "花费", "花销")
 
 
 _SLASH_STARTS = ("/", "／")
@@ -1760,7 +1760,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     await sticker_cmd.finish(STICKER_USAGE)
 
 
-MEMORY_USAGE = "用法：/记忆 @某人（或 QQ号、我、本群）；/忘记 @某人（或 QQ号、我、本群）；/忘记 @某人 第3条（只删 /记忆 里的第 3 条，“她说过”接着往下编号，也能这样删）"
+MEMORY_USAGE = "用法：/记忆 @某人（或 QQ号、我、本群）；/忘记 @某人（或 QQ号、我、本群）；/忘记 @某人 第3条（只删 /记忆 里的第 3 条，“她说过”接着往下编号，也能这样删）；/改记忆 @某人 第3条 新内容（开头可以先写类型，如“第3条 经历 兑现过……”）"
 
 mem_show = on_command("记忆", aliases={"查看记忆"}, rule=to_me(), permission=SUPERUSER, priority=5, block=True)
 
@@ -1868,6 +1868,29 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
         await mem_forget.finish("（本群的往事已清空）" if ok else "（本群本来就没有往事记录）")
     ok = ltm.forget_user(tid)
     await mem_forget.finish(f"（已删除关于 {tid} 的长期记忆）" if ok else f"（关于 {tid} 本来就没有长期记忆）")
+
+
+mem_edit = on_command("改记忆", aliases={"修改记忆"}, rule=to_me(), permission=SUPERUSER, priority=5, block=True)
+
+
+@mem_edit.handle()
+async def _(event: MessageEvent, arg: Message = CommandArg()):
+    """/改记忆 @某人 第3条 新内容：改 /记忆 里的第 3 条（“她说过”接着往下编号）"""
+    plain = arg.extract_plain_text()
+    m = re.search(r"第\s*(\d{1,3})\s*条\s*[:：]?\s*(.+)$", plain, re.S)
+    if not m or not m.group(2).strip():
+        await mem_edit.finish("用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）")
+    rest = Message([seg for seg in arg if seg.type != "text"])
+    head = plain[:m.start()].strip()
+    if head:
+        rest += MessageSegment.text(head)
+    target = _parse_target(event, rest)
+    if not target or target[0] != "user":
+        await mem_edit.finish("用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）")
+    done = ltm.edit_fact(target[1], int(m.group(1)), m.group(2).strip())
+    if done is None:
+        await mem_edit.finish(f"（没有第 {m.group(1)} 条，先用 /记忆 看看）")
+    await mem_edit.finish(f"（第 {m.group(1)} 条：{done[0]} → {done[1]}）")
 
 
 # ------------------------------------------------------------------ 消息计数（决定要不要用“回复”形式引用原句）
