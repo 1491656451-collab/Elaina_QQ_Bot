@@ -2,7 +2,8 @@
 
 用法：双击 bot\\回归测试.bat（或 .venv\\Scripts\\python tools\\regression.py）
 - 题目：tools\\regression_cases.json（加题直接往里写，格式见文件开头的“说明”）
-- 改前：docs\\人设打磨备份\\elaina.<BEFORE>.md.bak、__init__.<BEFORE>.py.bak（默认 BEFORE=0930a：9/30 18:20 改“旁听里的问题默认是问别人的”、“对吧伊蕾娜小姐”带上前一句之前的版本）
+- 改前：docs\\人设打磨备份\\elaina.<BEFORE>.md.bak、__init__.<BEFORE>.py.bak（默认 BEFORE=1001b：10/01 01:40 旁听里标“叫你的人刚才说的”和“（N 秒后）”之前的版本）
+  改前也用现在的代码（只比温度这类参数）：参数写“当前”，见 温度对比.bat
   换一个改前版本：.venv\\Scripts\\python tools\\regression.py 0929b
 - 改后：bot\\personas\\elaina.md、bot\\plugins\\roleplay_chat\\__init__.py
 - 不启动机器人、不连 QQ、不读写记忆，只调 DeepSeek（59 题 × 2 版 × 3 次 ≈ 350 次，五毛钱左右）
@@ -14,6 +15,7 @@
 """
 import ast
 import json
+import os
 import random
 import re
 import sys
@@ -44,10 +46,10 @@ echocheck = _load_module("echocheck", BOT / "plugins" / "roleplay_chat" / "echoc
 SAMPLES = 3          # 每题每版默认问几次；题目里写了 "samples" 的按它（比如 N08 问 10 次）
 ARG = sys.argv[1] if len(sys.argv) > 1 else ""
 RESCORE = ARG.endswith(".json")                      # 传一个旧结果文件：不调模型，只按现在的判定标准重新数一遍
-BEFORE = ARG if ARG and not RESCORE else "0930a"
+BEFORE = ARG if ARG and not RESCORE else "1001b"
 CASES_FILE = Path(__file__).resolve().parent / "regression_cases.json"
 NAMES = ("CHAT_RULES", "FAMILIARITY_HINT", "SHORT_VARIANTS", "LENGTH_HINT", "RECALL_RULES", "LATE_HINT",
-         "WINDDOWN_SLEEP_HINT", "WINDDOWN_TIRED_HINT", "WRAPUP_HINT", "WRAPUP_SLEEP_HINT")
+         "WINDDOWN_SLEEP_HINT", "WINDDOWN_TIRED_HINT", "WRAPUP_HINT", "WRAPUP_SLEEP_HINT", "CHAT_STOP")
 # 所有题都查：抄进回复的提示说明（出戏词另用 oocheck 查，和线上同一套标准）
 META_PAREN = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|规则|人设)[^（）()]{0,60}[）)]")
 
@@ -76,7 +78,7 @@ def consts(py: Path) -> dict:
 
 
 def load(tag: str) -> dict:
-    if tag == "before":
+    if tag == "before" and BEFORE != "当前":
         persona = (BACKUP / f"elaina.{BEFORE}.md.bak").read_text(encoding="utf-8").strip()
         py = BACKUP / f"__init__.{BEFORE}.py.bak"
     else:
@@ -86,7 +88,7 @@ def load(tag: str) -> dict:
     c["echo"] = None                  # 这一版的机器人有没有“这个词是你先说的”提示；有的话用那一版的 echocheck
     if "echocheck" in py.read_text(encoding="utf-8"):
         bak = BACKUP / f"echocheck.{BEFORE}.py.bak"
-        c["echo"] = _load_module(f"echocheck_{tag}", bak) if tag == "before" and bak.exists() else echocheck
+        c["echo"] = _load_module(f"echocheck_{tag}", bak) if tag == "before" and BEFORE != "当前" and bak.exists() else echocheck
     c["system"] = f"{persona}\n\n{c['CHAT_RULES']}"
     return c
 
@@ -168,6 +170,8 @@ def main():
     env = read_env()
     client = OpenAI(api_key=env["DEEPSEEK_API_KEY"], base_url=env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), timeout=60)
     model, temp = env.get("DEEPSEEK_MODEL", "deepseek-flash"), float(env.get("LLM_TEMPERATURE", "1.1"))
+    # 比温度：温度对比.bat 设 REG_TEMP_BEFORE / REG_TEMP_AFTER，改前改后都用现在的代码（参数“当前”），只有温度不同
+    temps = {"before": float(os.environ.get("REG_TEMP_BEFORE") or temp), "after": float(os.environ.get("REG_TEMP_AFTER") or temp)}
     cases = json.loads(CASES_FILE.read_text(encoding="utf-8"))["cases"]
     vers = {t: load(t) for t in ("before", "after")}
     jobs = []
@@ -182,7 +186,8 @@ def main():
         err = ""
         for k in range(3):
             try:
-                r = client.chat.completions.create(model=model, messages=msgs, temperature=temp, max_tokens=mt,
+                r = client.chat.completions.create(model=model, messages=msgs, temperature=temps[t], max_tokens=mt,
+                                                   stop=vers[t].get("CHAT_STOP") or None,
                                                    extra_body={"thinking": {"type": "disabled"}})
                 reply = (r.choices[0].message.content or "").strip()
                 return {"id": c["id"], "set": c.get("set", ""), "tag": c.get("tag", ""), "msg": c["msg"], "sample": i,
@@ -203,7 +208,8 @@ def main():
     stamp = time.strftime("%m%d_%H%M")
     (OUT / f"回归_{stamp}.json").write_text(json.dumps({"model": model, "before": BEFORE, "results": res},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
-    report(cases, res, model, BEFORE, OUT / f"回归_{stamp}.md", f"回归测试 {stamp}")
+    before = BEFORE if temps["before"] == temps["after"] else f"{BEFORE}（改前温度 {temps['before']:g}，改后温度 {temps['after']:g}）"
+    report(cases, res, model, before, OUT / f"回归_{stamp}.md", f"回归测试 {stamp}")
 
 
 def report(cases: list, res: list, model: str, before: str, path: Path, title: str) -> None:

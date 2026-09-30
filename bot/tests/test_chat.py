@@ -2168,7 +2168,7 @@ def test_gap_lines():
     import plugins.roleplay_chat as p
     now = time.time()
     block = p.watch_block([(now - 7200, "【A】早"), (now - 7100, "【B】早啊"), (now - 60, "【A】有人吗")])
-    assert block == "（群聊旁听记录）\n【A】早\n【B】早啊\n（过了 1 个小时）\n【A】有人吗"
+    assert block == "（群聊旁听记录）\n【A】早\n（1 分钟后）【B】早啊\n（过了 1 个小时）\n【A】有人吗"   # 10/01 起隔 20 秒以上也标
     assert p.gap_line(now - 600, now) == ""
 
 
@@ -4775,3 +4775,175 @@ def test_edit_fact_kind_2030(tmp_path):
     assert f2["kind"] == "近况" and "due" not in f2
     assert m.edit_fact(111, 1, "经历过一次请客") == ("兑现过请伊蕾娜吃面包的约定", "经历过一次请客")
     assert m.get_user(111)["facts"][0]["kind"] == "经历"
+
+
+
+def test_cut_derailed_2300():
+    """9/30 22:44：回复写着写着冒出“AAA记忆回收 / 好 谢谢”（对方的群昵称 + 替对方写的下一句）：从那句起截掉"""
+    import plugins.roleplay_chat as p
+    r = "魔法的话，图书馆里应该找得到。先去看看书吧\n\nAAA记忆回收\n\n好 谢谢"
+    assert p.cut_derailed(r, "好吧 那冒昧问问可以给一下一些参考资料嘛（）\n魔法") == "魔法的话，图书馆里应该找得到。先去看看书吧"
+    assert p.cut_derailed("RAG？恕我孤陋寡闻，那是什么东西。", "什么是rag") == "RAG？恕我孤陋寡闻，那是什么东西。"
+    assert p.cut_derailed("我是伊蕾娜，也有人叫我Elaina。", "你叫什么") == "我是伊蕾娜，也有人叫我Elaina。"
+    assert p.cut_derailed("嗯，好的。", "") == "嗯，好的。"
+    assert p.cut_derailed("AAA记忆回收", "你好") == ""
+
+
+@pytest.mark.asyncio
+async def test_derailed_reply_not_sent_2300(app: App):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("魔法的话，图书馆里应该找得到。先去看看书吧\n\nAAA记忆回收\n\n好 谢谢")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("魔法", uid=2301, mid=2301)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "魔法的话，图书馆里应该找得到。先去看看书吧", result=None, bot=bot)
+    assert "AAA" not in p.get_history("private_2301")[-1]["content"]
+
+
+
+def test_cut_speaker_line_2310():
+    """替对方说话：照聊天记录的格式“名字：……”“【名字】……”另起一段，从那起截掉（名字是中文也认得）"""
+    import plugins.roleplay_chat as p
+    r = "先去看看书吧\n\n小明\n\n好 谢谢"
+    assert p.cut_derailed(r, "魔法", ["小明"]) == r          # 单独叫一声名字不算（10/01 用户：叫名字说明她记得对方）
+    # 名字里有字母：不算“没人说过的外文”
+    assert p.cut_derailed("先去看看书吧\nAAA记忆回收？", "魔法", ["AAA记忆回收"]) == "先去看看书吧\nAAA记忆回收？"
+    assert p.cut_derailed("先去看看书吧\n小明：好 谢谢", "魔法", ["小明"]) == "先去看看书吧"
+    assert p.cut_derailed("先去看看书吧\n【伊蕾娜】还有别的吗", "魔法", ["小明", "伊蕾娜"]) == "先去看看书吧"
+    # 正常提到名字不算
+    assert p.cut_derailed("小明这个名字挺好听。", "我叫小明", ["小明"]) == "小明这个名字挺好听。"
+
+
+@pytest.mark.asyncio
+async def test_tag_after_own_mention_is_asked_2320(app: App):
+    """9/30 22:55：“因为伊蕾娜小姐觉得没必要回这个消息”（判断不是跟她说）、1 秒后“对吧”：前一句点了她的名，这句算在问她，交给判断"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("是没必要。")
+    JUDGE["answer"] = "是"; JUDGE["calls"] = 0
+    now = time.time()
+    p._passive[555].clear()
+    p._passive[555].append((7710, "群鲨鱼", "【群鲨鱼】因为伊蕾娜小姐觉得没必要回这个消息", now - 1))
+    ev = gev("对吧", False, uid=7710, mid=7710, card="群鲨鱼")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是没必要。", result=None, bot=bot)
+    assert JUDGE["calls"] == 1 and "没必要回这个消息" in JUDGE["prompt"]
+    last_user = [m for m in CALLS[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert "没必要回这个消息" in last_user and "对吧" in last_user
+    JUDGE["answer"] = "否"
+    # 前一句没点她的名：还是不接（她刚说过话会触发“接着聊”的判断，先清掉）
+    JUDGE["calls"] = 0
+    p._last_bot_msg.clear(); p._engaged.clear()
+    p._passive[555].append((7711, "路人", "【路人】今天好热", time.time()))
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("对吧", False, uid=7711, mid=7711, card="路人"))
+    assert JUDGE["calls"] == 0
+
+
+
+def test_chat_stop_and_rule_0100():
+    """10/01：调模型时写到“【”就停；聊天规则讲明只写自己这一轮的话"""
+    import plugins.roleplay_chat as p
+    assert p.CHAT_STOP == ["【"]
+    assert "只写你自己这一轮要说的话" in p.CHAT_RULES
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
+
+
+@pytest.mark.asyncio
+async def test_chat_call_passes_stop_0100(app: App):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯。")
+    ev = pev("在吗", uid=2401, mid=2401)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "嗯。", result=None, bot=bot)
+    assert CALLS[-1].get("stop") == ["【"]
+
+
+def test_fragment_reply_0110():
+    """10/01：只剩一个字、又不是正常短回（“中”）：这轮不发；“嗯。”“蛤？”“好”照常"""
+    import plugins.roleplay_chat as p
+    assert p.is_fragment("中") and p.is_fragment("午。")
+    for ok in ("嗯。", "蛤？", "好", "哦……", "早。", "晚安", "中午好。", "……"):
+        assert not p.is_fragment(ok), ok
+
+
+@pytest.mark.asyncio
+async def test_fragment_not_sent_0110(app: App):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("中")
+    n = len(CALLS)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, pev("伊蕾娜小姐中午好", uid=2501, mid=2501))
+    assert len(CALLS) == n + 1          # 调了一次模型，但什么都没发
+
+
+def test_call_only_pulls_lead_0130():
+    """10/01：先说了几句、最后只叫她一声（@ / 名字 / 在吗）：前面那几句算说给她听的"""
+    import plugins.roleplay_chat as p
+    now = time.time()
+    buf = [(2, "B", "【B】今天好热", now - 40),
+           (1, "A", "【A】今天被老板骂了", now - 20),
+           (1, "A", "【A】加班到十点", now - 10)]
+    for t in (p.AT_ONLY_TEXT, "伊蕾娜？", "伊蕾娜小姐在吗", "在不在"):
+        lead, rest = p.pull_own_lead(buf, 1, t, now)
+        assert lead == ["今天被老板骂了", "加班到十点"] and rest == buf[:1], t
+    assert p.pull_own_lead(buf, 1, "伊蕾娜，今天吃什么", now) == ([], buf)      # 叫她那句本身有内容：不拿
+    assert p.pull_own_lead(buf, 2, p.AT_ONLY_TEXT, now)[0] == []               # 别人前面没说话：不拿
+
+
+@pytest.mark.asyncio
+async def test_at_only_carries_lead_0130(app: App):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("被骂了还加班，辛苦了。")
+    now = time.time()
+    p._passive[555].clear()
+    p._passive[555].append((7720, "阿明", "【阿明】今天被老板骂了", now - 20))
+    p._passive[555].append((7720, "阿明", "【阿明】加班到十点", now - 10))
+    ev = gev(Message(""), True, uid=7720, mid=7720)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "被骂了还加班，辛苦了。", result=None, bot=bot)
+    last_user = [m for m in CALLS[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert "今天被老板骂了" in last_user and "加班到十点" in last_user and "没说话" not in last_user
+
+
+
+def test_watch_gaps_and_caller_mark_0140():
+    """10/01：旁听里相邻两句隔 20 秒以上标“（N 秒后）”；叫她的人刚说的几句前面标一行；叫她那条隔得久也标"""
+    import plugins.roleplay_chat as p
+    now = 1_000_000.0
+    items = [(now - 300, "【B】今天好热"), (now - 290, "【C】是啊"), (now - 30, "【A】昨天那个人被讨厌了"), (now - 5, "【A】真的假的")]
+    block = p.watch_block(items, mark_from=2, end_ts=now)
+    assert block.splitlines() == ["（群聊旁听记录）", "【B】今天好热", "【C】是啊", p.CALLER_LEAD_MARK,
+                                  "（4 分钟后）【A】昨天那个人被讨厌了", "（25 秒后）【A】真的假的"]
+    assert p.watch_block(items[:2], end_ts=now).endswith("（又过了 4 分钟，才是下面这条）")
+    buf = [(2, "B", "【B】今天好热", now - 300), (1, "A", "【A】昨天那个人被讨厌了", now - 30),
+           (1, "A", "【A】真的假的", now - 5)]
+    assert p.caller_lead_start(buf, 1, now) == 1
+    assert p.caller_lead_start(buf, 2, now) is None
+    assert p.caller_lead_start([(1, "A", "【A → B】你说呢", now - 5)], 1, now) is None
+    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
+
+
+@pytest.mark.asyncio
+async def test_caller_lead_marked_in_prompt_0140(app: App):
+    """叫她的那句有内容（“伊蕾娜小姐你怎么看这事”）：前几句不合进来，但在旁听里标出是叫她的人刚说的"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("被讨厌也是活该。")
+    now = time.time()
+    p._passive[555].clear()
+    p._passive[555].append((7730, "阿明", "【阿明】昨天卖惨的那个人被狠狠讨厌了", now - 8))
+    ev = gev("伊蕾娜小姐你怎么看这事", True, uid=7730, mid=7730)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "被讨厌也是活该。", result=None, bot=bot)
+    watch = [m["content"] for m in CALLS[-1]["messages"] if m["role"] == "user" and "（群聊旁听记录）" in m["content"]][-1]
+    assert p.CALLER_LEAD_MARK + "\n【阿明】昨天卖惨的那个人被狠狠讨厌了" in watch

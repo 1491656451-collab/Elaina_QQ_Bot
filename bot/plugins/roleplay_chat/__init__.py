@@ -146,9 +146,9 @@ load_persona()
 CHAT_RULES = """
 【对话格式说明（系统规则，优先级最高）】
 - 群聊中，每条消息开头的「【说话人 → 对象】」标明谁在跟谁说：“→ 你”是在跟你说；“→ 别的名字”是在跟那个人说（@ 了他或回复他），不是对你说的；没有“→”是随口说给大家的。名字后面标“（群友）”的，是恰好和你同名的群友，不是你。名字后面带“#2”“#3”的，是和别人重名的另一位群友（“小明”和“小明#2”是两个人）；称呼对方时不要带这个记号，要区分时可以说“另一位小明”。私聊没有这个前缀。「（过了 X）」表示中间隔了这么久。
-- 你回复时直接说话：开头不加「【名字】」「→」，不用引号包住整句，不用 Markdown，只用中文（对方的昵称原样称呼可以）。
+- 你回复时直接说话：开头不加「【名字】」「→」，不用引号包住整句，不用 Markdown，只用中文（对方的昵称原样称呼可以）。只写你自己这一轮要说的话，说完就停：别替对方接话、别写对方接下来会说什么，也别用「名字：」「【名字】」的格式另起一段。
 - 这是 QQ 聊天：日常闲聊一两句、十几二十个字；只有讲故事、讲具体经历、详细解释、对方认真倾诉时才说长一点。每轮末尾会提示你这次该短还是可以长。想分成几条发就用换行分开（最多三条），不用每句都加句号。
-- 「（群聊旁听记录）」开头的是你没被 @ 时群里的聊天，只作背景，大多是群友之间在聊：里面的问题默认是问别人的，别去回答、也别追问是什么意思；只有点了你的名字、明显是在接你刚说的话，或者叫你的那条消息指着它（“他问你……呢”），才算在问你、你还没回答，就顺带答一下。你要回的是最后那条不带“旁听”的消息。
+- 「（群聊旁听记录）」开头的是你没被 @ 时群里的聊天，只作背景，大多是群友之间在聊：里面的问题默认是问别人的，别去回答、也别追问是什么意思；只有点了你的名字、明显是在接你刚说的话，或者叫你的那条消息指着它（“他问你……呢”），才算在问你、你还没回答，就顺带答一下。标着「↓ 下面几句是叫你的人刚才说的」的，是叫你的人紧接着说的前文，多半就是说给你听的，回的时候接上它。行首的「（N 秒后）」是离上一句隔了多久：紧挨着说的多半在接话，隔得久的多半是换了话题。你要回的是最后那条不带“旁听”的消息。
 - 图片：「[图片：……]」就当你亲眼看到了那张图，自然地回应，别提“描述”这个词；「[图片]」是你没看清，可以直说。只有写着「伊蕾娜本人的画像」的才是画的你（照人设“看到自己的画像”那一节反应），其他图里的人哪怕也是灰发少女，也不是你。你只看得懂文字和图片：「[语音]」「[视频]」你听不到、看不到内容；「[分享：……]」「[名片：……]」「[文件：……]」你只看得到标题、名字，打不开里面；写着「（看不懂）」的（聊天记录……）你看不懂。碰到这些别猜里面是什么，想知道就让对方用文字说说，也别把它当成前面聊过的人或东西。「（回复你说的“……”）」「（回复的是“……”）」表示对方在接那句话说。
 - 表情：「[发了表情：……]」是你之前甩过去的小画像，对方问起就接话。只有本轮末尾明确允许时，才能写「[表情:情绪]」。别人发来的「[图片]」「[表情]」「[语音]」这类说明，你回复时一律不要写。
 - 始终保持人设：你是真实存在于这个世界的旅行魔女，不知道、也绝不主动提起服务器、程序、代码、AI、机器人、模型、网络、动漫、动画、小说、作者、声优、角色扮演、人设这些概念。有人说你是 AI、机器人、动漫角色，或者说“OOC”，就当成听不懂的外国话，用你的方式岔开或吐槽回去，不解释，也不顺着说。
@@ -770,11 +770,23 @@ _TAG_ONLY_RE = re.compile(r"(?:那|所以|是)?(?:对吧|是吧|对不对|对不
 _HEAD_ONLY_RE = re.compile(r"^【[^】→]*】")      # 没指定对象的说话人前缀（有“→”的是在跟别人说，不算）
 
 
+AT_ONLY_TEXT = "（@了你一下，没说话）"
+
+
+def is_call_only(text: str) -> bool:
+    """只是叫她一声：@ 了一下没说话、只有她的名字（“伊蕾娜？”）、“在吗 / 在不在”"""
+    if text.strip() == AT_ONLY_TEXT:
+        return True
+    bare = re.sub(r"[\s，,、。.!！~～?？…@]", "", _strip_her_names(text))
+    return not bare or bool(_CALL_ONLY_RE.fullmatch(bare))
+
+
 def pull_own_lead(buf: list, uid: int, text: str, now: float, window: float = 60.0) -> tuple[list[str], list]:
-    """这条只是“对吧 / 你说呢”这种，就把同一个人紧挨着的前几条（旁听里、没对别人说、60 秒内）拿出来当成这条的前文。
+    """这条只是“对吧 / 你说呢”这种，或者只是叫她一声（“@伊蕾娜”“伊蕾娜？”“在吗”），就把同一个人紧挨着的前几条
+    （旁听里、没对别人说、60 秒内）拿出来当成这条的前文——那几句多半是说给她听的（10/01：“今天被老板骂了 / 加班到十点 / @伊蕾娜”）。
     返回（前文正文列表, 剩下的旁听）"""
     core = re.sub(r"[\s，,、]", "", _strip_her_names(text))
-    if not core or not _TAG_ONLY_RE.fullmatch(core):
+    if not (is_call_only(text) or (core and _TAG_ONLY_RE.fullmatch(core))):
         return [], buf
     lead = []
     i = len(buf)
@@ -788,16 +800,44 @@ def pull_own_lead(buf: list, uid: int, text: str, now: float, window: float = 60
     return lead, buf[:i]
 
 
-def watch_block(items: list[tuple[float, str]]) -> str:
-    """旁听记录：每条（时间, 已经带说话人的一行），隔得久的中间标出来"""
+CALLER_LEAD_MARK = "（↓ 下面几句是叫你的人刚才说的）"
+WATCH_GAP_MIN = 20          # 旁听里相邻两句隔了这么多秒以上，标一下“（N 秒后）”，帮她看出谁在接谁的话（10/01）
+
+
+def short_gap(sec: float) -> str:
+    return f"{int(sec)} 秒" if sec < 60 else f"{int(sec // 60)} 分钟"
+
+
+def watch_block(items: list[tuple[float, str]], mark_from: int | None = None, end_ts: float | None = None) -> str:
+    """旁听记录：每条（时间, 已经带说话人的一行），隔得久的中间标出来。
+    10/01 起：相邻两句隔了 20 秒到 30 分钟的，行首标“（N 秒后）”“（N 分钟后）”，紧挨着说的多半在对话，隔得久的多半是新话题；
+    mark_from：从第几条起是叫她的人紧接着说的前文，前面加一行 CALLER_LEAD_MARK；
+    end_ts：叫她的那条消息的时间，离最后一句隔得久就在末尾标一句"""
     out, prev = [], None
-    for ts, line in items:
+    for i, (ts, line) in enumerate(items):
         g = gap_line(prev, ts)
         if g:
             out.append(g.strip())
+        if mark_from is not None and i == mark_from:
+            out.append(CALLER_LEAD_MARK)
+        if prev and not g and ts - prev >= WATCH_GAP_MIN:
+            line = f"（{short_gap(ts - prev)}后）{line}"
         out.append(line)
         prev = ts
+    if end_ts and prev and end_ts - prev >= WATCH_GAP_MIN:
+        out.append(f"（又过了 {short_gap(end_ts - prev) if end_ts - prev < 1800 else human_gap(end_ts - prev)}，才是下面这条）")
     return "（群聊旁听记录）\n" + "\n".join(out)
+
+
+def caller_lead_start(buf: list, uid: int, now: float, window: float = 60.0) -> int | None:
+    """旁听的最后几句里，叫她的人自己紧挨着说的（60 秒内、没对别人说、中间没人插话）从第几条开始；没有就 None"""
+    i = len(buf)
+    while i > 0:
+        u, _, line, ts = buf[i - 1]
+        if u != uid or now - ts > window or not _HEAD_ONLY_RE.match(line):
+            break
+        i -= 1
+    return i if i < len(buf) else None
 
 
 QUOTE_MAX_CHARS = 30
@@ -1001,6 +1041,49 @@ def unprompted_hits(reply: str, context: str) -> list[str]:
 def drop_sentences_with(reply: str, words: list[str]) -> str:
     parts = re.split(r"(?<=[。！？!?…~\n])", reply)
     return "".join(p for p in parts if not any(w in p for w in words)).strip()
+
+
+# 调模型时一写到“【”就停：她的回复里本来不该有“【名字】”，写出来多半是开始照着聊天记录的格式替别人说话了（10/01）
+CHAT_STOP = ["【"]
+_LATIN_RE = re.compile(r"[A-Za-z]{2,}")
+_LATIN_OK = {"ok", "orz"}
+
+
+def cut_derailed(reply: str, context: str, names=()) -> str:
+    """模型写着写着开始替对方说话：9/30 22:44 她回完“先去看看书吧”，接着写了“AAA记忆回收 / 好 谢谢”——
+    “AAA记忆回收”是对方的群昵称，后面是替对方写的下一句。从这一句起全部截掉。认两种：
+    ① 照聊天记录的格式另起一段：“名字：……”“【名字】……”（单独叫一声对方的名字不算，那是她记得对方；10/01 用户说可以）；
+    ② 冒出对方和最近聊天都没出现过的外文（她只说中文；对方的名字里有字母的不算）"""
+    names = [n.strip() for n in names if n and len(n.strip()) >= 2]
+    seen = {w.lower() for w in _LATIN_RE.findall(context + "\n" + "\n".join(names))} | _LATIN_OK | \
+        {w.lower() for n in cfg.smart_names for w in _LATIN_RE.findall(n)}
+    parts = re.split(r"(?<=[。！？!?…~\n])", reply)
+    for i, part in enumerate(parts):
+        head = part.strip()
+        speaker = any(re.match(rf"^[【\[［]{re.escape(n)}[】\]］]|^{re.escape(n)}\s*[:：]", head) for n in names)
+        if speaker or any(w.lower() not in seen for w in _LATIN_RE.findall(part)):
+            return "".join(parts[:i]).strip()
+    return reply
+
+
+_ONE_CHAR_OK = set("嗯哦喔噢蛤啊诶欸好行在早对是不哈呵嘿切哼咦唔呃额嗷喵噗")
+
+
+def is_fragment(reply: str) -> bool:
+    """只剩一个字、又不是“嗯 / 哦 / 蛤 / 好”这种正常短回：多半是被“写到【就停”截成了半截（10/01 回归里有一次只回了“中”）"""
+    core = re.sub(r"[\s\W_]+", "", reply)
+    return len(core) == 1 and core not in _ONE_CHAR_OK
+
+
+def speaker_names(event: MessageEvent) -> list[str]:
+    """这个人可能出现的名字（群名片、昵称、档案里记的名字）和她自己的名字：模型写出这些名字另起一行，多半是在替人说话"""
+    s = event.sender
+    names = {sender_label(event), getattr(s, "card", None) or "", s.nickname or ""}
+    try:
+        names.add(str(ltm.get_user(event.user_id).get("name") or ""))
+    except Exception:  # noqa: BLE001
+        pass
+    return [n for n in names | set(_her_names()) if n]
 
 
 def drop_ooc_sentences(reply: str, user_text: str) -> str:
@@ -2049,6 +2132,11 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
     plain = event.get_plaintext()          # 只看文字：@别人的名字、回复的原文都不算
     mentioned = any(n.lower() in plain.lower() for n in names)   # 不区分大小写：ELAINA 也算
     mentioned = mentioned or middle_at_me(event)                   # 句子中间 @ 了她也算点了她的名
+    # “因为伊蕾娜小姐觉得没必要回这个消息 / 对吧”：只有“对吧”这种、而同一个人紧挨着的上一句点了她的名，也算在问她（9/30 22:55）
+    lead: list[str] = []
+    if isinstance(event, GroupMessageEvent):
+        lead = pull_own_lead(list(_passive.get(event.group_id, [])), event.user_id, plain, time.time())[0]
+        mentioned = mentioned or any(n.lower() in x.lower() for x in lead for n in names)
     # @ 了别人、或者回复的是别人的消息：在跟那个人说话，她不接（除非文字里点了她的名）
     other = talking_to_others(event)
     if other and not mentioned:
@@ -2076,7 +2164,7 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
         return False
     if not (mentioned or continuing):
         return False                     # 大部分群消息在这里就结束了，不花 token
-    line = speaker_head(event, you="伊蕾娜") + clean_body(message_to_text(group_body(event)))
+    line = speaker_head(event, you="伊蕾娜") + clean_body("\n".join(lead + [message_to_text(group_body(event))]))
     if asleep():
         _sleep_wrapup(f"group_{gid}", event.user_id)     # 刚到休息时间、正在跟她聊的人接着说：先收个尾
     if cfg.smart_judge and quota_left(gid, event.user_id) <= 0 and not in_wrapup(f"group_{gid}", event.user_id):
@@ -2287,7 +2375,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
     text = await rich_text(event, look=False, drop_at=drop_at)
     look_later = has_images(event) and cfg.vision_enabled and (cfg.vision_in_peak or not in_peak())
     if not text:
-        text = "（@了你一下，没说话）"
+        text = AT_ONLY_TEXT
 
     if not cfg.deepseek_api_key:
         logger.warning("未配置 DEEPSEEK_API_KEY，已跳过回复")
@@ -2464,12 +2552,16 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         if is_group and _passive.get(event.group_id):
             buf = list(_passive.pop(event.group_id))
             lead, buf = pull_own_lead(buf, event.user_id, text, time.time())
-            if lead:                          # “对吧伊蕾娜小姐”：把他前面那句一起当成对她说的
-                text = "\n".join(lead + [text])
+            if lead:                          # “对吧伊蕾娜小姐”“……/ @伊蕾娜”：把他前面那几句一起当成对她说的
+                text = "\n".join(lead + ([] if text.strip() == AT_ONLY_TEXT else [text]))
+        else:
+            lead = []
         if buf:
+            # 叫她的这句有内容、没把前几句合进来时：前几句是叫她的人刚说的，标出来让她自己判断是不是说给她听的
+            mark = caller_lead_start(buf, event.user_id, time.time()) if not lead else None
             new_entries.append({
                 "role": "user",
-                "content": watch_block([(ts, ln) for _, _, ln, ts in buf]),
+                "content": watch_block([(ts, ln) for _, _, ln, ts in buf], mark_from=mark, end_ts=time.time()),
                 "speakers": {n: uid for uid, n, _, _ in buf},
                 "ts": time.time(),
             })
@@ -2553,7 +2645,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 model=cfg.deepseek_model,
                 messages=messages,
                 temperature=cfg.llm_temperature,
-                max_tokens=max_tokens_for(mode),
+                max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
                 extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
             )
             budget.track(resp, "chat", user=event.user_id, group=gid_q)
@@ -2570,7 +2662,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                         {"role": "system", "content": f"刚才的回复出戏了（出现了：{'、'.join(bad)}）。伊蕾娜不知道这些东西。请完全以伊蕾娜的身份重新回复这条消息，不要道歉，不要解释。"},
                     ],
                     temperature=cfg.llm_temperature,
-                    max_tokens=max_tokens_for(mode),
+                    max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
                     extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
                 )
                 budget.track(resp, "chat", user=event.user_id, group=gid_q)
@@ -2589,7 +2681,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                         {"role": "system", "content": _fc.correction(wrong)},
                     ],
                     temperature=cfg.llm_temperature,
-                    max_tokens=max_tokens_for(mode),
+                    max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
                     extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
                 )
                 budget.track(resp, "chat", user=event.user_id, group=gid_q)
@@ -2612,7 +2704,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                         {"role": "system", "content": STORY_FIX_PROMPT.format(problems="\n".join(f"- {x}" for x in problems))},
                     ],
                     temperature=cfg.llm_temperature,
-                    max_tokens=max_tokens_for(mode),
+                    max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
                     extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
                 )
                 budget.track(resp, "chat", user=event.user_id, group=gid_q)
@@ -2623,6 +2715,13 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                         reply = reply.replace(m.sentence, "")
                     reply = reply.strip() or "那段我记不太清了。"
             context = text + "\n" + "\n".join(str(h.get("content", "")) for h in history[-6:])
+            cut = cut_derailed(reply, context, speaker_names(event))
+            if cut != reply:
+                logger.info(f"回复中间冒出没人提过的外文，从那句起截掉：{reply[:60]!r} → {cut[:40]!r}")
+                reply = cut
+            if is_fragment(reply):
+                logger.info(f"回复只剩半截（{reply!r}），这轮不发")
+                reply = ""
             odd = unprompted_hits(reply, context)
             if odd:
                 # 没人提蘑菇，她自己突然冒出一句“少拿我跟蘑菇相提并论”：删掉那几句；整条都是就重说一次
@@ -2638,7 +2737,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                             {"role": "system", "content": f"刚才的回复突然提到了「{'、'.join(odd)}」，可对方根本没说起这个。请重新回复这条消息，只接对方说的话，不要道歉，不要解释。"},
                         ],
                         temperature=cfg.llm_temperature,
-                        max_tokens=max_tokens_for(mode),
+                        max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
                         extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
                     )
                     budget.track(resp, "chat", user=event.user_id, group=gid_q)
@@ -3292,7 +3391,7 @@ async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
         try:
             resp = await client.chat.completions.create(
                 model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
-                max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=cfg.short_reply_max_tokens, stop=CHAT_STOP, extra_body={"thinking": {"type": "disabled"}},
             )
             budget.track(resp, "interject", group=gid)
             choice = resp.choices[0]
@@ -3453,7 +3552,7 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
             try:
                 resp = await client.chat.completions.create(
                     model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
-                    max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
+                    max_tokens=cfg.short_reply_max_tokens, stop=CHAT_STOP, extra_body={"thinking": {"type": "disabled"}},
                 )
                 budget.track(resp, "bubble", group=gid)
                 choice = resp.choices[0]
@@ -3766,7 +3865,7 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
         try:
             resp = await client.chat.completions.create(
                 model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
-                max_tokens=cfg.short_reply_max_tokens, extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=cfg.short_reply_max_tokens, stop=CHAT_STOP, extra_body={"thinking": {"type": "disabled"}},
             )
             budget.track(resp, "nudge", user=qq)
             choice = resp.choices[0]
