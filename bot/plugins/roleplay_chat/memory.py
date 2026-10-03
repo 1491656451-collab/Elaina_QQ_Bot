@@ -154,6 +154,23 @@ def _her_topics(text: str) -> set[str]:
     return {k for k, words in HER_TOPICS.items() if any(w in t for w in words)}
 
 
+_CLAUSE_RE = re.compile(r"[^，,；;、。！!？?]+[，,；;、。！!？?]*")
+
+
+def _drop_her_topics(impression: str, keep: set[str] = frozenset()) -> str:
+    """印象里提到她爱的东西（“爱用面包讨好她”）的分句去掉；去完什么都不剩就保持原样（对方自己就是面包同好那种）。
+    10/04 回放：点名让模型重写印象，它照抄原句，所以程序自己去"""
+    t = str(impression or "")
+    parts = _CLAUSE_RE.findall(t)
+    kept = [c for c in parts if not (_her_topics(c) - set(keep))]
+    if len(kept) == len(parts) or not kept:
+        return t
+    out = "".join(kept).rstrip("，,；;、")
+    if t.endswith("。") and not out.endswith(("。", "！", "？", "!", "?")):
+        out += "。"
+    return out
+
+
 def _cap_topics(items: list, text_of, talked: set[str]) -> list:
     """按 items 的先后（重要的在前）留：同一个她爱提的话题，没聊到的留 1 条，聊到的留 2 条"""
     used: dict[str, int] = defaultdict(int)
@@ -353,7 +370,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 2. 不记聊天流水账：不要写“问伊蕾娜……，被伊蕾娜回……”，也不要在句尾带“被她回……”“被吐槽……”；一次性的随口一问、寒暄客套不记。她怎么回的一般不用记，除非成了他们之间的梗或约定。例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买伊蕾娜”。
    和已有某条说的是同一回事，就用 update 改那条或者 touch，不要再 add 一条相近的。
    同一个话题（比如都和请伊蕾娜吃面包有关）已经有条目的，新进展用 update 合进那条，不要另加一条；档案里同一话题已经有好几条的，顺手合并成一两条（update 其中一条写合并后的内容，其余 drop）。
-   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事才写进 told。
+   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事只写进 told，不要再在对方条目里另加一条（例如“被伊蕾娜答应回赠……”）。
    例：伊蕾娜说“这家旅馆的枕头太软了”“下次还你一个硬一点的，当上次面包的回礼”→ 对方的条目里什么也不加（嫌枕头软的是她）；told 写“说过要送他一个硬枕头当面包的回礼”。
 3. 每条不超过 30 字，写这个人（“是学生”“喜欢刚出炉的可颂”），不写日期，日期由程序记。不要把对方的昵称、群名片当成一条记（程序已经知道昵称；昵称里的字眼也不代表他真是那样的人）。
 4. 类型 kind 只能是：身份、喜好、习惯、近况、计划、约定、梗、经历。
@@ -369,7 +386,8 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 - update：新信息和已有某条对不上、或者有了新进展（“要考试”→“考完了，考得不错”），写那一条的 id 和新的 text（可以顺便改 kind、weight），不要另加一条。
   约定、计划兑现了、取消了、变了，一定要改：例如“约好请伊蕾娜吃面包”，这段里他已经递了面包 → update 成“兑现过请伊蕾娜吃面包的约定”（kind 改成经历）；她又说还欠一顿，就写成“请伊蕾娜吃过一次面包，她说还欠一顿”。别让已经兑现的旧约定一直挂着。
 - drop：已经不对、或者对方要她忘掉的旧条目 id。不要因为条数多就删，淘汰旧的由程序来做。
-- touch：这段聊天里又聊到了、内容没变的旧条目 id。
+- touch：这段聊天里**真的又聊到了**、内容没变的旧条目 id（只写这段里提到的那几条，不要把整份档案都写上）。
+- 档案后面带“★”的是程序的提醒（印象要重写、同一话题条目太多要合并），这次照着做。
 - 已有条目后面没有“词：”的，这次聊到了，顺手用 update 补上 tags。
 - 档案里标着“未分类”的旧条目：这次聊到了的，顺手用 update 补上 kind 和 weight；写成了“被伊蕾娜回……”这种流水账的，改写成关于这个人的话，或者 drop。
 - told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫伊蕾娜宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。她向他讨东西、催他兑现、反复提的要求也不算（例如“又催他兑现刚出炉的可颂”）；和“她跟他说过”里已有的是同一件事，也不要再写。每条不超过 25 字，没有就不写，大多数时候都没有。
@@ -825,7 +843,24 @@ class LongTermMemory:
         told = [t for t in prof.get("told") or [] if isinstance(t, dict) and scope_ok(t.get("scope"), place, gid)]
         if told:
             lines.append("  她跟他说过：" + "；".join(f"{t.get('text', '')}（{_md(t.get('date'))}）" for t in told[-MAX_TOLD:]))
+        lines += self._tidy_hints(prof.get("impression") or "", facts)
         return "\n".join(lines)
+
+    @staticmethod
+    def _tidy_hints(impression: str, facts: list[dict]) -> list[str]:
+        """档案里她爱提的话题太多、印象里写了这些：点名让模型这次顺手整理（光靠规则它不会主动改，10/04 回放 3 次都没合并）"""
+        out = []
+        for topic in sorted(_her_topics(impression)):
+            out.append(f"  ★ 印象里写了“{topic}”（是伊蕾娜自己爱的东西）：这次请重写一句不提它的 impression。")
+        count: dict[str, list] = defaultdict(list)
+        for f in facts:
+            for topic in _her_topics(f.get("text", "")):
+                count[topic].append(f.get("id"))
+        for topic, ids_ in sorted(count.items()):
+            if len(ids_) >= 3:
+                out.append(f"  ★ 和“{topic}”有关的已经有 {len(ids_)} 条（#{'、#'.join(map(str, ids_))}）：这次合并成一两条——"
+                           "update 其中一条写合并后的内容，其余的 drop。")
+        return out
 
     def _events_block(self, gid: int | None, group: dict | None) -> str:
         if not group:
@@ -914,7 +949,7 @@ class LongTermMemory:
                 tier = self.familiarity(qq, self.close_friends)
                 forgot = prof.get("mem_gen", 0) != gens.get(qq, 0)
                 self._merge_facts(prof, p, scope, qq, tier)
-                imp = _clean_text(p.get("impression"), 40)
+                imp = _drop_her_topics(_clean_text(p.get("impression"), 40))
                 if not forgot:
                     self._merge_told(prof, p, scope)
                     if imp:
@@ -1032,7 +1067,11 @@ class LongTermMemory:
         if len(visible) >= 4 and len(drops) > len(visible) / 2:
             logger.warning(f"长期记忆：{qq} 这次要删 {len(drops)}/{len(visible)} 条，不像正常整理，这次不删")
             drops = set()
-        for i in ids(p.get("touch")):
+        touched = ids(p.get("touch"))
+        if len(touched) > max(5, len(visible) // 2):   # 一段聊天不可能聊到大半份档案：模型把整份都点了一遍，不算（不然旧的永远忘不掉）
+            logger.info(f"长期记忆：{qq} 这次说又聊到了 {len(touched)}/{len(visible)} 条，不像真的，不更新")
+            touched = []
+        for i in touched:
             by_id[i]["seen"] = today
         for u in _as_list(p.get("update")):
             if not isinstance(u, dict):
@@ -1655,7 +1694,7 @@ class LongTermMemory:
         if gh:
             parts.append(gh)
         if prof.get("impression"):
-            parts.append(f"你对「{who}」的印象：{_to_you(prof['impression'])}")
+            parts.append(f"你对「{who}」的印象：{_to_you(_drop_her_topics(prof['impression'], _her_topics(f'{text} {recent}')))}")
 
         facts = [f for f in prof.get("facts") or [] if not _expired(f) and scope_ok(f.get("scope"), place, gid)]
         core = sorted((f for f in facts if _weight(f.get("weight")) >= 3),

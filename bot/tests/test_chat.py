@@ -5022,3 +5022,43 @@ def test_edit_impression_1003(tmp_path):
     assert m.edit_impression(111, "话多又黏人，偶尔嘴硬但会认错") == ("话多又黏人的熟人，爱用面包讨好她", "话多又黏人，偶尔嘴硬但会认错")
     assert m.get_user(111)["impression"] == "话多又黏人，偶尔嘴硬但会认错"
     assert m.edit_impression(111, "无")[1] == "（没有）" and "impression" not in m.get_user(111)
+
+
+@pytest.mark.asyncio
+async def test_tidy_hints_and_touch_guard_1004(tmp_path):
+    """10/04 回放：模型不会主动合并面包、不改印象，还把整份档案都 touch 一遍 → 档案里点名提醒；touch 太多不算"""
+    old = date_str(20)
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "touch": [1, 2, 3, 4, 5, 6, 7, 8], "affection": 0}]})
+    _prof_with(m, 111, [
+        {"text": "请伊蕾娜吃过面包", "kind": "经历", "weight": 2, "scope": "private", "seen": old},
+        {"text": "知道伊蕾娜喜欢可颂", "kind": "喜好", "weight": 2, "scope": "private", "seen": old},
+        {"text": "被要求先请面包", "kind": "梗", "weight": 1, "scope": "private", "seen": old},
+        {"text": "下雨天不出门", "kind": "习惯", "weight": 1, "scope": "private", "seen": old},
+        {"text": "是学生", "kind": "身份", "weight": 2, "scope": "private", "seen": old},
+        {"text": "爱熬夜", "kind": "习惯", "weight": 1, "scope": "private", "seen": old},
+        {"text": "养了猫", "kind": "经历", "weight": 1, "scope": "private", "seen": old},
+        {"text": "会画画", "kind": "喜好", "weight": 2, "scope": "private", "seen": old},
+    ], impression="话多又黏人，爱用面包讨好她")
+    await _feed(m, "private_111")
+    prompt = calls[-1]["messages"][-1]["content"]
+    assert "印象里写了“面包”" in prompt and "和“面包”有关的已经有 3 条（#1、#2、#3）" in prompt
+    assert all(f["seen"] == old for f in m.get_user(111)["facts"]), "整份都 touch 一遍的不算"
+
+
+def test_impression_drops_her_topics_1004(tmp_path):
+    """10/04 回放：点名让模型改印象，它照抄原句 → 程序把提到她爱的东西的分句去掉（对方提到了就不去）"""
+    from plugins.roleplay_chat.memory import _drop_her_topics
+    assert _drop_her_topics("话多又黏人的熟人，爱用面包讨好她，偶尔嘴硬但会认错，心思挺细。") == "话多又黏人的熟人，偶尔嘴硬但会认错，心思挺细。"
+    assert _drop_her_topics("爱聊面包的家伙") == "爱聊面包的家伙", "全是面包就保持原样"
+    assert _drop_her_topics("嘴甜，爱用面包讨好她", {"面包"}) == "嘴甜，爱用面包讨好她"
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [], impression="话多又黏人，爱用面包讨好她，心思挺细。")
+    assert "印象：话多又黏人，心思挺细。" in m.context_for(111, "阿明", None, text="今天下雨了")
+    assert "爱用面包讨好你" in m.context_for(111, "阿明", None, text="给你带了面包")
+
+
+@pytest.mark.asyncio
+async def test_impression_saved_without_her_topics_1004(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "impression": "话多又黏人的熟人，爱用面包讨好她，偶尔嘴硬", "affection": 0}]})
+    await _feed(m, "private_111")
+    assert m.get_user(111)["impression"] == "话多又黏人的熟人，偶尔嘴硬"
