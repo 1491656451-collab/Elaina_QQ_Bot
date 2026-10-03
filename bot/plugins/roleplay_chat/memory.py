@@ -137,6 +137,37 @@ def _clean_tags(v, text: str = "") -> list[str]:
     return out[:4]
 
 
+# 伊蕾娜自己爱提的话题：档案里这类条目一多，她每轮都会扯到上面（10/03 群鲨鱼：20 条里 7 条和面包有关）。
+# 给她看时，对方这几句没提到的话题最多带 1 条，提到了最多 2 条
+HER_TOPICS = {
+    "面包": ("面包", "可颂", "吐司", "甜点", "奶油", "烘焙", "法棍"),
+    "钱": ("钱", "金币", "报酬", "工钱", "付账"),
+    "蘑菇": ("蘑菇", "香菇", "菌子"),
+}
+
+
+_ARROW_YOU_RE = re.compile(r"(→ (?:[^】]*、)?)你(?=[、】（])")
+
+
+def _her_topics(text: str) -> set[str]:
+    t = str(text or "")
+    return {k for k, words in HER_TOPICS.items() if any(w in t for w in words)}
+
+
+def _cap_topics(items: list, text_of, talked: set[str]) -> list:
+    """按 items 的先后（重要的在前）留：同一个她爱提的话题，没聊到的留 1 条，聊到的留 2 条"""
+    used: dict[str, int] = defaultdict(int)
+    out = []
+    for it in items:
+        tops = _her_topics(text_of(it))
+        if any(used[t] >= (2 if t in talked else 1) for t in tops):
+            continue
+        for t in tops:
+            used[t] += 1
+        out.append(it)
+    return out
+
+
 def _fact_words(f: dict) -> str:
     """挑相关记忆时拿来比的字：正文 + 关键词（“期末”也能对上“下周要考试”）"""
     return f"{f.get('text', '')} {' '.join(str(t) for t in f.get('tags') or [])}"
@@ -314,13 +345,16 @@ def _trim(items: list[dict], cap: int, protect_top: bool = True) -> list[dict]:
     return [items[i] for i in idx if i in keep]
 
 
-SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。用户消息里会给你今天的日期、已有的人物档案、群往事和她最近的一段聊天记录（“伊蕾娜：”开头的是她自己说的话）。
+SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。用户消息里会给你今天的日期、已有的人物档案、群往事和她最近的一段聊天记录（“伊蕾娜（她自己）：”开头的是她自己说的话，其余是别人说的）。
 请像一个真人回想刚才的聊天那样，更新她对每个人的记忆，并评估好感变化。已有档案里每条都有编号 #id，**只写有变化的部分，不要把整份档案重写一遍**。
 
 一、记什么
 1. 记这个人本身：身份（学生、上夜班……）、喜好、习惯（老在半夜来找她）、近况（最近很累）、计划（下周考试）、和伊蕾娜之间的约定、梗（给她起的外号、反复玩的段子）、重要的经历或互动（第一次给她画画像）。
 2. 不记聊天流水账：不要写“问伊蕾娜……，被伊蕾娜回……”，也不要在句尾带“被她回……”“被吐槽……”；一次性的随口一问、寒暄客套不记。她怎么回的一般不用记，除非成了他们之间的梗或约定。例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买伊蕾娜”。
    和已有某条说的是同一回事，就用 update 改那条或者 touch，不要再 add 一条相近的。
+   同一个话题（比如都和请伊蕾娜吃面包有关）已经有条目的，新进展用 update 合进那条，不要另加一条；档案里同一话题已经有好几条的，顺手合并成一两条（update 其中一条写合并后的内容，其余 drop）。
+   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事才写进 told。
+   例：伊蕾娜说“这家旅馆的枕头太软了”“下次还你一个硬一点的，当上次面包的回礼”→ 对方的条目里什么也不加（嫌枕头软的是她）；told 写“说过要送他一个硬枕头当面包的回礼”。
 3. 每条不超过 30 字，写这个人（“是学生”“喜欢刚出炉的可颂”），不写日期，日期由程序记。不要把对方的昵称、群名片当成一条记（程序已经知道昵称；昵称里的字眼也不代表他真是那样的人）。
 4. 类型 kind 只能是：身份、喜好、习惯、近况、计划、约定、梗、经历。
 5. 重要度 weight：1 = 顺带一提的小事；2 = 值得记住；3 = 约定、身份、希望被怎么称呼、对她很重要的事。
@@ -338,9 +372,9 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 - touch：这段聊天里又聊到了、内容没变的旧条目 id。
 - 已有条目后面没有“词：”的，这次聊到了，顺手用 update 补上 tags。
 - 档案里标着“未分类”的旧条目：这次聊到了的，顺手用 update 补上 kind 和 weight；写成了“被伊蕾娜回……”这种流水账的，改写成关于这个人的话，或者 drop。
-- told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫伊蕾娜宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。每条不超过 25 字，没有就不写，大多数时候都没有。
+- told：伊蕾娜自己在这段里对这个人说过、以后要记得的事，只有三种：① 讲过哪段旅途经历（只写是哪段，例如“讲过雪之国的事”）；② 答应过他什么、和他约过什么；③ 对他明确表过的态度（例如“说过别叫伊蕾娜宝宝”）。她随口的回答、吐槽、拒绝、调侃、纠正、推荐都**不算**（例如“回他对动物没什么偏好”“调侃他话多”“纠正过自己的发色”“说过自己不是占卜摊”“推荐过各地面包店”“不肯透露画像是什么时候的”都不要写）。她向他讨东西、催他兑现、反复提的要求也不算（例如“又催他兑现刚出炉的可颂”）；和“她跟他说过”里已有的是同一件事，也不要再写。每条不超过 25 字，没有就不写，大多数时候都没有。
 - told_update：“她跟他说过”里已经兑现、取消、说反了的，不删，改成现在的状态：old 照抄那条原文，text 写新的（例如“答应过请他吃面包”→“答应请他吃的面包已经请过了”；说反了的写清到底谁请谁）。
-- impression：伊蕾娜对这个人的总体印象，一句话，不超过 40 字，用她的口吻（例如“嘴甜又黏人，老惦记着请我吃面包”）。群里也会用到，所以只写性格和相处方式，不写私事（倾诉过的烦恼、情绪、告白）。还没有印象、或者印象变了才写；没变就不写这一项。
+- impression：伊蕾娜对这个人的总体印象，一句话，不超过 40 字，用她的口吻（例如“嘴甜又黏人，偶尔嘴硬但会认错”）。群里也会用到，所以只写性格和相处方式，不写私事（倾诉过的烦恼、情绪、告白），也不提伊蕾娜自己爱的东西（面包、钱这些，写了她每轮都会扯到上面）。还没有印象、或者印象变了才写；没变就不写这一项。
 - 条目、told 里提到伊蕾娜时写“伊蕾娜”，别用“她”“我”代替（对方是女生时会分不清谁请谁）。
 - 印象和记忆条目里，别把伊蕾娜自己的喜好（面包、钱、讨厌蘑菇这些）写成对方的特点，除非对方自己反复提起；写了她每次看到都会想扯到面包上。
 - 这段记录里没有这个人的新内容：add、update、drop 都留空，照样给 affection。
@@ -442,6 +476,8 @@ class LongTermMemory:
         self._user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)   # QQ -> 整理这个人档案时的锁
         self._tasks: set[asyncio.Task] = set()
         self._running: set[str] = set()         # 正在整理的会话，避免重复开任务
+        self.group_gap = 0.0                     # 同一个群两次整理至少隔多少秒（攒得太多时不等）
+        self._started: dict[str, float] = {}    # 会话 -> 上次开始整理的时间
         self._names: dict[int, dict[str, int]] = {}   # 群号 -> {昵称: QQ}
         self._fails: dict[str, int] = {}          # 会话 -> 连续整理失败几次
         self._retry_at: dict[str, float] = {}     # 会话 -> 失败后，这个时间之前先不再试
@@ -539,6 +575,22 @@ class LongTermMemory:
         prof["mem_gen"] = int(prof.get("mem_gen", 0)) + 1     # 正在进行的整理、迁移看到这个，就不把旧的写回来
         self.save_user(prof)
         return existed
+
+    def edit_impression(self, qq: int, text: str) -> tuple[str, str] | None:
+        """/改记忆 @某人 印象 新内容：改她对这个人的印象（写“无”就清掉）。返回 (改前, 改后)"""
+        new = _clean_text(text, 40)
+        if not new:
+            return None
+        prof = self.get_user(qq)
+        old = prof.get("impression") or "（没有）"
+        if new in ("无", "没有", "清空"):
+            prof.pop("impression", None)
+            new = "（没有）"
+        else:
+            prof["impression"] = new
+        prof["mem_gen"] = int(prof.get("mem_gen", 0)) + 1
+        self.save_user(prof)
+        return old, new
 
     def edit_fact(self, qq: int, n: int, text: str) -> tuple[str, str] | None:
         """把第 n 条（按 /记忆 里的序号，“她说过”接着往下编）改成 text；重要度、在哪儿知道的不变。
@@ -688,6 +740,10 @@ class LongTermMemory:
         """在后台整理这个会话（高峰时段、正在整理、刚失败过还没到重试时间，就先不整理）"""
         if self.defer() or key in self._running or time.time() < self._retry_at.get(key, 0):
             return False
+        if key.startswith("group_") and time.time() - self._started.get(key, 0) < self.group_gap:
+            if len(_read(self._pending_path(key), [])) < self._batch_for(key) * 3:   # 攒得太多就不等了，免得被丢掉
+                return False
+        self._started[key] = time.time()
         self._running.add(key)
         task = asyncio.create_task(self.summarize(key))
         self._tasks.add(task)
@@ -742,11 +798,11 @@ class LongTermMemory:
         lines = []
         for e in entries:
             if e["role"] == "assistant":
-                lines.append(f"伊蕾娜：{e['content']}")
+                lines.append(f"伊蕾娜（她自己）：{e['content']}")
             elif key.startswith("private_"):
                 lines.append(f"对方：{e['content']}")
-            else:
-                lines.append(e["content"])
+            else:                                 # 群聊记录里的“→ 你”是对她说的；整理的模型看了会以为是它自己，写成“→ 伊蕾娜”
+                lines.append(_ARROW_YOU_RE.sub(r"\1伊蕾娜", str(e["content"])))
         return "\n".join(lines)
 
     @staticmethod
@@ -1046,7 +1102,7 @@ class LongTermMemory:
         seen = {_norm(t.get("text", "")) for t in told}
         for t in _as_list(p.get("told")):
             text = _item_text(t, 30)
-            if text and _norm(text) not in seen:
+            if text and _norm(text) not in seen and not any(_similar(_norm(text), s) for s in seen):   # 同一件事不记两遍
                 told.append({"text": text, "date": _today_str(), "scope": scope})
                 seen.add(_norm(text))
         if told:
@@ -1615,7 +1671,9 @@ class LongTermMemory:
         else:
             picked = sorted(rest, key=lambda f: -_keep_score(f))[:n_rel]
         ask = self._ask_item(prof, tier, place, gid)
-        chosen = [f for f in prof.get("facts") or [] if (f in core or f in picked) and f is not ask]   # 按档案里的顺序
+        talked = _her_topics(f"{text} {recent}")
+        keep = _cap_topics(core + [f for f in picked if f not in core], _fact_words, talked)
+        chosen = [f for f in prof.get("facts") or [] if any(f is k for k in keep) and f is not ask]   # 按档案里的顺序
         if gh and self._lied(prof):              # 骗过她的事，性别那句已经说了，不重复
             chosen = [f for f in chosen if "多半是骗" not in str(f.get("text", ""))]
         if chosen:
@@ -1624,7 +1682,8 @@ class LongTermMemory:
         told = [t for t in prof.get("told") or [] if scope_ok(t.get("scope"), place, gid)]
         if q:
             told = [t for t in told if _related(q, t.get("text", "")) > 0]
-        told = told[-2:]
+        told = [t for t in told if _her_topics(t.get("text", "")) <= talked]   # 她爱提的话题，对方没提就不带（免得催了又催）
+        told = _cap_topics(told[::-1], lambda t: t.get("text", ""), talked)[::-1][-2:]
         if told:
             parts.append(f"你跟「{who}」说过的：" + "；".join(f"{_to_you(t['text'])}（{_ago(t.get('date'))}）" for t in told)
                          + "。别当成第一次说。")

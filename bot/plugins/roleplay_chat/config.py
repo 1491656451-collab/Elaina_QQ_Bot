@@ -58,7 +58,7 @@ class Config(BaseModel):
     knowledge_places_file: str = "knowledge/places.md"   # 地名表：给“记混检查”用（9/29）
     story_check: bool = True              # 讲长故事时，再调一次模型拿查到的资料核对（人、地点、谁做了什么、结局）；讲错了就重说一次（9/29）
     story_check_min_chars: int = 40       # 回复至少这么多字、而且在讲往事（带了回忆资料，或者提到了小说里的人 / 地方）才核对
-    unprompted_words: list[str] = ["蘑菇|菇"]   # 对方和最近几条聊天都没提到，她自己也别突然提（她讨厌蘑菇，模型爱硬扯）；含这些词的句子删掉。用 | 隔开的算一组，上文提到其中一个就都能说（9/29）
+    unprompted_words: list[str] = ["蘑菇|菇"]   # 对方和最近几条聊天都没提到，她自己也别突然提（她讨厌蘑菇，模型爱硬扯）；出现了就把整条退回让她再看一眼，有关就留、无关就重说（10-03 起，以前是删句子）。用 | 隔开的算一组，上文提到其中一个就都能说（9/29）
     fact_check: bool = True               # 记混检查：回复里把某人和一段没有他的经历放在一起（比如“在梦回之城遇上艾姆妮西亚”），就重说一次（9/29）
     knowledge_cache: str = "data/novel_index.pkl"
     knowledge_top_characters: int = 2                    # 话里点名的角色，最多带几人的档案
@@ -82,7 +82,8 @@ class Config(BaseModel):
     memory_enabled: bool = True
     memory_dir: str = "data/memory"
     memory_batch: int = 8                 # 每轮对话都加进待整理，攒够这么多条就在后台整理一次
-    memory_batch_group: int = 5           # 群里攒够这么多条就整理（群的短期记忆只有 10 条，比私聊勤一点，免得刚说的事还没记下就被挤掉；9/30 起）
+    memory_batch_group: int = 12          # 群里攒够这么多条就整理（9/30 起是 5 条，10/03 群 838626800 一天整理了 24 次，放宽到 12）
+    memory_group_gap_minutes: int = 20    # 同一个群两次整理至少隔这么久；攒到 3 批还没整理就不等了（10/03 起）
     memory_max_facts: int = 20            # 每人档案最多几条；9/30 起按关系分（memory_facts_by_tier），这个只在表里没写到的档位时用
     memory_facts_by_tier: dict[str, int] = {"disliked": 8, "stranger": 8, "friend": 12, "acquaintance": 20, "close": 30}   # 按关系：每人最多记几条（9/30 起；越熟记得越多，满了先忘又旧又不重要的）
     memory_max_events: int = 12           # 每个群往事最多几条（9/27 从 8 加到 12）

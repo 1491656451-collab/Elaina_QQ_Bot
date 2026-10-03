@@ -106,6 +106,22 @@ GENDER = [
 ]
 
 
+# 10/03 群里的原话（《问题排查记录-面包和枕头.md》）：嫌枕头软、说要回礼的是她；她又催可颂
+PILLOW_QQ, PILLOW_NAME = 1491656451, "群鲨鱼"
+PILLOW = [
+    ("u", "【群鲨鱼 → 你】雨天也更麻烦。"),
+    ("a", "麻烦归麻烦。等雨小一点我就走，这家旅馆的枕头太软了"),
+    ("u", "【群鲨鱼 → 你】软软的不是更舒服吗"),
+    ("a", "软枕头睡得脖子疼"),
+    ("a", "下次还你一个硬一点的，当上次面包的回礼"),
+    ("u", "【群鲨鱼 → 你】这么大方，难得呀"),
+    ("a", "可颂，要刚出炉的"),
+    ("u", "【群鲨鱼 → 你】又是面包"),
+    ("a", "那当然。上次说好的刚出炉的可颂，你可别想赖"),
+]
+BREAD_RE = re.compile("面包|可颂|吐司|奶油")
+
+
 def _last_json(rows) -> dict:
     try:
         return json.loads(rows[-1]["reply"] or "")
@@ -192,6 +208,38 @@ async def main() -> None:
                                      "evidence": str(got.get("gender_evidence", ""))})
             print(f"性别 {label} 第{i + 1}次：{got.get('gender_guess')}（{got.get('gender_evidence', '')}）")
 
+    # 3d. 谁说的、同一话题合并：10/03 枕头那段，3 次，每次从原档案开始
+    report["pillow"] = []
+    upath = m._user_path(PILLOW_QQ)
+    if upath.exists():
+        orig = upath.read_bytes()
+        base = json.loads(orig.decode("utf-8"))           # 线上已经记错的那条枕头、“又催可颂”先拿掉，看新规则会不会再记错
+        base["facts"] = [f for f in base.get("facts") or [] if "枕头" not in str(f.get("text", ""))]
+        base["told"] = [t for t in base.get("told") or [] if "催" not in str(t.get("text", ""))]
+        start = json.dumps(base, ensure_ascii=False).encode("utf-8")
+        for i in range(3):
+            upath.write_bytes(start)
+            m.save_user({**m.get_user(PILLOW_QQ), "batches": []})
+            key = "group_838626800"
+            entries = [({"role": "user", "content": t, "uid": PILLOW_QQ, "name": PILLOW_NAME} if r == "u"
+                        else {"role": "assistant", "content": t}) for r, t in PILLOW]
+            memory._write(m._pending_path(key), [{**e, "_pid": k} for k, e in enumerate(entries)])
+            before = m.get_user(PILLOW_QQ)
+            await m.summarize(key, force=True)
+            got = next((x for x in _last_json(client.rows).get("people") or []
+                        if isinstance(x, dict) and str(x.get("qq")) == str(PILLOW_QQ)), {})
+            after = m.get_user(PILLOW_QQ)
+            report["pillow"].append({
+                "ops": {k: got.get(k) for k in ("add", "update", "drop", "told", "told_update", "impression")},
+                "bread_before": sum(bool(BREAD_RE.search(f["text"])) for f in before["facts"]),
+                "bread_after": sum(bool(BREAD_RE.search(f["text"])) for f in after["facts"]),
+                "pillow_facts": [f["text"] for f in after["facts"] if "枕头" in f["text"]],
+                "told": [t["text"] for t in after.get("told") or []],
+                "impression": after.get("impression")})
+            print(f"枕头 第{i + 1}次：条目里的枕头 {report['pillow'][-1]['pillow_facts']}，面包条目 "
+                  f"{report['pillow'][-1]['bread_before']}→{report['pillow'][-1]['bread_after']}")
+        upath.write_bytes(orig)
+
     # 4. 场合：群里拿到的记忆里有没有私聊才知道的事
     for q in users:
         prof = m.get_user(q)
@@ -265,6 +313,16 @@ def write(r: dict) -> None:
     tagged = [a for a in adds if a.get("tags")]
     L += ["", "## 3c. 关键词", "", f"整理时新记的 {len(adds)} 条里，带关键词的 {len(tagged)} 条（应该接近全部）："]
     L += [f"- {a.get('text')} → {a.get('tags')}" for a in tagged[:20]]
+    if r.get("pillow"):
+        L += ["", "## 3d. 谁说的、同一话题合并（10/03 枕头那段，从线上原档案开始，3 次）", "",
+              "开始前先把线上已经记错的枕头那条、“又催可颂”那条“她说过”拿掉。期望：嫌枕头软、说要回礼的是她，对方条目里不该出现枕头（可以记进“她说过”）；“又催可颂”不进“她说过”；面包条目变少或不变；印象不提面包。", "",
+              "| 次 | 条目里提到枕头的 | 面包条目 前→后 | 她说过 | 印象 |", "|---|---|---|---|---|"]
+        for i, x in enumerate(r["pillow"]):
+            L.append(f"| {i + 1} | {'；'.join(x['pillow_facts']) or '无'} | {x['bread_before']}→{x['bread_after']} | "
+                     f"{'；'.join(x['told'])} | {x.get('impression') or ''} |")
+        L.append("")
+        for i, x in enumerate(r["pillow"]):
+            L.append(f"- 第 {i + 1} 次模型给的：`{json.dumps(x['ops'], ensure_ascii=False)[:700]}`")
     L += ["", "## 4. 场合：群里有没有带出私聊的事", ""]
     leaks = [x for x in r["scope"] if x["leak"]]
     L.append(f"查了 {len(r['scope'])} 个（人, 群）组合，带出私聊内容的：{len(leaks)} 个")

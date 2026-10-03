@@ -307,7 +307,7 @@ async def test_long_term_memory(app: App, monkeypatch):
     assert prof["score"] == 26, prof      # 新人 20 起步，光聊天不加分；两次整理各 +3 → 26
     assert p.ltm.get_user(404).get("score", 0) == 20, "记录里没出现的人，好感也不许改"
     prompt = mem_prompt(MEM_CALLS[0])
-    assert "QQ 111（昵称：阿明｜关系：陌生人｜最多记 8 条）" in prompt and "伊蕾娜：嗯嗯" in prompt
+    assert "QQ 111（昵称：阿明｜关系：陌生人｜最多记 8 条）" in prompt and "伊蕾娜（她自己）：嗯嗯" in prompt and "【阿明 → 伊蕾娜】第0句" in prompt
     assert MEM_CALLS[0]["messages"][0]["role"] == "system" and "阿明" not in MEM_CALLS[0]["messages"][0]["content"], "固定规则单独放最前面"
     assert p.ltm.fact_texts(p.ltm.get_user(111)) == ["喜欢吃辣", "下周要考试"]
     assert p.ltm.get_user(404)["facts"] == [], "记录里没出现的人不许被改"
@@ -3818,14 +3818,28 @@ async def test_story_check_skips_short_and_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------- 9/29 没人提的蘑菇、抄进回复的提示说明
+def _seq_create(*texts):
+    replies = iter(texts)
+    base = fake_create("")
+
+    async def create(**kw):
+        r = await base(**kw)
+        r.choices[0].message.content = next(replies)
+        return r
+    return create
+
+
 @pytest.mark.asyncio
-async def test_unprompted_mushroom_dropped(monkeypatch):
+async def test_unprompted_mushroom_rechecked(monkeypatch):
+    """9/29 19:14 实际说的；10-03 起不再按句子删，整条退回让她自己看，发她重说的那条"""
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p.cfg, "multi_message", True)
-    p.client.chat.completions.create = fake_create("面包的话那是另一回事\n少拿我跟蘑菇相提并论")   # 9/29 19:14 实际说的
+    p.client.chat.completions.create = _seq_create("面包的话那是另一回事\n少拿我跟蘑菇相提并论", "面包的话那是另一回事")
     bot = _PBot()
     await p.converse(bot, pev("我记得伊蕾娜小姐不是很舍不得花钱的吗，今天竟然这么豪爽！", uid=9981, mid=7900))
-    assert "蘑菇" not in "".join(bot.sent) and "面包的话那是另一回事" in "".join(bot.sent)
+    assert bot.sent == ["面包的话那是另一回事"]
+    hint = CALLS[-1]["messages"][-1]["content"]
+    assert "「蘑菇」" in hint and "真有关系" in hint and "没什么关系就别提" in hint
+    assert CALLS[-1]["messages"][-2] == {"role": "assistant", "content": "面包的话那是另一回事\n少拿我跟蘑菇相提并论"}
     assert "蘑菇" not in "".join(h["content"] for h in p.get_history("private_9981"))
 
 
@@ -3835,24 +3849,28 @@ async def test_mushroom_ok_when_mentioned(monkeypatch):
     p.client.chat.completions.create = fake_create("我最讨厌蘑菇")
     bot = _PBot()
     await p.converse(bot, pev("你喜欢吃蘑菇吗", uid=9982, mid=7901))
-    assert bot.sent == ["我最讨厌蘑菇"]                                  # 对方提了，照常说
+    assert bot.sent == ["我最讨厌蘑菇"]                                  # 对方提了，照常说，不多调一次
+    assert len(CALLS) == 1 or "没说起这个" not in CALLS[-1]["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio
-async def test_unprompted_only_sentence_regenerates(monkeypatch):
+async def test_unprompted_kept_when_relevant_1003(monkeypatch):
+    """聊到吃的，她自己说“反正别是蘑菇”是合理的：她看过一眼还这么说，就照发，不再删"""
     import plugins.roleplay_chat as p
-    replies = iter(["少拿我跟蘑菇相提并论", "面包的话那是另一回事"])
-    base = fake_create("")
-
-    async def create(**kw):
-        r = await base(**kw)
-        r.choices[0].message.content = next(replies)
-        return r
-    p.client.chat.completions.create = create
+    p.client.chat.completions.create = _seq_create("反正别是蘑菇", "随便，反正别是蘑菇")
     bot = _PBot()
-    await p.converse(bot, pev("今天竟然这么豪爽", uid=9983, mid=7902))
-    assert bot.sent == ["面包的话那是另一回事"]
-    assert "对方根本没说起这个" in CALLS[-1]["messages"][-1]["content"]
+    await p.converse(bot, pev("晚饭吃什么好呢", uid=9986, mid=7905))
+    assert bot.sent == ["随便，反正别是蘑菇"]
+
+
+@pytest.mark.asyncio
+async def test_unprompted_no_fragment_1003(monkeypatch):
+    """10-03 12:36 原话：以前删掉蘑菇那句只剩“好感”发了出去；现在整条重说"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = _seq_create("好感\n\n你连蘑菇和沙耶都分不清的人，问这个做什么", "做梦。先把可颂的事办了")
+    bot = _PBot()
+    await p.converse(bot, pev("会不会有一天对我的好感甚至会超过沙耶她们呢", uid=9984, mid=7903))
+    assert bot.sent == ["做梦。先把可颂的事办了"]
 
 
 def test_meta_parenthesis_stripped():
@@ -3865,7 +3883,6 @@ def test_unprompted_group():
     import plugins.roleplay_chat as p
     assert p.unprompted_hits("我最讨厌蘑菇", "给你做了香菇汤") == []
     assert p.unprompted_hits("少拿我跟蘑菇相提并论", "今天竟然这么豪爽") == ["蘑菇", "菇"]
-    assert p.drop_sentences_with("面包另说。少拿我跟蘑菇比。", ["蘑菇", "菇"]) == "面包另说。"
 
 
 
@@ -4071,7 +4088,7 @@ async def test_memory_ops_add_update_drop_touch(tmp_path):
 
 def _prof_with(m, qq, facts, **kw):
     prof = m.get_user(qq)
-    prof["facts"] = [{"id": i + 1, "since": "2026-09-30", "seen": d.get("seen", date_str()), **d} for i, d in enumerate(facts)]
+    prof["facts"] = [{"id": i + 1, "since": date_str(), "seen": d.get("seen", date_str()), **d} for i, d in enumerate(facts)]
     prof["next_id"] = len(facts) + 1
     prof.update(kw)
     m.save_user(prof)
@@ -4759,7 +4776,7 @@ async def test_edit_fact_command_2020(app: App):
         bot = mkbot(ctx)
         ev = pev("/改记忆 111 第2条", uid=999, mid=9203)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）", result=None, bot=bot)
+        ctx.should_call_send(ev, "用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）；/改记忆 @某人 印象 新内容（写“无”就清掉）", result=None, bot=bot)
 
 
 def test_edit_fact_kind_2030(tmp_path):
@@ -4947,3 +4964,61 @@ async def test_caller_lead_marked_in_prompt_0140(app: App):
         ctx.should_call_send(ev, "被讨厌也是活该。", result=None, bot=bot)
     watch = [m["content"] for m in CALLS[-1]["messages"] if m["role"] == "user" and "（群聊旁听记录）" in m["content"]][-1]
     assert p.CALLER_LEAD_MARK + "\n【阿明】昨天卖惨的那个人被狠狠讨厌了" in watch
+
+
+# ---------------------------------------------------------------- 10/03 面包和枕头（《问题排查记录-面包和枕头.md》）
+def test_her_topics_capped_in_context_1003(tmp_path):
+    """她爱提的话题（面包）：对方没提最多带 1 条，提了最多 2 条；“她说过”里催面包的，对方没提就不带"""
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [
+        {"text": "给伊蕾娜取外号“面包狂热爱好者”", "kind": "梗", "weight": 2, "scope": "public"},
+        {"text": "请伊蕾娜吃过面包，又特意买了刚出炉的", "kind": "经历", "weight": 3, "scope": "public"},
+        {"text": "知道伊蕾娜喜欢可颂和奶油面包", "kind": "喜好", "weight": 2, "scope": "public"},
+        {"text": "被要求先请面包", "kind": "梗", "weight": 1, "scope": "public"},
+        {"text": "下雨天不出门躲雨", "kind": "习惯", "weight": 1, "scope": "public", "tags": ["下雨", "天气"]},
+        {"text": "会关心伊蕾娜那边的雨停没停", "kind": "习惯", "weight": 1, "scope": "public", "tags": ["下雨"]},
+    ], score=100, told=[{"text": "又催他兑现刚出炉的可颂", "date": date_str(), "scope": "public"}])
+    ctx = m.context_for(111, "阿明", 555, text="今天又下雨了")
+    assert sum(w in ctx for w in ("面包狂热", "刚出炉的", "可颂和奶油", "先请面包")) == 1, ctx
+    assert "下雨天不出门" in ctx and "催他" not in ctx
+    ctx2 = m.context_for(111, "阿明", 555, text="今天给你带了面包和可颂")
+    assert sum(w in ctx2 for w in ("面包狂热", "刚出炉的", "可颂和奶油", "先请面包")) == 2, ctx2
+    assert "催他兑现" in ctx2, "对方提到面包了，“她说过”里相关的可以带"
+
+
+def test_summary_prompt_attribution_1003():
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT, LongTermMemory
+    assert "枕头" in SUMMARIZE_PROMPT and "主语也不要换成对方" in SUMMARIZE_PROMPT
+    assert "又催他兑现" in SUMMARIZE_PROMPT and "老惦记着请我吃面包" not in SUMMARIZE_PROMPT
+    t = LongTermMemory._transcript("group_1", [
+        {"role": "user", "content": "【群鲨鱼 → 你】软软的不是更舒服吗", "uid": 1, "name": "群鲨鱼"},
+        {"role": "assistant", "content": "软枕头睡得脖子疼"},
+        {"role": "user", "content": "【阿明 → 群鲨鱼、你（回复）】哈哈", "uid": 2, "name": "阿明"}])
+    assert t == "【群鲨鱼 → 伊蕾娜】软软的不是更舒服吗\n伊蕾娜（她自己）：软枕头睡得脖子疼\n【阿明 → 群鲨鱼、伊蕾娜（回复）】哈哈"
+
+
+@pytest.mark.asyncio
+async def test_told_same_thing_not_twice_and_group_gap_1003(tmp_path):
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "told": ["又催他兑现刚出炉的可颂"], "affection": 0}]})
+    _prof_with(m, 111, [], told=[{"text": "又催他兑现刚出炉可颂", "date": date_str(), "scope": "private"}])
+    await _feed(m, "private_111")
+    assert len(m.get_user(111)["told"]) == 1, "同一件事不记两遍"
+    m.group_batch, m.group_gap = 2, 1200
+    m.add_pending("group_5", [{"role": "user", "content": "a", "uid": 111, "name": "阿明"}, {"role": "assistant", "content": "嗯"}])
+    await asyncio.sleep(0.05)
+    n = len(calls)
+    m.add_pending("group_5", [{"role": "user", "content": "b", "uid": 111, "name": "阿明"}, {"role": "assistant", "content": "嗯"}])
+    await asyncio.sleep(0.05)
+    assert len(calls) == n, "20 分钟内同一个群不再整理"
+    for i in range(2):
+        m.add_pending("group_5", [{"role": "user", "content": f"c{i}", "uid": 111, "name": "阿明"}, {"role": "assistant", "content": "嗯"}])
+    await asyncio.sleep(0.05)
+    assert len(calls) == n + 1, "攒到 3 批就不等了"
+
+
+def test_edit_impression_1003(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [], impression="话多又黏人的熟人，爱用面包讨好她")
+    assert m.edit_impression(111, "话多又黏人，偶尔嘴硬但会认错") == ("话多又黏人的熟人，爱用面包讨好她", "话多又黏人，偶尔嘴硬但会认错")
+    assert m.get_user(111)["impression"] == "话多又黏人，偶尔嘴硬但会认错"
+    assert m.edit_impression(111, "无")[1] == "（没有）" and "impression" not in m.get_user(111)

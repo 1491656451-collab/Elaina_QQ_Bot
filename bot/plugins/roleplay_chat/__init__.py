@@ -120,6 +120,7 @@ ltm = LongTermMemory(
 ltm.affection_cfg = ltm_affection
 ltm.facts_by_tier = {**ltm.facts_by_tier, **cfg.memory_facts_by_tier}   # 每档关系最多记几条
 ltm.group_batch = cfg.memory_batch_group            # 群里攒几条整理一次
+ltm.group_gap = cfg.memory_group_gap_minutes * 60    # 同一个群两次整理至少隔多久（10/03 起）
 ltm.close_friends = tuple(cfg.close_friends)
 ltm.gender_cap = cfg.gender_cap
 ltm.summary_max_tokens = cfg.memory_summary_max_tokens
@@ -1038,9 +1039,9 @@ def unprompted_hits(reply: str, context: str) -> list[str]:
     return out
 
 
-def drop_sentences_with(reply: str, words: list[str]) -> str:
-    parts = re.split(r"(?<=[。！？!?…~\n])", reply)
-    return "".join(p for p in parts if not any(w in p for w in words)).strip()
+UNPROMPTED_HINT = ("刚才的回复提到了「{words}」，可对方和最近的聊天都没说起这个。"
+                   "要是和正在聊的事真有关系（比如正在聊吃的），可以照样说；没什么关系就别提，接着对方的话重新回复。"
+                   "直接给出新的回复，不要道歉，不要解释。")
 
 
 # 调模型时一写到“【”就停：她的回复里本来不该有“【名字】”，写出来多半是开始照着聊天记录的格式替别人说话了（10/01）
@@ -1960,16 +1961,19 @@ mem_edit = on_command("改记忆", aliases={"修改记忆"}, rule=to_me(), permi
 async def _(event: MessageEvent, arg: Message = CommandArg()):
     """/改记忆 @某人 第3条 新内容：改 /记忆 里的第 3 条（“她说过”接着往下编号）"""
     plain = arg.extract_plain_text()
-    m = re.search(r"第\s*(\d{1,3})\s*条\s*[:：]?\s*(.+)$", plain, re.S)
+    m = re.search(r"(?:第\s*(\d{1,3})\s*条|印象)\s*[:：]?\s*(.+)$", plain, re.S)
     if not m or not m.group(2).strip():
-        await mem_edit.finish("用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）")
+        await mem_edit.finish("用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）；/改记忆 @某人 印象 新内容（写“无”就清掉）")
     rest = Message([seg for seg in arg if seg.type != "text"])
     head = plain[:m.start()].strip()
     if head:
         rest += MessageSegment.text(head)
     target = _parse_target(event, rest)
     if not target or target[0] != "user":
-        await mem_edit.finish("用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）")
+        await mem_edit.finish("用法：/改记忆 @某人 第3条 新内容（序号看 /记忆；要换类型就在内容前写类型加空格，如“经历 兑现过……”）；/改记忆 @某人 印象 新内容（写“无”就清掉）")
+    if m.group(1) is None:                    # /改记忆 @某人 印象 新内容
+        done = ltm.edit_impression(target[1], m.group(2).strip())
+        await mem_edit.finish(f"（印象：{done[0]} → {done[1]}）" if done else "（新印象是空的，没改）")
     done = ltm.edit_fact(target[1], int(m.group(1)), m.group(2).strip())
     if done is None:
         await mem_edit.finish(f"（没有第 {m.group(1)} 条，先用 /记忆 看看）")
@@ -2724,26 +2728,25 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 reply = ""
             odd = unprompted_hits(reply, context)
             if odd:
-                # 没人提蘑菇，她自己突然冒出一句“少拿我跟蘑菇相提并论”：删掉那几句；整条都是就重说一次
-                kept = drop_sentences_with(reply, odd)
-                logger.info(f"回复里突然冒出没人提过的“{'、'.join(odd)}”，删掉那几句：{reply[:40]}")
-                if kept:
-                    reply = kept
-                else:
-                    resp = await client.chat.completions.create(
-                        model=cfg.deepseek_model,
-                        messages=messages + [
-                            {"role": "assistant", "content": reply},
-                            {"role": "system", "content": f"刚才的回复突然提到了「{'、'.join(odd)}」，可对方根本没说起这个。请重新回复这条消息，只接对方说的话，不要道歉，不要解释。"},
-                        ],
-                        temperature=cfg.llm_temperature,
-                        max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
-                        extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
-                    )
-                    budget.track(resp, "chat", user=event.user_id, group=gid_q)
-                    choice = resp.choices[0]
-                    reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
-                    reply = drop_sentences_with(reply, unprompted_hits(reply, context))
+                # 没人提蘑菇，她自己突然冒出一句（9/29“少拿我跟蘑菇相提并论”、10-03“你连蘑菇和沙耶都分不清”）：
+                # 不再按句子删（删完会剩半截“好感”），整条退回让她自己看：和话题有关就留着，无关就重说（10-03）
+                logger.info(f"回复里提到了没人说过的“{'、'.join(odd)}”，退回让她再看一眼：{reply[:60]!r}")
+                resp = await client.chat.completions.create(
+                    model=cfg.deepseek_model,
+                    messages=messages + [
+                        {"role": "assistant", "content": reply},
+                        {"role": "system", "content": UNPROMPTED_HINT.format(words="、".join(w for w in dict.fromkeys(odd) if not any(w != x and w in x for x in odd)))},
+                    ],
+                    temperature=cfg.llm_temperature,
+                    max_tokens=max_tokens_for(mode), stop=CHAT_STOP,
+                    extra_body={"thinking": {"type": "enabled" if cfg.llm_thinking else "disabled"}},
+                )
+                budget.track(resp, "chat", user=event.user_id, group=gid_q)
+                choice = resp.choices[0]
+                reply, emotion = split_sticker(clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length", keep_sticker=True))
+                reply = cut_derailed(reply, context, speaker_names(event))
+                if is_fragment(reply):
+                    reply = ""
         except Exception as e:  # noqa: BLE001
             # 出错时不在聊天里发任何东西；余额不足 / Key 失效私信管理员
             kind = classify_error(e)
