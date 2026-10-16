@@ -31,9 +31,7 @@ mkdir "%OUT%\data" 2>nul
 tar -xzf "%OUT%\data.tgz" -C "%OUT%\data"
 if errorlevel 1 (echo   ！！长期记忆没解压成功，请截图发给 Claude) else (del "%OUT%\data.tgz")
 > "%OUT%\说明.txt" echo 这是服务器在 %STAMP% 的日志和记忆快照，只用来在电脑上排查问题。
->> "%OUT%\说明.txt" echo 不要把这里的 history、data 复制到 D:\QQBot\bot\data 或传回服务器：服务器上的才是最新的，覆盖了会让她的记忆倒回去。
->> "%OUT%\说明.txt" echo data\memory\users\QQ号.json = 每个人的档案（印象、好感、性别、聊天次数）；data\memory\groups\群号.json = 群往事；data\memory\pending = 还没整理进档案的消息；
->> "%OUT%\说明.txt" echo data\qzone\daily = 每天的今日见闻；data\qzone\*.json = 发过的说说、看过的评论、空间状态；data\usage\日期.json = 每天的花费账本（和 /花费 看到的是同一份）；history = 每个群、每个私聊最近的对话（短期记忆）。
+type "%~dp0拉取服务器日志-说明.txt" >> "%OUT%\说明.txt"
 echo.
 echo 完成：%OUT%
 explorer "%OUT%"

@@ -146,6 +146,19 @@ HER_TOPICS = {
 }
 
 
+def _stricter_scope(a, b) -> str:
+    """两条合成一条时，按更私密的算：私聊（或旧条目）> 某个群 > 公开 / 空间；两个不同的群合在一起按私聊算"""
+    a, b = a or "legacy", b or "legacy"
+    if a == b:
+        return a
+    if "private" in (a, b) or "legacy" in (a, b):
+        return "private"
+    ga, gb = str(a).startswith("group:"), str(b).startswith("group:")
+    if ga and gb:
+        return "private"
+    return a if ga else b if gb else a
+
+
 _ARROW_YOU_RE = re.compile(r"(→ (?:[^】]*、)?)你(?=[、】（])")
 
 
@@ -370,7 +383,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 2. 不记聊天流水账：不要写“问伊蕾娜……，被伊蕾娜回……”，也不要在句尾带“被她回……”“被吐槽……”；一次性的随口一问、寒暄客套不记。她怎么回的一般不用记，除非成了他们之间的梗或约定。例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买伊蕾娜”。
    和已有某条说的是同一回事，就用 update 改那条或者 touch，不要再 add 一条相近的。
    同一个话题（比如都和请伊蕾娜吃面包有关）已经有条目的，新进展用 update 合进那条，不要另加一条；档案里同一话题已经有好几条的，顺手合并成一两条（update 其中一条写合并后的内容，其余 drop）。
-   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事只写进 told，不要再在对方条目里另加一条（例如“被伊蕾娜答应回赠……”）。
+   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事只写进 told，不要再在对方条目里另加一条（例如“被伊蕾娜答应回赠……”）；反过来，对方答应她的事（请她吃东西、送她东西）只记在对方的条目里（约定），不要再写进 told，她回一句“记下了”“别忘了”也不算她答应了什么。
    例：伊蕾娜说“这家旅馆的枕头太软了”“下次还你一个硬一点的，当上次面包的回礼”→ 对方的条目里什么也不加（嫌枕头软的是她）；told 写“说过要送他一个硬枕头当面包的回礼”。
 3. 每条不超过 30 字，写这个人（“是学生”“喜欢刚出炉的可颂”），不写日期，日期由程序记。不要把对方的昵称、群名片当成一条记（程序已经知道昵称；昵称里的字眼也不代表他真是那样的人）。
 4. 类型 kind 只能是：身份、喜好、习惯、近况、计划、约定、梗、经历。
@@ -380,6 +393,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 7. 不要记：密码、手机号、身份证号、住址、银行卡等隐私；健康、疾病、政治、宗教等敏感信息；伊蕾娜自己讲的小说故事的内容。
    对方说想轻生、不想活了、想伤害自己：不记原话和细节，最多记一条 kind=近况、weight=1 的“那阵子心情很低落”。
 8. 只根据聊天记录，不猜测、不编造。人和 QQ 号的对应以档案列表为准，列表里没有的人不要写。
+   对方讲的别人（朋友、家人、同学、同事）的事不记：例如“我朋友小林最近和女朋友分手了”什么都不记。也不要从别人的事、或者伊蕾娜的建议（“那你多陪陪他吧”）推出他在做什么；只有他自己明说了自己的事才记。
 
 二、怎么改（每个人）
 - add：新记下的，每条写 text、kind、weight（计划可加 due）。和已有某条意思一样的不要再加，写进 touch。
@@ -458,6 +472,25 @@ SUMMARIZE_INPUT = """今天是 {today}。这段聊天来自：{where}。
 {transcript}"""
 
 
+VERIFY_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆核对员。用户消息里是一段聊天记录（“伊蕾娜（她自己）：”开头的是她自己说的，其余是别人说的），和根据这段记录整理出来、准备存进她记忆里的几条。请逐条对着聊天记录判断，只挑出有问题的：
+- 主语反了：伊蕾娜自己的经历、喜恶、说的话、答应的事，被写成了对方的；或者对方答应她的事，被写成她答应对方的（反过来也算）。
+- 记录里没有：记录里找不到、是推测出来的（例如把伊蕾娜给的建议“那你多陪陪他吧”当成对方在做的事）。
+- 别人的事：对方讲的朋友、家人、同学等第三个人的事，不是对方本人的。
+标着“她说过”的条目，说的是伊蕾娜对这个人说过、答应过的事：其实是对方答应她的，算主语反了；只是她催东西、吐槽、随口回一句，算记录里没有。
+意思对、只是说法不一样的，算对；拿不准的也算对。只输出 JSON：{"bad": [{"n": 编号, "why": "主语反了"}]}，全都没问题就输出 {"bad": []}。"""
+
+NIGHTLY_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。她晚上睡着了，你帮她把一个人的记忆档案理一遍。用户消息里是这个人的整份档案：印象、每条记忆（#编号、类型、重要度、在哪儿知道的、最后聊到是哪天）、她跟他说过的话。这次没有聊天记录，只整理已有的，不加新的。只输出 JSON。
+
+要做的：
+1. 合并：说的是同一件事、或者同一个话题的几条（比如都和请伊蕾娜吃面包有关），合成一条：update 其中一条写合并后的内容（不超过 30 字），其余的 drop。**只合并“在哪儿知道的”相同的几条**（私聊知道的不要和群里知道的合在一起）。
+2. 过时的：已经兑现的约定、明显过去了的事，update 成现在的状态（例如“约好请伊蕾娜吃面包”已经请过了 →“请伊蕾娜吃过面包”，kind 改成经历）；已经没有意义的 drop。不确定有没有兑现的不要动。
+3. 印象 impression：一句话，不超过 40 字，用伊蕾娜的口吻，只写性格和相处方式；不写私事，也不提伊蕾娜自己爱的东西（面包、钱这些）。原来的已经合适就不写这一项。
+4. 她说过的：兑现了、取消了、说反了的，用 told_update 改成现在的状态（old 照抄原文）。不删。
+5. 看着就不对的，写进 suspect（不改、不删，留给管理员看）：主语反了（把伊蕾娜的事写成了对方的、对方答应她的写成了她答应的）、两条互相矛盾、明显是第三个人的事。
+不要为了变短而删：没有重复、也没过时的就留着。一次删掉的不能超过一半。条目里提到伊蕾娜时写“伊蕾娜”，不写“她”“我”。没什么要改的，就输出 {}。
+
+格式：{"update": [{"id": 3, "text": "……", "kind": "经历", "weight": 2}], "drop": [5], "told_update": [{"old": "……", "text": "……"}], "impression": "……", "suspect": [{"id": 7, "why": "……"}]}"""
+
 MIGRATE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。她的记忆格式升级了：以前每个人只有一串句子，现在每条要标上类型和重要度。用户消息里是一个人的旧档案，请整理成新格式。只输出 JSON。
 
 1. 把“问伊蕾娜……，被伊蕾娜回……”这种聊天流水账，改写成关于这个人的话，或者直接去掉；句尾也不要留“被她回……”“被吐槽……”。一次性的随口一问、寒暄去掉；意思重复的合并。
@@ -496,6 +529,18 @@ class LongTermMemory:
         self._running: set[str] = set()         # 正在整理的会话，避免重复开任务
         self.group_gap = 0.0                     # 同一个群两次整理至少隔多少秒（攒得太多时不等）
         self._started: dict[str, float] = {}    # 会话 -> 上次开始整理的时间
+        # 聊完了再整理（10/16）：一个会话安静这么久、攒的又够数，就整理掉，不等凑够一批；0 = 不用
+        self.idle_minutes = 0.0
+        self.idle_minutes_group = 0.0
+        self.idle_min_entries = (4, 6)           # 私聊、群里至少攒了几条才值得整理
+        # 整理完再核对一遍（10/16）：新记的、改过的、她说过的，对着原文再问一遍，判错的不存
+        self.verify_enabled = False
+        self.verify_client = None
+        self.verify_model: str | None = None
+        # 睡前整理（10/16）：她睡着后给当天聊过的人各理一遍档案（合并、改过时的、重写印象、标出可疑的）
+        self.nightly_client = None
+        self.nightly_model: str | None = None
+        self.nightly_max = 30
         self._names: dict[int, dict[str, int]] = {}   # 群号 -> {昵称: QQ}
         self._fails: dict[str, int] = {}          # 会话 -> 连续整理失败几次
         self._retry_at: dict[str, float] = {}     # 会话 -> 失败后，这个时间之前先不再试
@@ -754,8 +799,9 @@ class LongTermMemory:
     def _batch_for(self, key: str) -> int:
         return max(2, int(self.group_batch or self.batch)) if key.startswith("group_") else self.batch
 
-    def _start(self, key: str) -> bool:
-        """在后台整理这个会话（高峰时段、正在整理、刚失败过还没到重试时间，就先不整理）"""
+    def _start(self, key: str, force: bool = False) -> bool:
+        """在后台整理这个会话（高峰时段、正在整理、刚失败过还没到重试时间，就先不整理）。
+        force：不等攒够一批（聊完了再整理用）"""
         if self.defer() or key in self._running or time.time() < self._retry_at.get(key, 0):
             return False
         if key.startswith("group_") and time.time() - self._started.get(key, 0) < self.group_gap:
@@ -763,11 +809,37 @@ class LongTermMemory:
                 return False
         self._started[key] = time.time()
         self._running.add(key)
-        task = asyncio.create_task(self.summarize(key))
+        task = asyncio.create_task(self.summarize(key, force=force))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(lambda _t, k=key: self._running.discard(k))
         return True
+
+    def idle_sweep(self, now: float | None = None) -> list[str]:
+        """聊完了再整理：安静了 idle 分钟、攒的又够数的会话，不等凑够一批就整理（空间评论不算，晚上日结会整理）。
+        返回这次开始整理的会话"""
+        if not self.enabled or not (self.idle_minutes or self.idle_minutes_group):
+            return []
+        now = time.time() if now is None else now
+        started = []
+        for key in self.pending_keys():
+            group = key.startswith("group_")
+            if not (group or key.startswith("private_")):
+                continue
+            idle = self.idle_minutes_group if group else self.idle_minutes
+            if not idle:
+                continue
+            path = self._pending_path(key)
+            try:
+                quiet = now - path.stat().st_mtime
+            except OSError:
+                continue
+            n = len(_read(path, []))
+            if quiet >= idle * 60 and n >= self.idle_min_entries[1 if group else 0] and self._start(key, force=True):
+                started.append(key)
+        if started:
+            logger.info(f"长期记忆：聊完了再整理 {'、'.join(started)}")
+        return started
 
     def retry_pending(self) -> int:
         """把攒够一批、还没整理的会话补做一次（开机时和定时任务用）；顺便在后台迁移几份旧格式档案。返回开始整理了几个"""
@@ -928,6 +1000,7 @@ class LongTermMemory:
             return
         self._fails.pop(key, None)
         self._retry_at.pop(key, None)
+        data = await self._verify(key, entries, people, data)
 
         try:
             # 先在内存里算好所有人的新档案，最后统一写入；每批记一个编号，同一批重试时不重复加减好感
@@ -1017,6 +1090,183 @@ class LongTermMemory:
         logger.info(f"长期记忆已整理：{key}，更新了 {len(changed)} 人的档案")
 
     # -------------------------------------------------------------- 合并：模型只给“增改删”，程序来改档案
+    # -------------------------------------------------------------- 整理完再核对一遍（10/16）
+    async def _verify(self, key: str, entries: list[dict], people: dict[int, str], data: dict) -> dict:
+        """把这次新记的、改过的条目和“她说过”，对着原文再让模型看一遍：主语反了、原文里没有、是别人的事的，这次不存。
+        核对本身出错就照常存（不因为核对挂了丢记忆）"""
+        if not self.verify_enabled:
+            return data
+        items = []                                   # (这个人那一项, 字段, 第几个, 正文, 给模型看的一行)
+        for p in _as_list(data.get("people")):
+            if not isinstance(p, dict):
+                continue
+            qq = _int(p.get("qq"))
+            if qq not in people:
+                continue
+            who = _DUP_MARK_RE.sub("", people[qq] or "").strip() or str(qq)
+            for field, label in (("add", "新记的"), ("update", "改成"), ("told", "她说过")):
+                v = p.get(field)
+                if not isinstance(v, list):
+                    continue
+                for i, x in enumerate(v):
+                    text = _item_text(x.get("text") if isinstance(x, dict) else x, 60)
+                    if text:
+                        items.append((p, field, i, text, f"关于「{who}」（QQ {qq}）｜{label}：{text}"))
+        if not items:
+            return data
+        user_msg = ("【聊天记录】\n" + self._transcript(key, entries) + "\n\n【要核对的】\n"
+                    + "\n".join(f"{n + 1}. {it[4]}" for n, it in enumerate(items)))
+        try:
+            api = self.verify_client or self.summary_client or self.client
+            resp = await api.chat.completions.create(
+                model=self.verify_model or self.model,
+                messages=[{"role": "system", "content": VERIFY_PROMPT}, {"role": "user", "content": user_msg}],
+                temperature=0, max_tokens=800, response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            budget.track(resp, "memory_verify", user=None, group=None)
+            bad = json.loads(resp.choices[0].message.content or "").get("bad") or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"长期记忆：{key} 核对出错，这次照常存：{type(e).__name__}: {e}")
+            return data
+        drop: dict[tuple[int, str], set[int]] = defaultdict(set)
+        for b in _as_list(bad):
+            n = _int(b.get("n") if isinstance(b, dict) else b)
+            if n is None or not 1 <= n <= len(items):
+                continue
+            p, field, i, text, _ = items[n - 1]
+            why = _clean_text(b.get("why"), 20) if isinstance(b, dict) else ""
+            drop[(id(p), field)].add(i)
+            logger.info(f"长期记忆：核对挡下 {key} {p.get('qq')} 的“{text}”（{why or '有问题'}）")
+        for p, field, *_ in items:
+            gone = drop.get((id(p), field))
+            if gone and isinstance(p.get(field), list):
+                p[field] = [x for i, x in enumerate(p[field]) if i not in gone]
+                drop.pop((id(p), field), None)
+        return data
+
+    # -------------------------------------------------------------- 睡前整理（10/16）
+    def nightly_candidates(self, since_hours: float = 36) -> list[int]:
+        """当天聊过、上次睡前整理以后又聊过、条目够多（或印象里有她爱的东西）的人"""
+        d = self.root / "users"
+        if not d.is_dir():
+            return []
+        now, out = time.time(), []
+        for f in d.glob("*.json"):
+            qq = _int(f.stem)
+            if qq is None:
+                continue
+            prof = _read(f, None)
+            if not isinstance(prof, dict):
+                continue
+            last = float(prof.get("last_talk") or 0)
+            if now - last > since_hours * 3600 or float(prof.get("nightly_at") or 0) >= last:
+                continue
+            facts = [x for x in prof.get("facts") or [] if isinstance(x, dict)]
+            if len(facts) >= 4 or _her_topics(prof.get("impression") or ""):
+                out.append((last, qq))
+        return [q for _, q in sorted(out, reverse=True)][: self.nightly_max]
+
+    def _nightly_block(self, prof: dict) -> str:
+        lines = [f"印象：{prof.get('impression') or '（还没有）'}"]
+        for f in prof.get("facts") or []:
+            if isinstance(f, dict) and not _expired(f):
+                lines.append(f"#{f.get('id')} [{f.get('kind') or '未分类'}·{_weight(f.get('weight'))}｜{self._scope_name(f.get('scope'))}｜"
+                             f"{_md(f.get('seen') or f.get('since'))}] {f.get('text', '')}")
+        told = [t for t in prof.get("told") or [] if isinstance(t, dict)]
+        if told:
+            lines.append("她跟他说过：" + "；".join(f"{t.get('text', '')}（{_md(t.get('date'))}）" for t in told))
+        lines += [x.strip() for x in self._tidy_hints(prof.get("impression") or "", [f for f in prof.get("facts") or [] if isinstance(f, dict)])]
+        return "\n".join(lines)
+
+    async def nightly(self, qqs: list[int] | None = None) -> int:
+        """睡前整理：给这些人各调一次模型理一遍档案。返回理了几个人"""
+        if not self.enabled:
+            return 0
+        done = 0
+        for qq in (self.nightly_candidates() if qqs is None else qqs):
+            if not budget.can_background():
+                logger.info("长期记忆：今天的钱花完了，睡前整理先停")
+                break
+            async with self._user_locks[qq]:
+                try:
+                    if await self._nightly_one(qq):
+                        done += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"长期记忆：睡前整理 {qq} 出错，跳过：{type(e).__name__}: {e}")
+        if done:
+            logger.info(f"长期记忆：睡前整理了 {done} 个人")
+        return done
+
+    async def _nightly_one(self, qq: int) -> bool:
+        prof = self.get_user(qq)
+        gen = prof.get("mem_gen", 0)
+        api = self.nightly_client or self.summary_client or self.client
+        resp = await api.chat.completions.create(
+            model=self.nightly_model or self.model,
+            messages=[{"role": "system", "content": NIGHTLY_PROMPT},
+                      {"role": "user", "content": f"今天是 {_today_str()}。\n【{prof.get('name') or qq} 的档案】\n" + self._nightly_block(prof)}],
+            temperature=0.2, max_tokens=self.summary_max_tokens, response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        budget.track(resp, "memory_nightly", user=None, group=None)
+        if resp.choices[0].finish_reason == "length":
+            logger.warning(f"长期记忆：睡前整理 {qq} 写到一半被截断了，这次不改")
+            return False
+        d = json.loads(resp.choices[0].message.content or "")
+        if not isinstance(d, dict):
+            return False
+        prof = self.get_user(qq)                     # 重新读：调用期间可能又聊过
+        if prof.get("mem_gen", 0) != gen:           # 管理员这期间改过、删过：这次不动
+            return False
+        facts = [f for f in prof.get("facts") or [] if isinstance(f, dict)]
+        by_id = {_int(f.get("id")): f for f in facts if _int(f.get("id")) is not None}
+        drops = {i for i in (_int(x) for x in _as_list(d.get("drop"))) if i in by_id}
+        if len(facts) >= 4 and len(drops) > len(facts) / 2:
+            logger.warning(f"长期记忆：睡前整理 {qq} 要删 {len(drops)}/{len(facts)} 条，不像正常整理，这次不改")
+            return False
+        dropped = [by_id[i] for i in drops]
+        for u in _as_list(d.get("update")):
+            if not isinstance(u, dict):
+                continue
+            i = _int(u.get("id"))
+            if i not in by_id or i in drops:
+                continue
+            f = by_id[i]
+            text = _clean_text(u.get("text"))
+            if text:
+                f["text"] = text
+                f["tags"] = _clean_tags(f.get("tags"), text)
+            if u.get("kind") in KINDS:
+                f["kind"] = u["kind"]
+                if u["kind"] != "计划":
+                    f.pop("due", None)
+            if "weight" in u:
+                f["weight"] = _weight(u["weight"], f.get("weight", 2))
+            for g in dropped:                        # 合进来的里有更私密的（私聊知道的、别的群知道的）：这条也按更私密的算
+                if _related(_grams(g.get("text", "")), text or f.get("text", "")) >= 2:
+                    f["scope"] = _stricter_scope(f.get("scope"), g.get("scope"))
+        prof["facts"] = [f for f in facts if _int(f.get("id")) not in drops]
+        self._merge_told(prof, {"told_update": d.get("told_update")}, "private")
+        imp = _drop_her_topics(_clean_text(d.get("impression"), 40))
+        if imp:
+            prof["impression"] = imp
+        sus = []
+        for s in _as_list(d.get("suspect")):
+            if isinstance(s, dict) and _int(s.get("id")) in by_id and _int(s.get("id")) not in drops:
+                sus.append({"id": _int(s.get("id")), "why": _clean_text(s.get("why"), 30), "date": _today_str()})
+        if sus:
+            prof["suspect"] = sus
+            for s in sus:
+                logger.info(f"长期记忆：睡前整理觉得 {qq} 的 #{s['id']}“{by_id[s['id']].get('text', '')}”可能不对：{s['why']}")
+        else:
+            prof.pop("suspect", None)
+        prof["nightly_at"] = time.time()
+        self.save_user(prof)
+        logger.info(f"长期记忆：睡前整理 {qq}：改 {len(_as_list(d.get('update')))} 条、删 {len(drops)} 条"
+                    f"{'、印象重写' if imp else ''}{f'、{len(sus)} 条可疑' if sus else ''}")
+        return True
+
     def _new_fact(self, prof: dict, text: str, kind, weight, scope: str, due=None, since: str | None = None, tags=None) -> dict:
         nid = int(prof.get("next_id") or 1)
         prof["next_id"] = nid + 1
@@ -1391,6 +1641,9 @@ class LongTermMemory:
         """整理时的扣分：“纠缠”（烦人但没恶意）每人每天合计最多扣 nag_daily_cap 分；“恶意”不限。
         没标类别的：-6 及以下按恶意、其余按纠缠；标了“正常”却扣分的，按纠缠算"""
         if kind != "恶意" and not (kind not in ("正常", "纠缠") and delta <= -6):
+            if delta < -5:                        # 规则写的纠缠是 -1～-5；pro 常给 -8（10/16 对比），按 -5 算
+                logger.info(f"长期记忆：{qq} 纠缠扣 {delta} 超出了 -5，按 -5 算")
+                delta = -5
             cap = float(self.affection_cfg.get("nag_daily_cap", 0) or 0)
             if cap:
                 today = self._today()
@@ -1729,8 +1982,12 @@ class LongTermMemory:
 
         if ask:
             due = f"（大概是{_md(ask['due'])}的事）" if ask.get("due") else ""
-            parts.append(f"【可以问问】「{who}」{_ago(ask.get('since'))}说过：{_to_you(ask.get('text', ''))}{due}。"
-                         "隔了一阵了，聊得上的话可以顺口问一句后来怎么样；接不上就不提。只问这一件。")
+            if ask.get("kind") == "约定":
+                parts.append(f"【可以问问】你和「{who}」{_ago(ask.get('since'))}约过：{_to_you(ask.get('text', ''))}。"
+                             "聊得上的话可以顺口提一句（别像在催）；接不上就不提。只提这一件。")
+            else:
+                parts.append(f"【可以问问】「{who}」{_ago(ask.get('since'))}说过：{_to_you(ask.get('text', ''))}{due}。"
+                             "隔了一阵了，聊得上的话可以顺口问一句后来怎么样；接不上就不提。只问这一件。")
             ask["offered"] = _today_str()          # 提过一次就不再提这件（问没问、对方怎么答，下次整理时会记进去）
             try:
                 self.save_user(prof)
@@ -1763,16 +2020,21 @@ class LongTermMemory:
         except (TypeError, ValueError):
             return None
         today = date.today().isoformat()
-        plans, recents = [], []
+        plans, promises, recents = [], [], []
         for f in prof.get("facts") or []:
             if not isinstance(f, dict) or f.get("offered") or _expired(f) or not scope_ok(f.get("scope"), place, gid):
                 continue
             if f.get("kind") == "计划" and f.get("due") and str(f["due"]) <= today:
                 plans.append(f)
+            elif (f.get("kind") == "约定" and _days_since(f.get("since")) >= ASK_RECENT_MIN_DAYS
+                  and not _her_topics(f.get("text", ""))):   # 还没兑现的约定（10/16）；面包这类不提，免得又催
+                promises.append(f)
             elif f.get("kind") == "近况" and _weight(f.get("weight")) >= 2 and _days_since(f.get("since")) >= ASK_RECENT_MIN_DAYS:
                 recents.append(f)
         if plans:
             return max(plans, key=lambda f: str(f.get("due")))
+        if promises:
+            return max(promises, key=lambda f: (_weight(f.get("weight")), -_days_since(f.get("since"))))
         if recents:
             return max(recents, key=lambda f: (_weight(f.get("weight")), -_days_since(f.get("since"))))
         return None
@@ -1835,6 +2097,8 @@ class LongTermMemory:
             tags = [f.get("kind") or "未分类", "★" * _weight(f.get("weight")), self._scope_name(f.get("scope")), _ago(f.get("seen") or f.get("since"))]
             if f.get("tags"):
                 tags.append("词：" + "/".join(map(str, f["tags"])))
+            if any(s.get("id") == f.get("id") for s in prof.get("suspect") or []):
+                tags.append("⚠睡前整理觉得可能不对：" + next(s.get("why", "") for s in prof["suspect"] if s.get("id") == f.get("id")))
             out.append(f"{i + 1}. {f.get('text', '')}（{'｜'.join(tags)}）")
         told = [t for t in prof.get("told") or [] if isinstance(t, dict)]
         if told:

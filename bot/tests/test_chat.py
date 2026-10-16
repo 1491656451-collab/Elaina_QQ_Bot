@@ -5062,3 +5062,133 @@ async def test_impression_saved_without_her_topics_1004(tmp_path):
     m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "impression": "话多又黏人的熟人，爱用面包讨好她，偶尔嘴硬", "affection": 0}]})
     await _feed(m, "private_111")
     assert m.get_user(111)["impression"] == "话多又黏人的熟人，偶尔嘴硬"
+
+
+def test_summary_prompt_promise_direction_and_third_party_1016():
+    """10/16 模型对比：对方答应她的事被写进“她说过”（flash 1/3、pro 3/3）；朋友的事被记成条目（两个模型都 3/3）"""
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
+    assert "对方答应她的事（请她吃东西、送她东西）只记在对方的条目里" in SUMMARIZE_PROMPT
+    assert "我朋友小林最近和女朋友分手了" in SUMMARIZE_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_nag_clamped_to_minus5_1016(tmp_path):
+    """10/16 模型对比：pro 把卖惨纠缠扣到 -8，规则是 -1～-5 → 标了纠缠的按 -5 算；恶意照扣"""
+    cuts = iter([(-8, "纠缠"), (-8, "恶意")])
+    m, _ = _mem(tmp_path, lambda kw: (lambda d: {"people": [{"qq": 111, "affection": d[0], "affection_kind": d[1]}]})(next(cuts)))
+    await _feed(m, "private_111")
+    assert m.get_user(111)["score"] == 15
+    await _feed(m, "private_111")
+    assert m.get_user(111)["score"] == 7
+
+
+# ---------------------------------------------------------------- 10/16 聊完再整理、核对、睡前整理、约定并进【可以问问】
+@pytest.mark.asyncio
+async def test_idle_sweep_1016(tmp_path):
+    """安静够久、攒的够数才整理；不够数、还在聊、空间评论、关掉时都不动；和攒够一批不会同时整理同一个会话"""
+    import os
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "affection": 0}]})
+    m.batch, m.group_batch = 8, 12
+    m.idle_minutes, m.idle_minutes_group = 10, 15
+    two = [{"role": "user", "content": "在吗", "uid": 111, "name": "阿明"}, {"role": "assistant", "content": "在"}]
+    m.add_pending("private_111", two)
+    m.add_pending("private_222", two + two)
+    m.add_pending("group_5", two * 3)
+    m.add_pending("qzone_111", two * 3)
+    old = time.time() - 11 * 60
+    for k in ("private_111", "private_222", "group_5", "qzone_111"):
+        os.utime(m._pending_path(k), (old, old))
+    assert m.idle_sweep() == ["private_222"], "私聊 2 条不够数；群里才安静 11 分钟；空间评论不管"
+    assert m.idle_sweep() == [], "正在整理的不再开"
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1 and not m._pending_path("private_222").exists()
+    older = time.time() - 16 * 60
+    os.utime(m._pending_path("group_5"), (older, older))
+    assert m.idle_sweep() == ["group_5"]
+    await asyncio.sleep(0.05)
+    m.idle_minutes = m.idle_minutes_group = 0
+    m.add_pending("private_333", two * 3)
+    os.utime(m._pending_path("private_333"), (old, old))
+    assert m.idle_sweep() == [], "关掉时和以前一样"
+
+
+@pytest.mark.asyncio
+async def test_verify_drops_bad_items_1016(tmp_path):
+    """核对：判错的新条目、改动、她说过不存；核对出错照常存"""
+    def reply(kw):
+        if "记忆核对员" in kw["messages"][0]["content"]:
+            assert "1. 关于「阿明」（QQ 111）｜新记的：约好请伊蕾娜吃可颂" in kw["messages"][1]["content"]
+            return {"bad": [{"n": 2, "why": "主语反了"}, {"n": 3, "why": "别人的事"}]}
+        return {"people": [{"qq": 111, "add": [{"text": "约好请伊蕾娜吃可颂", "kind": "约定", "weight": 3},
+                                                {"text": "朋友小林失恋了", "kind": "近况", "weight": 1}],
+                            "told": ["答应过请他吃可颂"], "affection": 0}]}
+    m, calls = _mem(tmp_path, reply)
+    m.verify_enabled = True
+    await _feed(m, "private_111")
+    prof = m.get_user(111)
+    assert m.fact_texts(prof) == ["约好请伊蕾娜吃可颂"] and not prof.get("told")
+    # 核对出错：照常存
+    m2, _ = _mem(tmp_path / "b", lambda kw: (_ for _ in ()).throw(RuntimeError("x")) if "记忆核对员" in kw["messages"][0]["content"]
+                 else {"people": [{"qq": 111, "add": [{"text": "是学生", "kind": "身份", "weight": 3}], "affection": 0}]})
+    m2.verify_enabled = True
+    await _feed(m2, "private_111")
+    assert m2.fact_texts(m2.get_user(111)) == ["是学生"]
+
+
+@pytest.mark.asyncio
+async def test_nightly_consolidation_1016(tmp_path):
+    """睡前整理：合并、改类型、印象去掉面包、标可疑；私聊的合进群里那条，那条按私聊算；删太多不改；没聊过的不理"""
+    def reply(kw):
+        assert "睡着了" in kw["messages"][0]["content"]
+        return {"update": [{"id": 1, "text": "请伊蕾娜吃过两次面包，还特意买了刚出炉的", "kind": "经历"}],
+                "drop": [2], "impression": "话多又黏人，爱用面包讨好她，心思挺细。",
+                "suspect": [{"id": 4, "why": "主语反了"}]}
+    m, calls = _mem(tmp_path, reply)
+    _prof_with(m, 111, [
+        {"text": "约好请伊蕾娜吃面包", "kind": "约定", "weight": 3, "scope": "group:5"},
+        {"text": "特意买了刚出炉的面包给伊蕾娜", "kind": "经历", "weight": 2, "scope": "private"},
+        {"text": "下雨天不出门", "kind": "习惯", "weight": 1, "scope": "group:5"},
+        {"text": "嫌伊蕾娜的枕头软", "kind": "梗", "weight": 1, "scope": "group:5"},
+    ], last_talk=time.time() - 3600, impression="话多又黏人")
+    _prof_with(m, 222, [{"text": "a", "kind": "梗"}] * 4, last_talk=time.time() - 3 * 86400)
+    assert m.nightly_candidates() == [111], "两三天没聊的不理"
+    assert await m.nightly() == 1
+    prof = m.get_user(111)
+    assert m.fact_texts(prof) == ["请伊蕾娜吃过两次面包，还特意买了刚出炉的", "下雨天不出门", "嫌伊蕾娜的枕头软"]
+    f1 = prof["facts"][0]
+    assert f1["kind"] == "经历" and f1["scope"] == "private", "合进来的有私聊知道的：按私聊算"
+    assert prof["impression"] == "话多又黏人，心思挺细。"
+    assert prof["suspect"][0]["id"] == 4 and "可能不对" in m.describe_user(111)
+    assert m.nightly_candidates() == [], "理过了，没再聊就不再理"
+    # 一次要删一大半：不改
+    m3, _ = _mem(tmp_path / "c", lambda kw: {"drop": [1, 2, 3]})
+    _prof_with(m3, 111, [{"text": t, "kind": "梗"} for t in "abcd"], last_talk=time.time())
+    assert await m3.nightly() == 0 and len(m3.get_user(111)["facts"]) == 4
+
+
+def test_ask_includes_unfulfilled_promise_1016(tmp_path):
+    """还没兑现的约定并进【可以问问】：说法是“约过”；面包这类不提"""
+    m, _ = _mem(tmp_path, lambda kw: {})
+    old = time.time() - 8 * 3600
+    _prof_with(m, 111, [
+        {"text": "约好请伊蕾娜吃面包", "kind": "约定", "weight": 3, "scope": "private", "since": date_str(5)},
+        {"text": "约好下次一起去看海", "kind": "约定", "weight": 3, "scope": "private", "since": date_str(5)},
+    ], score=100, last_msg=old)
+    ctx = m.context_for(111, "阿明", None, text="我回来了")
+    assert "【可以问问】你和「阿明」5 天前约过：约好下次一起去看海" in ctx and "别像在催" in ctx
+    assert "面包" not in ctx.split("【可以问问】")[1]
+
+
+def test_nightly_due_once_per_night_1016(monkeypatch, tmp_path):
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p, "_NIGHTLY_FILE", tmp_path / "nightly.json")
+    monkeypatch.setattr(p.cfg, "memory_nightly", True)
+    monkeypatch.setattr(p.cfg, "sleep_enabled", False)
+    night = datetime(2026, 10, 17, 4, 0, tzinfo=p.peak.BEIJING)
+    day = datetime(2026, 10, 17, 14, 0, tzinfo=p.peak.BEIJING)
+    assert p._nightly_due(day) is None
+    assert p._nightly_due(night) == "2026-10-16"
+    (tmp_path / "nightly.json").write_text(json.dumps({"night": "2026-10-16"}))
+    assert p._nightly_due(night) is None, "同一晚只做一次（重启也不重做）"
+    monkeypatch.setattr(p.cfg, "memory_nightly", False)
+    assert p._nightly_due(datetime(2026, 10, 18, 4, 0, tzinfo=p.peak.BEIJING)) is None

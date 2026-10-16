@@ -5,7 +5,7 @@ from nonebot.adapters.onebot.v11 import Adapter
 def pytest_configure(config):
     config.stash[NONEBOT_INIT_KWARGS] = dict(
         deepseek_api_key="sk-test", reply_delay_min=0, reply_delay_max=0, reply_delay_per_char=0,
-        user_cooldown=0, merge_wait=0, smart_min_interval=0, peak_enabled=False, multi_message=False, peak_extra_delay_min=0, peak_extra_delay_max=0, switch_gap_min=0, switch_gap_max=0, bubble_gap_min=0, bubble_gap_max=0, catchup_gap_min=0, catchup_gap_max=0, catchup_enabled=False, sleep_enabled=False, merge_wait_complete=0, merge_wait_incomplete=0, skip_filler=False, log_file="", interject_enabled=False, bubble_enabled=False, nudge_enabled=False, persona_file="personas/elaina.md", superusers={"999"}, command_start={"/"}, memory_group_gap_minutes=0, memory_batch_group=5,
+        user_cooldown=0, merge_wait=0, smart_min_interval=0, peak_enabled=False, multi_message=False, peak_extra_delay_min=0, peak_extra_delay_max=0, switch_gap_min=0, switch_gap_max=0, bubble_gap_min=0, bubble_gap_max=0, catchup_gap_min=0, catchup_gap_max=0, catchup_enabled=False, sleep_enabled=False, merge_wait_complete=0, merge_wait_incomplete=0, skip_filler=False, log_file="", interject_enabled=False, bubble_enabled=False, nudge_enabled=False, persona_file="personas/elaina.md", superusers={"999"}, command_start={"/"}, memory_group_gap_minutes=0, memory_batch_group=5, memory_verify=False, memory_nightly=False,
     )
 
 @pytest.fixture(scope="session", autouse=True)

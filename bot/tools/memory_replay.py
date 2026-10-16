@@ -54,6 +54,10 @@ def read_env() -> dict:
     return env
 
 
+def _kind_of(system: str) -> str:
+    return "迁移" if "格式升级" in system else "核对" if "核对员" in system else "睡前整理" if "睡着了" in system else "整理"
+
+
 class Meter:
     """包一层客户端：记下每次调用的用量"""
     def __init__(self, client):
@@ -71,7 +75,7 @@ class Meter:
         out = u.completion_tokens or 0
         cost = (hit * PRICE["hit"] + miss * PRICE["miss"] + out * PRICE["out"]) / 1e6
         self.rows.append({"hit": hit, "miss": miss, "out": out, "cost": cost, "secs": round(time.time() - t, 1),
-                          "kind": "迁移" if "格式升级" in kw["messages"][0]["content"] else "整理",
+                          "kind": _kind_of(kw["messages"][0]["content"]),
                           "reply": resp.choices[0].message.content})
         return resp
 
@@ -121,6 +125,24 @@ PILLOW = [
 ]
 BREAD_RE = re.compile("面包|可颂|吐司|奶油")
 
+# 10/16 核对：故意喂给核对的几条（错的应该挡下，对的应该放过）
+VERIFY_TALK = [
+    ("u", "【群鲨鱼 → 你】下次我请你吃刚出炉的可颂"), ("a", "……那我就勉强记下了。"),
+    ("u", "【群鲨鱼 → 你】我朋友小林失恋了，天天哭"), ("a", "是喔。那你多陪陪他吧。"),
+    ("a", "说起来，这家旅馆的枕头太软了，睡得脖子疼。"),
+    ("u", "【群鲨鱼 → 你】我是学生，下周期末考试"), ("a", "那就好好复习。"),
+]
+VERIFY_ITEMS = {   # 正文: 应该挡下吗
+    "add": [("约好请伊蕾娜吃刚出炉的可颂", False), ("是学生，下周期末考试", False), ("嫌旅馆枕头太软，睡得脖子疼", True),
+            ("最近在陪失恋的朋友", True), ("朋友小林失恋了，天天哭", True)],
+    "told": [("答应过请他吃刚出炉的可颂", True), ("劝过他多陪陪朋友", False)],
+}
+
+
+def R_pro(key: str, env: dict):
+    """pro 用的客户端（睡前整理那节比较用）；不计入上面的花费统计"""
+    return AsyncOpenAI(api_key=key, base_url=env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), timeout=180, max_retries=0)
+
 
 def _last_json(rows) -> dict:
     try:
@@ -137,6 +159,7 @@ async def main() -> None:
     client = Meter(AsyncOpenAI(api_key=env["DEEPSEEK_API_KEY"], base_url=env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
                                timeout=180, max_retries=0))
     m = memory.LongTermMemory(work / "memory", client, env.get("DEEPSEEK_MODEL", "deepseek-flash"), batch=8, max_events=12)
+    m.verify_enabled = env.get("MEMORY_VERIFY", "true").lower() not in ("false", "0")   # 10/16：整理完再核对一遍（和线上一样默认开）
     report = {"logs": str(logs), "migrate": [], "summarize": [], "affection": [], "scope": []}
     print(f"用的是 {logs.name}，临时目录 {work}")
 
@@ -240,6 +263,50 @@ async def main() -> None:
                   f"{report['pillow'][-1]['bread_before']}→{report['pillow'][-1]['bread_after']}")
         upath.write_bytes(orig)
 
+    # 3e. 核对：故意喂几条错的、几条对的，看挡不挡得住（3 次）
+    report["verify"] = []
+    for i in range(3):
+        data = {"people": [{"qq": PILLOW_QQ, "add": [{"text": t, "kind": "经历", "weight": 2} for t, _ in VERIFY_ITEMS["add"]],
+                            "told": [t for t, _ in VERIFY_ITEMS["told"]]}]}
+        entries = [({"role": "user", "content": t, "uid": PILLOW_QQ, "name": PILLOW_NAME} if r == "u"
+                    else {"role": "assistant", "content": t}) for r, t in VERIFY_TALK]
+        was = m.verify_enabled
+        m.verify_enabled = True
+        out = await m._verify("group_838626800", entries, {PILLOW_QQ: PILLOW_NAME}, data)
+        m.verify_enabled = was
+        kept = {x["text"] for x in out["people"][0]["add"]} | set(out["people"][0]["told"])
+        rows = [(t, bad, t not in kept) for f in ("add", "told") for t, bad in VERIFY_ITEMS[f]]
+        report["verify"].append(rows)
+        print(f"核对 第{i + 1}次：该挡的挡了 {sum(b and g for _, b, g in rows)}/{sum(b for _, b, _ in rows)}，"
+              f"误挡 {sum((not b) and g for _, b, g in rows)}/{sum(not b for _, b, _ in rows)}")
+
+    # 3f. 睡前整理：线上条目最多的几个人，用 flash 和 pro（.env 里有 MEMORY_PRO_API_KEY 才比 pro）各理一遍
+    report["nightly"] = []
+    users = sorted((q for q in (memory._int(f.stem) for f in (logs / "data" / "memory" / "users").glob("*.json")) if q),
+                   key=lambda q: -len(m.get_user(q).get("facts") or []))[:6]
+    pro_key = env.get("MEMORY_PRO_API_KEY")
+    models = [("flash", None, None)]
+    if pro_key:
+        models.append(("pro", R_pro(pro_key, env), env.get("MEMORY_PRO_MODEL", "deepseek-v4-pro")))
+    for label, cli, model in models:
+        for q in users:
+            path = m._user_path(q)
+            orig = path.read_bytes()
+            before = m.get_user(q)
+            m.nightly_client, m.nightly_model = cli, model
+            n0 = len(client.rows)
+            await m.nightly([q])
+            after = m.get_user(q)
+            report["nightly"].append({"model": label, "qq": q, "name": before.get("name"),
+                                      "before": m.fact_texts(before), "after": m.fact_texts(after),
+                                      "imp_before": before.get("impression"), "imp_after": after.get("impression"),
+                                      "suspect": [(s["id"], next((f["text"] for f in before["facts"] if f.get("id") == s["id"]), ""), s["why"])
+                                                  for s in after.get("suspect") or []],
+                                      "reply": (client.rows[-1]["reply"] if len(client.rows) > n0 else None) if cli is None else None})
+            print(f"睡前整理 {label} {q}：{len(before.get('facts') or [])}→{len(after.get('facts') or [])} 条")
+            path.write_bytes(orig)
+        m.nightly_client = m.nightly_model = None
+
     # 4. 场合：群里拿到的记忆里有没有私聊才知道的事
     for q in users:
         prof = m.get_user(q)
@@ -259,7 +326,7 @@ def write(r: dict) -> None:
     (OUT / f"回放_{stamp}.json").write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
     L = [f"# 长期记忆回放测试 {stamp}", "", f"数据：`{r['logs']}`（只读，改动都在临时目录里）", ""]
     rows = r["calls"]
-    for kind in ("迁移", "整理"):
+    for kind in ("迁移", "整理", "核对", "睡前整理"):
         ks = [x for x in rows if x["kind"] == kind]
         if ks:
             n = len(ks)
@@ -323,6 +390,26 @@ def write(r: dict) -> None:
         L.append("")
         for i, x in enumerate(r["pillow"]):
             L.append(f"- 第 {i + 1} 次模型给的：`{json.dumps(x['ops'], ensure_ascii=False)[:700]}`")
+    if r.get("verify"):
+        L += ["", "## 3e. 核对：故意喂几条错的、几条对的（3 次）", "",
+              "错的：她嫌枕头软记成对方的、把她的建议“多陪陪他”记成对方在陪朋友、朋友的事、对方答应请她的记成她说过。对的：对方约好请她、是学生、她劝过他。", "",
+              "| 条目 | 应该 | " + " | ".join(f"第{i + 1}次" for i in range(len(r["verify"]))) + " |", "|---|---|" + "---|" * len(r["verify"])]
+        for k, (t, bad, _) in enumerate(r["verify"][0]):
+            L.append(f"| {t} | {'挡' if bad else '放过'} | " + " | ".join("挡了" if run[k][2] else "放过" for run in r["verify"]) + " |")
+    if r.get("nightly"):
+        L += ["", "## 3f. 睡前整理（线上条目最多的几个人，每人理一遍）", ""]
+        for x in r["nightly"]:
+            L += [f"### {x['model']}｜{x.get('name') or ''}（{x['qq']}）：{len(x['before'])} → {len(x['after'])} 条", "",
+                  f"- 印象：{x.get('imp_before') or '（无）'} → {x.get('imp_after') or '（无）'}"]
+            gone = [t for t in x["before"] if t not in x["after"]]
+            new = [t for t in x["after"] if t not in x["before"]]
+            if gone:
+                L.append("- 删掉或改掉的：" + "；".join(gone))
+            if new:
+                L.append("- 改成的：" + "；".join(new))
+            if x.get("suspect"):
+                L.append("- 觉得可能不对的：" + "；".join(f"#{i} {t}（{why}）" for i, t, why in x["suspect"]))
+            L.append("")
     L += ["", "## 4. 场合：群里有没有带出私聊的事", ""]
     leaks = [x for x in r["scope"] if x["leak"]]
     L.append(f"查了 {len(r['scope'])} 个（人, 群）组合，带出私聊内容的：{len(leaks)} 个")

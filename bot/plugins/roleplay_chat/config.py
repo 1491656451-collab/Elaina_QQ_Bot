@@ -90,6 +90,16 @@ class Config(BaseModel):
     memory_summary_max_tokens: int = 4000 # 后台整理时模型最多写多少（9/30 起只写“增改删”，一般几百 token；写不下这次整理就作废；只按实际写的计费）
     memory_summary_timeout: float = 180.0 # 后台整理的超时（秒）；整理出错不自动重试，失败后隔 5 / 15 / 60 分钟再试
     memory_retry_minutes: float = 15.0    # 每隔多久检查一次有没有攒够一批却没整理的（开机时也查一次）；0 = 不查
+    # 10/16 起（见《改进方案-记忆触发与核对-1016.md》）
+    memory_idle_minutes: float = 10.0     # 聊完了再整理：私聊安静这么久，攒了 4 条以上就整理，不等凑够一批；0 = 不用
+    memory_idle_minutes_group: float = 15.0   # 群里安静这么久、攒了 6 条以上就整理（同一个群两次整理照样至少隔 MEMORY_GROUP_GAP_MINUTES）
+    memory_verify: bool = True            # 整理完再核对一遍：新记的、改过的、她说过的，主语反了、原文没有、别人的事，这次不存
+    memory_nightly: bool = True           # 睡前整理：她睡着后给当天聊过的人各理一遍档案
+    memory_nightly_max: int = 30          # 每晚最多理多少人
+    memory_pro_api_key: str = ""          # pro 模型单独用的 Key；不填就都用 DEEPSEEK_API_KEY 和 DEEPSEEK_MODEL
+    memory_pro_model: str = "deepseek-v4-pro"
+    memory_nightly_use_pro: bool = True   # 睡前整理用 pro（10/16 对比：合并稳、印象干净）
+    memory_verify_use_pro: bool = False   # 核对用 pro（还没比过，先用 flash）
 
     # ---- 好感度（决定她对人冷淡还是随意）----
     # 分数 -50～150（9/29 起）：讨厌 -50～0｜陌生人 0～40｜普通朋友 40～90｜熟人 90～130｜很熟 130～150

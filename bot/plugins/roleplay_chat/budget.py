@@ -26,7 +26,7 @@ CHAT_KINDS = {"chat", "judge", "verify", "vision", "interject", "bubble", "lette
 KIND_NAMES = {
     "chat": "回消息", "judge": "判断是不是在跟她说话", "verify": "核对讲的往事", "vision": "看图", "interject": "插话", "bubble": "冒泡",
     "letter": "写信", "nudge": "冷场搭话", "qzone_reply": "回空间评论", "qzone_friend": "评论好友说说",
-    "memory": "长期记忆整理", "qzone_post": "写说说", "gallery": "给说说配图写描述", "sticker": "给表情写描述",
+    "memory": "长期记忆整理", "memory_verify": "长期记忆核对", "memory_nightly": "睡前整理记忆", "qzone_post": "写说说", "gallery": "给说说配图写描述", "sticker": "给表情写描述",
 }
 
 # 这次调用是替谁花的（在处理某个人的消息时设置；看图、判断这些都算到这个人 / 这个群头上）

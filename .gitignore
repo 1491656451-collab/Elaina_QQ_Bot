@@ -69,6 +69,9 @@ docs/问题排查记录-没喊过的妈.md
 docs/问题排查记录-面包和枕头.md
 docs/记忆改动-面包和枕头-*.md
 bot/tools/replay_cases.json
+docs/改进方案-记忆触发与核对-*.md
+docs/模型对比报告-*.md
+bot/tools/memory_model_compare.py
 
 # ---- QQ 在启动目录里建的数据库文件 ----
 *.db

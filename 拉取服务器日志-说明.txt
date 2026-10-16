@@ -1,0 +1,3 @@
+不要把这里的 history、data 复制到 D:\QQBot\bot\data 或传回服务器：服务器上的才是最新的，覆盖了会让她的记忆倒回去。
+data\memory\users\QQ号.json = 每个人的档案（印象、好感、性别、聊天次数）；data\memory\groups\群号.json = 群往事；data\memory\pending = 还没整理进档案的消息；
+data\qzone\daily = 每天的今日见闻；data\qzone\*.json = 发过的说说、看过的评论、空间状态；data\usage\日期.json = 每天的花费账本（和 /花费 看到的是同一份）；history = 每个群、每个私聊最近的对话（短期记忆）。

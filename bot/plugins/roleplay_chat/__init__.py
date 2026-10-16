@@ -125,6 +125,16 @@ ltm.close_friends = tuple(cfg.close_friends)
 ltm.gender_cap = cfg.gender_cap
 ltm.summary_max_tokens = cfg.memory_summary_max_tokens
 ltm.summary_client = client.with_options(timeout=cfg.memory_summary_timeout, max_retries=0)   # 整理：超时更长，出错不自动重试
+ltm.idle_minutes, ltm.idle_minutes_group = cfg.memory_idle_minutes, cfg.memory_idle_minutes_group   # 聊完了再整理（10/16）
+ltm.verify_enabled = cfg.memory_verify
+ltm.nightly_max = cfg.memory_nightly_max
+if cfg.memory_pro_api_key:                       # pro 单独一个 Key（10/16）：睡前整理默认用它，核对可选
+    _pro_client = AsyncOpenAI(api_key=cfg.memory_pro_api_key, base_url=cfg.deepseek_base_url,
+                              timeout=cfg.memory_summary_timeout, max_retries=0)
+    if cfg.memory_nightly_use_pro:
+        ltm.nightly_client, ltm.nightly_model = _pro_client, cfg.memory_pro_model
+    if cfg.memory_verify_use_pro:
+        ltm.verify_client, ltm.verify_model = _pro_client, cfg.memory_pro_model
 
 # ------------------------------------------------------------------ 人设
 _persona: str = ""
@@ -4322,16 +4332,52 @@ async def _(bot: Bot):
 _memory_task: "asyncio.Task | None" = None
 
 
+_NIGHTLY_FILE = BOT_DIR / cfg.memory_dir / "nightly.json"     # 哪天晚上已经做过睡前整理（重启也不重做）
+
+
+def _nightly_due(now: datetime | None = None) -> str | None:
+    """该做睡前整理了：她睡着了（没开休息就是凌晨 3～6 点），而且今晚还没做。返回今晚的日期"""
+    if not (cfg.memory_enabled and cfg.memory_nightly):
+        return None
+    now = (now or datetime.now(peak.BEIJING)).astimezone(peak.BEIJING)
+    sleeping = asleep(now) if cfg.sleep_enabled else 3 <= now.hour < 6
+    night = night_key(now)
+    if not sleeping:
+        return None
+    try:
+        done = json.loads(_NIGHTLY_FILE.read_text(encoding="utf-8")).get("night")
+    except (OSError, ValueError, AttributeError):
+        done = None
+    return None if done == night else night
+
+
+async def _run_nightly(night: str) -> None:
+    try:
+        _NIGHTLY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _NIGHTLY_FILE.write_text(json.dumps({"night": night}), encoding="utf-8")   # 先记下：出错也不在同一晚反复重来
+        await ltm.nightly()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"睡前整理出错：{e}")
+
+
 async def _memory_retry_loop() -> None:
+    """每 2 分钟看一次：聊完了的会话整理掉、该做睡前整理了就做；每 MEMORY_RETRY_MINUTES 补做攒够一批却没整理的"""
     await asyncio.sleep(60)                        # 开机先缓一分钟，再查一次
+    last_retry = 0.0
     while True:
         try:
-            n = ltm.retry_pending()
-            if n:
-                logger.info(f"长期记忆：补做 {n} 个会话的整理")
+            if cfg.memory_retry_minutes and time.time() - last_retry >= cfg.memory_retry_minutes * 60:
+                last_retry = time.time()
+                n = ltm.retry_pending()
+                if n:
+                    logger.info(f"长期记忆：补做 {n} 个会话的整理")
+            ltm.idle_sweep()
+            night = _nightly_due()
+            if night:
+                asyncio.create_task(_run_nightly(night))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"检查待整理的长期记忆出错：{e}")
-        await asyncio.sleep(cfg.memory_retry_minutes * 60)
+        await asyncio.sleep(120)
 
 
 @get_driver().on_shutdown
@@ -4349,7 +4395,7 @@ async def _():
         _sleep_task = asyncio.create_task(_sleep_loop())
     if cfg.nudge_enabled and cfg.enable_private:
         _nudge_task = asyncio.create_task(_nudge_loop())
-    if cfg.memory_enabled and cfg.memory_retry_minutes > 0 and cfg.deepseek_api_key:
+    if cfg.memory_enabled and cfg.deepseek_api_key:     # 10/16 起这个循环还管“聊完了再整理”和睡前整理，不再只看 MEMORY_RETRY_MINUTES
         _memory_task = asyncio.create_task(_memory_retry_loop())
     if tagger:
         tagger.start()     # 后台准备角色识别模型（第一次会下载），不耽误启动
