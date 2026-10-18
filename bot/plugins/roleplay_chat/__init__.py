@@ -345,11 +345,14 @@ def recall(query: str, extra: str = "", key: str | None = None) -> str:
     q_topic = _strip_her_names(query)
     x_topic = _strip_her_names(extra)
     # 很短的一句（“哇暴露本性了”“真的假的”）没多少线索，原文片段要更像才带
-    chunk_min = cfg.knowledge_min_chunk_score * (1.25 if len(q_topic) < 10 and not followup else 1.0)
+    short = len(q_topic) < 10 and not followup
+    chunk_min = cfg.knowledge_min_chunk_score * (1.25 if short else 1.0)
+    # 摘要也一样（10/18）：短篇集拆成一篇一条以后，短摘要更容易被一句闲聊碰上（“只是怕你太无聊了”→某个短篇），短句也要更像才带
+    sum_min = cfg.knowledge_min_summary_score * (1.25 if short else 1.0)
 
     def search(q: str) -> list[tuple[float, tuple[str, str, str]]]:
         out = [(s / cfg.knowledge_min_summary_score, (d.label, "摘要", d.content[: cfg.knowledge_summary_chars]))
-               for s, d in _kb.search(q, "summary", cfg.knowledge_top_summaries) if s >= cfg.knowledge_min_summary_score]
+               for s, d in _kb.search(q, "summary", cfg.knowledge_top_summaries) if s >= sum_min]
         out += [(s / chunk_min * 0.8, (d.label, "原文", d.content[: cfg.knowledge_chunk_chars]))
                 for s, d in _kb.search(q, "text", cfg.knowledge_top_chunks) if s >= chunk_min]
         return out
@@ -848,7 +851,19 @@ def caller_lead_start(buf: list, uid: int, now: float, window: float = 60.0) -> 
         if u != uid or now - ts > window or not _HEAD_ONLY_RE.match(line):
             break
         i -= 1
-    return i if i < len(buf) else None
+    if i >= len(buf):
+        return None
+    # 那几句全是图片、表情（“【某某】[图片]”）：没什么可“接上”的，不标（10/01 回放 C02 里标在了一张图上）
+    if all(_only_media(buf[j][2]) for j in range(i, len(buf))):
+        return None
+    return i
+
+
+def _only_media(line: str) -> bool:
+    """旁听里的一行去掉说话人前缀和「[图片]」「[表情：捂脸]」这类方括号后，没有文字"""
+    body = _HEAD_ONLY_RE.sub("", line)
+    body = re.sub(r"[\[［][^\]］]*[\]］]", "", body)
+    return not re.sub(r"[\W_]+", "", body)
 
 
 QUOTE_MAX_CHARS = 30
@@ -1226,6 +1241,39 @@ def human_gap(sec: float) -> str:
         return f"{int(d // 7)} 个多星期".replace("2 个", "两个").replace("3 个", "三个").replace("4 个", "四个")
     n = int(d // 30)
     return "一个多月" if n == 1 else f"{n} 个多月"
+
+
+_WEEKDAY = "一二三四五六日"
+BACK_HINT_HOURS = 3          # 她说要走、超过这么久才再开口，就不提“刚回来”了（10-14 隔了 22 小时还说“回来了。”）
+
+
+def clock_text(now: datetime | None = None) -> str:
+    """“上午 9:05”“中午 11:43”“下午 1:45”“晚上 9:30”：只写“11 点 43 分”，模型会当成晚上 11 点（10/18：中午冒泡说“大半夜的”）"""
+    now = now or datetime.now(peak.BEIJING)
+    h = now.hour
+    period = ("凌晨" if h < 5 else "早上" if h < 9 else "上午" if h < 11 else "中午" if h < 13
+              else "下午" if h < 17 else "傍晚" if h < 19 else "晚上")
+    return f"{period} {h - 12 if h > 12 else h}:{now.minute:02d}"
+
+
+def _birthday_md() -> tuple[int, int] | None:
+    m = re.match(r"^\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})", str(cfg.birthday or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def now_hint(now: datetime | None = None) -> str:
+    """每轮告诉她今天几号、现在几点（10/18：以前聊天提示里没有，生日当天说“南瓜祭典早过去了”、晚上被说“早上好”就回“天都亮了”）"""
+    now = now or datetime.now(peak.BEIJING)
+    line = (f"【现在】{now.month} 月 {now.day} 日（星期{_WEEKDAY[now.weekday()]}）{clock_text(now)}。"
+            "对方说的时间（早上好、晚安、这么晚了……）和这个对不上时，以这里为准。")
+    bd = _birthday_md()
+    if bd:
+        yesterday = now - timedelta(days=1)
+        if (now.month, now.day) == bd:
+            line += f"\n今天是你的生日（{bd[0]} 月 {bd[1]} 日）。"
+        elif (yesterday.month, yesterday.day) == bd:
+            line += f"\n昨天（{bd[0]} 月 {bd[1]} 日）是你的生日。"
+    return line
 
 
 def time_hint(history: list[dict], last_seen: float | None, fam: str, last_letter: float | None = None) -> str:
@@ -2607,13 +2655,13 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         mode = "busy" if busy else reply_mode(text)
         fam = familiarity_of(event.user_id)
         length_hint = length_hint_for(mode, text, fam)
-        time_memo = time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))
+        time_memo = "\n".join(x for x in (now_hint(), time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))) if x)
         if in_wrapup(target, event.user_id) or (_wrapup.get(target) or {}).get("user") == event.user_id:
             time_memo = "\n".join(x for x in (time_memo, WRAPUP_SLEEP_HINT if asleep() else WRAPUP_HINT) if x)
         else:
             time_memo = "\n".join(x for x in (time_memo, winddown_hint(event.group_id if is_group else None, event.user_id)) if x)
         back = _away.pop(target, None)                # 她之前说要走、现在回来了
-        if back:
+        if back and time.time() - back["said"] < BACK_HINT_HOURS * 3600:   # 隔太久了就不提“刚回来”
             time_memo = "\n".join(x for x in (time_memo, f"【刚回来】你 {human_gap(time.time() - back['said'])}前说了要走（“{back['line'][:20]}”），现在才回来。"
                                                             "可以自然地带一句刚回来，不要装作没说过要走；这段时间对方发的话在上面。") if x)
         gender_memo = gender_step(event.user_id, text)
@@ -3399,7 +3447,7 @@ async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
             [{"role": "system", "content": system_prompt()}]
             + history[-6:]
             + [{"role": "user", "content": watch},
-               {"role": "system", "content": INTERJECT_PROMPT + short_hint()}]
+               {"role": "system", "content": now_hint() + "\n\n" + INTERJECT_PROMPT + short_hint()}]
         )
         try:
             resp = await client.chat.completions.create(
@@ -3484,6 +3532,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
 
 # ------------------------------------------------------------------ 冒泡：群里很久没人说话时，她偶尔自己说一句
 BUBBLE_PROMPT = """【冒泡】现在是{now}，这个群已经{gap}没人说话了。你正好有空，随口在群里说一句：
+- 上面的聊天是{gap}以前的，早就过去了：里面没人回的问题不用回，也别接着那些话说，说一句新的。
 - 可以是旅途中刚遇到的小事、看到的风景、吃到的东西、遇到的怪人、接到的奇怪委托，或者吐槽一下天气，也可以随口问大家一句。别每次都说面包。要符合现在的时间（早上、下午、晚上）。
 - 10～30 字，像随手发的一条群消息。不要说“大家好”“有人吗”“好安静啊”，也不要提“冒泡”“好久没人说话”。
 - 不要搬出书里有名有姓的人物和事件，随手编一件小事就好。
@@ -3556,7 +3605,7 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
             last_ts, _ = _group_last_activity(gid)
             gap = human_gap(time.time() - last_ts) if last_ts else "好一阵子"
             now = datetime.now(peak.BEIJING)
-            prompt = BUBBLE_PROMPT.format(now=f"{now.hour} 点 {now.minute} 分", gap=gap)
+            prompt = BUBBLE_PROMPT.format(now=f"{now.month} 月 {now.day} 日（星期{_WEEKDAY[now.weekday()]}）{clock_text(now)}", gap=gap)
             messages = api_messages(
                 [{"role": "system", "content": system_prompt()}]
                 + history[-6:]
@@ -3583,6 +3632,7 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
                 return None
             history.append({"role": "assistant", "content": reply, "ts": time.time()})
             save_history(key)
+            _away.pop(key, None)                      # 她已经自己开口了，下次聊天不用再说“刚回来”
         bubbles = split_bubbles(reply)[:2]
         async with _hands:
             await switch_pause(key)
@@ -3722,7 +3772,7 @@ async def write_letter(bot: Bot, qq: int) -> str | None:
         messages = api_messages(
             [{"role": "system", "content": system_prompt()}]
             + history[-6:]
-            + [{"role": "system", "content": "\n\n".join(x for x in (long_memo, LETTER_PROMPT.format(name=name, gap=gap)) if x)}]
+            + [{"role": "system", "content": "\n\n".join(x for x in (long_memo, now_hint(), LETTER_PROMPT.format(name=name, gap=gap)) if x)}]
         )
         try:
             resp = await client.chat.completions.create(
@@ -3872,7 +3922,7 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
         fam = familiarity_of(qq)
         prof = ltm.get_user(qq)
         long_memo = ltm.context_for(qq, prof.get("name") or str(qq), None)
-        extra = "\n\n".join(x for x in (long_memo, NUDGE_PROMPT.format(gap=gap), FAMILIARITY_HINT[fam] + short_hint()) if x)
+        extra = "\n\n".join(x for x in (long_memo, now_hint(), NUDGE_PROMPT.format(gap=gap), FAMILIARITY_HINT[fam] + short_hint()) if x)
         messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-10:]
                                 + [{"role": "system", "content": extra}])
         try:

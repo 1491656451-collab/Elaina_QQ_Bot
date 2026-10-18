@@ -30,7 +30,7 @@ from nonebot.rule import to_me
 from . import budget
 from . import (
     BOT_DIR, FAMILIARITY_HINT, tier_value, alert_admins, api_messages, cfg, classify_error, clean_reply, client, clip_input,
-    drop_ooc_sentences, familiarity_of, get_history, in_peak, ltm, ooc_words, peak, rate_limited, save_history,
+    drop_ooc_sentences, familiarity_of, get_history, in_peak, ltm, now_hint, ooc_words, peak, rate_limited, save_history,
     short_hint, system_prompt, tagger, vision, _hour_window, _locks,
 )
 from .gallery import Gallery
@@ -578,7 +578,7 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
         return None
     key = f"qzone_{uin}"
     history = get_history(key)
-    extra = "\n\n".join(x for x in (ltm.context_for(uin, nick, None, place="qzone", text=text), scene, FAMILIARITY_HINT[fam] + short_hint()) if x)
+    extra = "\n\n".join(x for x in (ltm.context_for(uin, nick, None, place="qzone", text=text), now_hint(), scene, FAMILIARITY_HINT[fam] + short_hint()) if x)
     messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-6:]) + [
         {"role": "system", "content": extra}, {"role": "user", "content": text}]
     try:

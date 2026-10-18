@@ -53,7 +53,7 @@ def _read_text(path: Path) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
-INDEX_VERSION = 5
+INDEX_VERSION = 6        # 10/18：带 #### 的短篇集每篇单独一条
 # 原文是台版转简体，残留了一些异体字；检索时统一，免得“抽烟”搜不到“抽菸”
 _VARIANTS = str.maketrans({"菸": "烟", "著": "着", "姊": "姐", "瞭": "了", "乾": "干", "麵": "面", "裡": "里", "妳": "你"})
 
@@ -90,6 +90,16 @@ def load_summaries(folder: Path) -> list[Doc]:
             if title == "章节摘要":
                 for ch in re.finditer(r"^### (.+?)\n(.*?)(?=^### |\Z)", body, re.S | re.M):
                     if "后记" in ch.group(1):   # 作者后记不算伊蕾娜的回忆
+                        continue
+                    # 一节里收了好几个短篇（第 13 卷附录 5 篇、第 15 卷短篇集 43 话，用 #### 分开）：每篇单独一条。
+                    # 以前整节算一条，给她看时只截前 500 字，问生日只看得到排第一的“南瓜祭典”（10/18）
+                    subs = list(re.finditer(r"^#### (.+?)\n(.*?)(?=^#### |\Z)", ch.group(2), re.S | re.M))
+                    if subs:
+                        head = ch.group(2)[:subs[0].start()].strip()
+                        if head:
+                            docs.append(Doc("summary", f"第{vol}卷·{ch.group(1).strip()}", head))
+                        for sub in subs:
+                            docs.append(Doc("summary", f"第{vol}卷·{sub.group(1).strip()}", sub.group(2).strip()))
                         continue
                     docs.append(Doc("summary", f"第{vol}卷·{ch.group(1).strip()}", ch.group(2).strip()))
             else:

@@ -150,6 +150,7 @@ class Config(BaseModel):
             return {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.08, "close": float(v)}
         return v
 
+    birthday: str = "10-17"               # 她的生日（月-日），当天和第二天会在提示里告诉她（人设里写的是十月十七日；10/18）
     letter_min_days: float = 3.0          # 同一个人两封信至少隔几天
     letter_min_silence_hours: float = 24.0   # 对方至少这么久没来找她，她才会写
     letter_hours: str = "10:00-22:00"     # 只在这段时间寄信（北京时间）；高峰时段也不寄

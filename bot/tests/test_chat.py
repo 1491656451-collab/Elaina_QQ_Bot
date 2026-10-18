@@ -1225,7 +1225,7 @@ def test_memory_refers_to_her_as_you_0930(tmp_path):
         {"text": "下个月要去考驾照", "kind": "计划", "weight": 2, "scope": "private", "since": date_str(2), "due": date_str(-30)},
     ], score=100)
     prof = m.get_user(111); prof["impression"] = "老惦记着请我吃面包"; prof["gender"] = "female"; m.save_user(prof)
-    ctx = m.context_for(111, "阿明", None, text="好久不见 考驾照")
+    ctx = m.context_for(111, "阿明", None, text="好久不见 考驾照 带了可颂")
     assert "约好下次请你吃可颂" in ctx and "请她" not in ctx and "请你吃面包" in ctx
     assert "还没到，别问结果" in ctx
 
@@ -4164,7 +4164,7 @@ def test_memory_legacy_upgrade(tmp_path):
     assert [f["scope"] for f in prof["facts"]] == ["legacy", "legacy"] and prof["facts"][1]["since"].endswith("-09-29")
     assert m.get_group(555)["events"][0]["text"] == "大家聊了面包" and m.get_group(555)["events"][0]["date"].endswith("-09-27")
     assert m.legacy_users() == [5]
-    assert "喜欢面包" in m.context_for(5, "老档案", None) and "喜欢面包" not in m.context_for(5, "老档案", 555, text="面包")
+    assert "喜欢面包" in m.context_for(5, "老档案", None, text="面包") and "喜欢面包" not in m.context_for(5, "老档案", 555, text="面包")
 
 
 @pytest.mark.asyncio
@@ -4979,7 +4979,7 @@ def test_her_topics_capped_in_context_1003(tmp_path):
         {"text": "会关心伊蕾娜那边的雨停没停", "kind": "习惯", "weight": 1, "scope": "public", "tags": ["下雨"]},
     ], score=100, told=[{"text": "又催他兑现刚出炉的可颂", "date": date_str(), "scope": "public"}])
     ctx = m.context_for(111, "阿明", 555, text="今天又下雨了")
-    assert sum(w in ctx for w in ("面包狂热", "刚出炉的", "可颂和奶油", "先请面包")) == 1, ctx
+    assert sum(w in ctx for w in ("面包狂热", "刚出炉的", "可颂和奶油", "先请面包")) == 0, "对方没提面包：一条都不带（10/18 起）"
     assert "下雨天不出门" in ctx and "催他" not in ctx
     ctx2 = m.context_for(111, "阿明", 555, text="今天给你带了面包和可颂")
     assert sum(w in ctx2 for w in ("面包狂热", "刚出炉的", "可颂和奶油", "先请面包")) == 2, ctx2
@@ -5192,3 +5192,194 @@ def test_nightly_due_once_per_night_1016(monkeypatch, tmp_path):
     assert p._nightly_due(night) is None, "同一晚只做一次（重启也不重做）"
     monkeypatch.setattr(p.cfg, "memory_nightly", False)
     assert p._nightly_due(datetime(2026, 10, 18, 4, 0, tzinfo=p.peak.BEIJING)) is None
+
+
+@pytest.mark.asyncio
+async def test_no_repeat_summarize_1016(tmp_path, monkeypatch):
+    """不会重复整理：同一个会话只开一个任务；整理完就清掉；钱花完时半小时内不再试；睡前整理同一个人同一晚只理一次"""
+    import os
+    from plugins.roleplay_chat import budget as B
+    m, calls = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "affection": 0}]})
+    m.batch, m.idle_minutes = 8, 10
+    two = [{"role": "user", "content": "在吗", "uid": 111, "name": "阿明"}, {"role": "assistant", "content": "在"}]
+    m.add_pending("private_111", two * 2)
+    old = time.time() - 11 * 60
+    os.utime(m._pending_path("private_111"), (old, old))
+    assert m.idle_sweep() == ["private_111"] and m.idle_sweep() == [] and not m._start("private_111", force=True)
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1 and m.idle_sweep() == [], "整理完就清掉了，不会再整理一遍"
+    # 钱花完：不调模型，半小时内不再试
+    monkeypatch.setattr(B, "can_background", lambda: False)
+    m.add_pending("private_111", two * 2)
+    os.utime(m._pending_path("private_111"), (old, old))
+    assert m.idle_sweep() == ["private_111"]
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1 and m.idle_sweep() == [], "钱花完了：没调模型，也不每 2 分钟再试"
+
+
+# ---------------------------------------------------------------- 10/18：告诉她今天几号、现在几点；冒泡不接旧问题；隔太久不提“刚回来”
+def test_clock_text_1018():
+    import plugins.roleplay_chat as p
+    from datetime import datetime
+    tz = p.peak.BEIJING
+    cases = {(0, 30): "凌晨 0:30", (7, 5): "早上 7:05", (10, 51): "上午 10:51", (11, 43): "中午 11:43",
+             (12, 15): "中午 12:15", (13, 45): "下午 1:45", (17, 49): "傍晚 5:49", (23, 19): "晚上 11:19"}
+    for (h, m), want in cases.items():
+        assert p.clock_text(datetime(2026, 10, 18, h, m, tzinfo=tz)) == want
+
+
+def test_now_hint_and_birthday_1018(monkeypatch):
+    import plugins.roleplay_chat as p
+    from datetime import datetime
+    tz = p.peak.BEIJING
+    h = p.now_hint(datetime(2026, 10, 16, 22, 57, tzinfo=tz))
+    assert h.startswith("【现在】10 月 16 日（星期五）晚上 10:57。") and "以这里为准" in h and "生日" not in h
+    assert "今天是你的生日（10 月 17 日）" in p.now_hint(datetime(2026, 10, 17, 13, 45, tzinfo=tz))
+    assert "昨天（10 月 17 日）是你的生日" in p.now_hint(datetime(2026, 10, 18, 9, 13, tzinfo=tz))
+    monkeypatch.setattr(p.cfg, "birthday", "")
+    assert "生日" not in p.now_hint(datetime(2026, 10, 17, 13, 45, tzinfo=tz))
+
+
+@pytest.mark.asyncio
+async def test_chat_prompt_has_now_1018(monkeypatch):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("早上好？现在可是晚上了")
+    bot = _PBot()
+    await p.converse(bot, pev("早上好，伊蕾娜小姐", uid=9331, mid=5501))
+    extra = CALLS[-1]["messages"][-2]["content"]
+    assert "【现在】" in extra and p.clock_text() in extra
+
+
+@pytest.mark.asyncio
+async def test_bubble_old_question_and_clock_1018(app: App, monkeypatch):
+    """10-14 冒泡先答了一天前没人回的“教我骂人”；10-18 中午 11:43 冒泡说“这个点了还没睡”"""
+    import plugins.roleplay_chat as p
+    _quiet(monkeypatch, p)
+    monkeypatch.setattr(p.random, "random", lambda: 0.0)
+    async def no_sleep(*a, **k): return None
+    monkeypatch.setattr(p.asyncio, "sleep", no_sleep)
+    p.client.chat.completions.create = fake_create("今天在路上被一只猫跟了半条街")
+    p._histories["group_555"] = [{"role": "user", "content": "【群友 → 你】能不能教教我怎么骂人", "ts": time.time() - 22 * 3600}]
+    p._away["group_555"] = {"until": time.time() - 21 * 3600, "said": time.time() - 22 * 3600, "line": "那我走了"}
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.should_call_api("send_group_msg", {"group_id": 555, "message": "今天在路上被一只猫跟了半条街"}, {"message_id": 1})
+        assert await p.check_bubbles() == 1
+    prompt = CALLS[-1]["messages"][-1]["content"]
+    assert "早就过去了" in prompt and "没人回的问题不用回" in prompt
+    assert p.clock_text() in prompt and " 点 " not in prompt.split("\n")[0]
+    assert "group_555" not in p._away                          # 自己开口了，下次不再说“刚回来”
+
+
+@pytest.mark.asyncio
+async def test_back_hint_only_soon_after_1018(monkeypatch):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯")
+    bot = _PBot()
+    p._away["private_9341"] = {"until": time.time() - 1, "said": time.time() - 22 * 3600, "line": "那我走了"}
+    await p.converse(bot, pev("为什么", uid=9341, mid=5511))
+    assert "【刚回来】" not in CALLS[-1]["messages"][-2]["content"]       # 隔了 22 小时，不提
+    assert "private_9341" not in p._away
+    p._away["private_9342"] = {"until": time.time() - 1, "said": time.time() - 40 * 60, "line": "我先去睡了"}
+    await p.converse(bot, pev("回来了吗", uid=9342, mid=5512))
+    assert "【刚回来】" in CALLS[-1]["messages"][-2]["content"]           # 40 分钟：照常提
+
+
+@pytest.mark.asyncio
+async def test_qzone_reply_has_now_1018(monkeypatch):
+    """10-18 09:13 回昨天生日说说下的“生日快乐姐姐”，她说“已经过了好几天啦”：空间回评论也告诉她日期"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("谢谢，就是昨天。")
+    out = await p.qzone_diary._respond(30668, "路人", "【路人】（在你的日记下评论）生日快乐姐姐", "")
+    assert out
+    sysmsg = CALLS[-1]["messages"][-2]["content"]
+    assert "【现在】" in sysmsg
+
+
+# ---------------------------------------------------------------- 10/18 说话没逻辑（《问题排查记录-说话没逻辑-1018.md》第 2.5 节）
+def test_memory_context_age_and_known_since_1018(tmp_path):
+    """认识多久；一周前的近况标“现在不一定还这样”；经历标几天前；对方没提面包时面包条目一条都不带"""
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [
+        {"text": "隔了七天没来找伊蕾娜，回来只戳了一下不说话", "kind": "近况", "weight": 1, "scope": "private", "since": date_str(7)},
+        {"text": "请伊蕾娜吃过两次面包", "kind": "经历", "weight": 3, "scope": "private", "since": date_str(14)},
+        {"text": "突然祝伊蕾娜生日快乐", "kind": "经历", "weight": 2, "scope": "private", "since": date_str(1)},
+        {"text": "最近在准备考试", "kind": "近况", "weight": 2, "scope": "private", "since": date_str(2)},
+    ], score=129, affection_log=[f"{date_str(19)} +1 嘴甜"])
+    ctx = m.context_for(111, "群鲨鱼", None, text="伊蕾娜小姐 戳一下", recent="有没有想我 不说话 考试")
+    assert "你和「群鲨鱼」认识大概 19 天了" in ctx
+    assert "回来只戳了一下不说话（1 周前的事，现在不一定还这样）" in ctx
+    assert "最近在准备考试（2 天前说的）" in ctx
+    assert "面包" not in ctx
+    assert "别照搬里面的句子" in ctx
+    m2, _ = _mem(tmp_path / "b", lambda kw: {})
+    _prof_with(m2, 222, [{"text": "是学生", "kind": "身份", "weight": 3, "scope": "private", "since": date_str()}])
+    assert "认识大概" not in m2.context_for(222, "新人", None, text="你好"), "刚认识的不说"
+    assert m2.get_user(222)["first_seen"] == date_str()
+
+
+def test_summary_prompt_not_done_yet_1018():
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT, VERIFY_PROMPT
+    assert "下回换我提醒你" in SUMMARIZE_PROMPT and "才认识几天" in SUMMARIZE_PROMPT
+    assert "他提醒了伊蕾娜什么" in VERIFY_PROMPT and "下回换我提醒你" in VERIFY_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_verify_who_check_1018(tmp_path):
+    """10/18：核对改成问“这是谁的事”，程序对照：新记的该是对方、她说过该是伊蕾娜；答不上来的照常存"""
+    def reply(kw):
+        if "记忆核对员" in kw["messages"][0]["content"]:
+            return {"check": [{"n": 1, "who": "对方"}, {"n": 2, "who": "伊蕾娜"}, {"n": 3, "who": "别人"},
+                              {"n": 4, "who": "伊蕾娜"}, {"n": 5, "who": "对方"}, {"n": 6, "who": "???"}]}
+        return {"people": [{"qq": 111, "add": [{"text": "记着伊蕾娜的生日并提醒她", "kind": "经历", "weight": 2},
+                                                {"text": "嫌旅馆枕头太软", "kind": "梗", "weight": 1},
+                                                {"text": "朋友小林失恋了", "kind": "近况", "weight": 1}],
+                            "told": ["答应过下回换她提醒他", "伊蕾娜提醒过他生日", "劝过他早点睡"], "affection": 0}]}
+    m, _ = _mem(tmp_path, reply)
+    m.verify_enabled = True
+    await _feed(m, "private_111")
+    prof = m.get_user(111)
+    assert m.fact_texts(prof) == ["记着伊蕾娜的生日并提醒她"]
+    assert [t["text"] for t in prof["told"]] == ["答应过下回换她提醒他", "劝过他早点睡"]
+
+
+# ---------------------------------------------------------------- 10/18：短篇集拆开；短句翻摘要也要更像；只发图不标“叫你的人刚才说的”
+def test_summaries_split_short_stories_1018(tmp_path):
+    from plugins.roleplay_chat import knowledge as k
+    (tmp_path / "vol13.md").write_text(
+        "# 第13卷\n## 卷概要\n概要。\n## 章节摘要\n### 第一章 旅人的一天\n- 经过：普通的一天。\n"
+        "### 附录（网译短篇）\n#### 短篇 南瓜祭典\n- 经过：糖果当货币，被怪物勒索。\n"
+        "#### 短篇 某位旅人的生日\n- 经过：梦里被拉去办生日派对，醒来正是十月十七日。\n### 后记\n作者的话。\n", encoding="utf-8")
+    docs = k.load_summaries(tmp_path)
+    labels = [d.label for d in docs]
+    assert "第13卷·短篇 南瓜祭典" in labels and "第13卷·短篇 某位旅人的生日" in labels
+    assert not any("附录" in x for x in labels) and not any("后记" in x for x in labels)
+    assert "第13卷·第一章 旅人的一天" in labels
+    kb = k.KnowledgeBase(docs)
+    assert kb.search("生日派对", "summary", 1)[0][1].label == "第13卷·短篇 某位旅人的生日"   # 以前整段只截前 500 字，只剩南瓜祭典
+    assert k.INDEX_VERSION >= 6                                                          # 旧缓存作废，重建索引
+
+
+def test_short_query_summary_threshold_1018(monkeypatch):
+    import plugins.roleplay_chat as p
+    base = p.cfg.knowledge_min_summary_score
+    class KB:
+        def characters_in(self, t): return []
+        def search(self, q, kind=None, k=3):
+            if kind == "summary":
+                return [(base * 1.1, p.knowledge.Doc("summary", "第15卷·第三十六话 艾姆妮西亚与艾维莉亚", "两姐妹的事"))]
+            return []
+    monkeypatch.setattr(p, "_kb", KB())
+    assert p.recall("只是怕你太无聊了") == ""                          # 短句：分数只比门槛高一点，不带
+    assert "艾姆妮西亚与艾维莉亚" in p.recall("你还记得那对白发姐妹后来去了哪里吗，就是姐姐当剑士的那对")   # 长句照常
+
+
+def test_caller_mark_not_on_pictures_1018():
+    import plugins.roleplay_chat as p
+    now = 1_000_000.0
+    buf = [(2, "B", "【B】今天好热", now - 300), (1, "A", "【A】[图片]", now - 10)]
+    assert p.caller_lead_start(buf, 1, now) is None                      # 叫她的人前面只发了一张图：不标
+    buf2 = [(1, "A", "【A】[图片]", now - 20), (1, "A", "【A】[表情：捂脸]", now - 10)]
+    assert p.caller_lead_start(buf2, 1, now) is None
+    buf3 = [(1, "A", "【A】[图片]", now - 20), (1, "A", "【A】你看这个", now - 10)]
+    assert p.caller_lead_start(buf3, 1, now) == 0                        # 图加一句话：照常标

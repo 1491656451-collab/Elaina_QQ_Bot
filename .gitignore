@@ -72,6 +72,11 @@ bot/tools/replay_cases.json
 docs/改进方案-记忆触发与核对-*.md
 docs/模型对比报告-*.md
 bot/tools/memory_model_compare.py
+docs/问题排查记录-说话没逻辑-*.md
+bot/tools/phrasing_cases.json
+docs/措辞对比/
+docs/措辞对比报告-*.md
+docs/怪话清单-*.md
 
 # ---- QQ 在启动目录里建的数据库文件 ----
 *.db

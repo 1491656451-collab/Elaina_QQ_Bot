@@ -185,12 +185,13 @@ def _drop_her_topics(impression: str, keep: set[str] = frozenset()) -> str:
 
 
 def _cap_topics(items: list, text_of, talked: set[str]) -> list:
-    """按 items 的先后（重要的在前）留：同一个她爱提的话题，没聊到的留 1 条，聊到的留 2 条"""
+    """按 items 的先后（重要的在前）留：同一个她爱提的话题，聊到的留 2 条；没聊到的一条都不带
+    （10/18：没聊到时留的那 1 条“请过两次面包”，对方问“有没有想我”她也扯上面包）"""
     used: dict[str, int] = defaultdict(int)
     out = []
     for it in items:
         tops = _her_topics(text_of(it))
-        if any(used[t] >= (2 if t in talked else 1) for t in tops):
+        if any(used[t] >= (2 if t in talked else 0) for t in tops):
             continue
         for t in tops:
             used[t] += 1
@@ -383,7 +384,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 2. 不记聊天流水账：不要写“问伊蕾娜……，被伊蕾娜回……”，也不要在句尾带“被她回……”“被吐槽……”；一次性的随口一问、寒暄客套不记。她怎么回的一般不用记，除非成了他们之间的梗或约定。例：“想用面包收买伊蕾娜讲故事，被回今天已吃过、不收”→“爱拿面包收买伊蕾娜”。
    和已有某条说的是同一回事，就用 update 改那条或者 touch，不要再 add 一条相近的。
    同一个话题（比如都和请伊蕾娜吃面包有关）已经有条目的，新进展用 update 合进那条，不要另加一条；档案里同一话题已经有好几条的，顺手合并成一两条（update 其中一条写合并后的内容，其余 drop）。
-   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事只写进 told，不要再在对方条目里另加一条（例如“被伊蕾娜答应回赠……”）；反过来，对方答应她的事（请她吃东西、送她东西）只记在对方的条目里（约定），不要再写进 told，她回一句“记下了”“别忘了”也不算她答应了什么。
+   分清是谁说的、谁做的：“伊蕾娜（她自己）：”开头的是伊蕾娜说的。她自己的经历、喜恶、抱怨、许下的事，不是对方的事，不要写进对方的条目，主语也不要换成对方。她答应对方的事只写进 told，不要再在对方条目里另加一条（例如“被伊蕾娜答应回赠……”）；反过来，对方答应她的事（请她吃东西、送她东西）只记在对方的条目里（约定），不要再写进 told，她回一句“记下了”“别忘了”也不算她答应了什么。还没做的事别写成做过：她说“下回换我提醒你”，told 写“答应过下回提醒他”，不要写成“提醒过他”。她自己说错的话（例如对认识很久的人说“才认识几天”）不要当成对方的特点记。
    例：伊蕾娜说“这家旅馆的枕头太软了”“下次还你一个硬一点的，当上次面包的回礼”→ 对方的条目里什么也不加（嫌枕头软的是她）；told 写“说过要送他一个硬枕头当面包的回礼”。
 3. 每条不超过 30 字，写这个人（“是学生”“喜欢刚出炉的可颂”），不写日期，日期由程序记。不要把对方的昵称、群名片当成一条记（程序已经知道昵称；昵称里的字眼也不代表他真是那样的人）。
 4. 类型 kind 只能是：身份、喜好、习惯、近况、计划、约定、梗、经历。
@@ -472,18 +473,19 @@ SUMMARIZE_INPUT = """今天是 {today}。这段聊天来自：{where}。
 {transcript}"""
 
 
-VERIFY_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆核对员。用户消息里是一段聊天记录（“伊蕾娜（她自己）：”开头的是她自己说的，其余是别人说的），和根据这段记录整理出来、准备存进她记忆里的几条。请逐条对着聊天记录判断，只挑出有问题的：
-- 主语反了：伊蕾娜自己的经历、喜恶、说的话、答应的事，被写成了对方的；或者对方答应她的事，被写成她答应对方的（反过来也算）。
-- 记录里没有：记录里找不到、是推测出来的（例如把伊蕾娜给的建议“那你多陪陪他吧”当成对方在做的事）。
-- 别人的事：对方讲的朋友、家人、同学等第三个人的事，不是对方本人的。
-标着“她说过”的条目，说的是伊蕾娜对这个人说过、答应过的事：其实是对方答应她的，算主语反了；只是她催东西、吐槽、随口回一句，算记录里没有。
-意思对、只是说法不一样的，算对；拿不准的也算对。只输出 JSON：{"bad": [{"n": 编号, "why": "主语反了"}]}，全都没问题就输出 {"bad": []}。"""
+VERIFY_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆核对员。用户消息里是一段聊天记录（“伊蕾娜（她自己）：”开头的是她自己说的，其余是别人说的），和根据这段记录整理出来、准备存进她记忆里的几条。
+请逐条回答一个问题：这条说的事，在聊天记录里是谁的？只看事情本身是谁说的、谁做的、谁答应的、谁的喜恶和经历，不管条目怎么措辞：
+- 对方：这个人自己说的、做的、答应的、他自己的情况（包括他提醒了伊蕾娜什么、他答应请伊蕾娜什么）
+- 伊蕾娜：伊蕾娜自己说的、做的、答应的、她自己的喜恶和经历（包括她答应以后为他做什么、她劝过他什么）
+- 别人：对方讲的第三个人（朋友、家人、同学……）的事
+- 没有：记录里找不到，或者是推测出来的（例如把伊蕾娜的建议“那你多陪陪他吧”当成他在做的事；伊蕾娜只说了“下回换我提醒你”，条目却写成她已经提醒过）
+每条都要回答。只输出 JSON：{"check": [{"n": 1, "who": "对方"}, {"n": 2, "who": "伊蕾娜"}]}"""
 
 NIGHTLY_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。她晚上睡着了，你帮她把一个人的记忆档案理一遍。用户消息里是这个人的整份档案：印象、每条记忆（#编号、类型、重要度、在哪儿知道的、最后聊到是哪天）、她跟他说过的话。这次没有聊天记录，只整理已有的，不加新的。只输出 JSON。
 
 要做的：
 1. 合并：说的是同一件事、或者同一个话题的几条（比如都和请伊蕾娜吃面包有关），合成一条：update 其中一条写合并后的内容（不超过 30 字），其余的 drop。**只合并“在哪儿知道的”相同的几条**（私聊知道的不要和群里知道的合在一起）。
-2. 过时的：已经兑现的约定、明显过去了的事，update 成现在的状态（例如“约好请伊蕾娜吃面包”已经请过了 →“请伊蕾娜吃过面包”，kind 改成经历）；已经没有意义的 drop。不确定有没有兑现的不要动。
+2. 过时的：已经兑现的约定、明显过去了的事（例如一周以前的近况“隔了七天没来找伊蕾娜”，现在已经不是这样了），update 成现在的状态（例如“约好请伊蕾娜吃面包”已经请过了 →“请伊蕾娜吃过面包”，kind 改成经历）；已经没有意义的 drop。不确定有没有兑现的不要动。
 3. 印象 impression：一句话，不超过 40 字，用伊蕾娜的口吻，只写性格和相处方式；不写私事，也不提伊蕾娜自己爱的东西（面包、钱这些）。原来的已经合适就不写这一项。
 4. 她说过的：兑现了、取消了、说反了的，用 told_update 改成现在的状态（old 照抄原文）。不删。
 5. 看着就不对的，写进 suspect（不改、不删，留给管理员看）：主语反了（把伊蕾娜的事写成了对方的、对方答应她的写成了她答应的）、两条互相矛盾、明显是第三个人的事。
@@ -617,7 +619,19 @@ class LongTermMemory:
         self._upgrade_facts(prof)
         return prof
 
+    @staticmethod
+    def first_seen(prof: dict) -> str | None:
+        """大概第一次聊是哪天：档案里记着的，或者从最早的记忆、她说过的、好感记录里推（9/30 迁移的旧条目日期偏晚）"""
+        days = [str(prof.get("first_seen") or "")]
+        days += [str(f.get("since") or "") for f in prof.get("facts") or [] if isinstance(f, dict)]
+        days += [str(t.get("date") or "") for t in prof.get("told") or [] if isinstance(t, dict)]
+        days += [str(x)[:10] for x in prof.get("affection_log") or []]
+        days = [d[:10] for d in days if _parse_day(d[:10])]
+        return min(days) if days else None
+
     def save_user(self, prof: dict) -> None:
+        if not prof.get("first_seen"):
+            prof["first_seen"] = self.first_seen(prof) or _today_str()
         prof["updated"] = int(time.time())
         prof.setdefault("gender_guess_v", self.GENDER_GUESS_V)
         if prof.get("name"):                      # 群里重名时聊天记录里写成“小明#2”，档案里只存原名
@@ -972,6 +986,7 @@ class LongTermMemory:
         )
         if not budget.can_background():
             logger.info(f"长期记忆：今天的钱花完了，{key} 先不整理，留到明天（待整理的消息都留着）")
+            self._retry_at[key] = time.time() + 1800   # 半小时内别再试（“聊完了再整理”每 2 分钟看一次，不然日志刷屏）
             return
         try:
             api = self.summary_client or self.client     # 整理单独用更长的超时，出错不自动重试（每次重试都计费）
@@ -1125,7 +1140,16 @@ class LongTermMemory:
                 extra_body={"thinking": {"type": "disabled"}},
             )
             budget.track(resp, "memory_verify", user=None, group=None)
-            bad = json.loads(resp.choices[0].message.content or "").get("bad") or []
+            got = json.loads(resp.choices[0].message.content or "")
+            bad = got.get("bad") or []
+            for c in _as_list(got.get("check")):          # 10/18 起：问“这是谁的事”，程序对照该是谁（新记的、改的该是对方，她说过该是伊蕾娜）
+                n = _int(c.get("n")) if isinstance(c, dict) else None
+                who = str(c.get("who", "")).strip() if isinstance(c, dict) else ""
+                if n is None or not 1 <= n <= len(items) or who not in ("对方", "伊蕾娜", "别人", "没有"):
+                    continue
+                want = "伊蕾娜" if items[n - 1][1] == "told" else "对方"
+                if who != want:
+                    bad.append({"n": n, "why": {"别人": "别人的事", "没有": "记录里没有"}.get(who, f"其实是{who}的事")})
         except Exception as e:  # noqa: BLE001
             logger.warning(f"长期记忆：{key} 核对出错，这次照常存：{type(e).__name__}: {e}")
             return data
@@ -1946,6 +1970,11 @@ class LongTermMemory:
         gh = self.gender_hint(prof, who)
         if gh:
             parts.append(gh)
+        met = self.first_seen(prof)
+        n = _days_since(met) if met else 0
+        if n >= 2:                                   # 10/18：熟人她却说“才认识几天”——提示里没有认识多久
+            span = f"{n} 天" if n < 30 else f"{n // 30} 个多月"
+            parts.append(f"你和「{who}」认识大概 {span}了（第一次聊大概是 {_md(met)}）。")
         if prof.get("impression"):
             parts.append(f"你对「{who}」的印象：{_to_you(_drop_her_topics(prof['impression'], _her_topics(f'{text} {recent}')))}")
 
@@ -2004,7 +2033,7 @@ class LongTermMemory:
         if not parts:
             return ""
         return (
-            "【长期记忆】以下是你从以前的聊天里记住的事，自然地运用，别逐条复述，"
+            "【长期记忆】以下是你从以前的聊天里记住的事，是你自己的笔记（里面的“你”就是你自己）：说的时候用自己的话，别照搬里面的句子，也别逐条复述，"
             "也别说“我记录里写着”。记错了就以对方现在说的为准。\n" + "\n".join(parts)
         )
 
@@ -2042,11 +2071,16 @@ class LongTermMemory:
     @staticmethod
     def _fact_for_her(f: dict) -> str:
         t = _to_you(f.get("text", ""))
-        if f.get("kind") in ("近况", "计划"):
+        age = _days_since(f.get("since")) if f.get("since") else 0
+        if f.get("kind") == "近况" and age >= 5:      # 10/18：一周前的近况被当成现在的事（“找你的人别只拿戳的”）
+            t += f"（{_ago(f.get('since'))}的事，现在不一定还这样）"
+        elif f.get("kind") in ("近况", "计划"):
             t += f"（{_ago(f.get('since'))}说的）"
             if f.get("due"):
                 later = str(f["due"]) > date.today().isoformat()
                 t = t[:-1] + f"，大概在{_md(f['due'])}" + ("，还没到，别问结果" if later else "") + "）"
+        elif f.get("kind") == "经历" and age >= 2:
+            t += f"（{_ago(f.get('since'))}的事）"
         return t
 
     @staticmethod
