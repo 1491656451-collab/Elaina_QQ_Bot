@@ -40,7 +40,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule, to_me
 from openai import AsyncOpenAI
 
-from . import budget, factcheck, knowledge, peak
+from . import budget, factcheck, knowledge, peak, voice
 from .memory import LongTermMemory
 from .stickers import EMOTIONS, StickerStore
 from .stickers import normalize as sticker_normalize
@@ -51,7 +51,7 @@ from .config import Config
 __plugin_meta__ = PluginMetadata(
     name="角色扮演聊天",
     description="DeepSeek 驱动、带人设和上下文记忆的聊天机器人",
-    usage="群里 @机器人 说话；/重置 清空短期记忆；管理员：/重载人设、/记忆、/忘记、/好感、/花费、/写信、/说说、/表情",
+    usage="群里 @机器人 说话；/重置 清空短期记忆；管理员：/重载人设、/记忆、/忘记、/好感、/花费、/写信、/说说、/表情、/语音",
     config=Config,
 )
 
@@ -1227,6 +1227,15 @@ def clip_input(text: str) -> str:
     return text
 
 
+def over_cap(n: int, cap: int) -> bool:
+    """每天次数上限：cap 为 0 表示不限（10/19 起插话、冒泡、搭话、写信的每日上限默认都是 0）"""
+    return cap > 0 and n >= cap
+
+
+def cap_text(cap: int) -> str:
+    return str(cap) if cap > 0 else "不限"
+
+
 # ------------------------------------------------------------------ 时间感
 def human_gap(sec: float) -> str:
     """把秒数说成人话：40 分钟 / 5 个小时 / 3 天 / 两个多星期 / 一个多月"""
@@ -1695,7 +1704,7 @@ async def _is_group_not_to_me(event: MessageEvent) -> bool:
 # ------------------------------------------------------------------ 命令
 # 所有指令都只有管理员能用；别人发指令她当没看见（不回、不当成聊天）
 ADMIN_COMMANDS = ("重置", "清空记忆", "reset", "重载人设", "认图", "表情", "表情包", "记忆", "查看记忆",
-                  "好感", "好感度", "性别", "忘记", "删除记忆", "改记忆", "写信", "说说", "插话", "冒泡", "搭话", "花费", "花销")
+                  "好感", "好感度", "性别", "忘记", "删除记忆", "改记忆", "写信", "说说", "插话", "冒泡", "搭话", "花费", "花销", "语音")
 
 
 _SLASH_STARTS = ("/", "／")
@@ -1900,6 +1909,48 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             await sticker_cmd.finish("（这些词对不上情绪词表：" + "、".join(EMOTIONS) + "）")
         await sticker_cmd.finish(f"（{no} 号的标签改成了：{'、'.join(tags)}；以后刷新也不会覆盖）")
     await sticker_cmd.finish(STICKER_USAGE)
+
+
+# ------------------------------------------------------------------ 语音（仅管理员，10/19 第 0 步：先打通发送）
+voice_files = voice.VoiceFiles(BOT_DIR / "data" / "voice")
+voice_cmd = on_command("语音", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
+VOICE_USAGE = ("用法：/语音 测试 → 发一段“叮咚”测试音（wav，NapCat 直接转，不用 ffmpeg）；"
+               "/语音 文件名 → 发 data/voice/test/ 里的音频（mp3 等要靠 ffmpeg 转）；/语音 列表 → 看有哪些测试音频")
+
+
+async def _send_voice(bot: Bot, event: MessageEvent, data: bytes, label: str) -> str:
+    """发一条语音，返回给管理员看的结果说明"""
+    if len(data) > voice.MAX_BYTES:
+        return f"（{label} 太大了：{len(data) / 1024 / 1024:.1f} MB，没发）"
+    info = voice.wav_info(data)
+    t0 = time.monotonic()
+    try:
+        await bot.send(event, voice.segment(data))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"语音：发送失败（{label}）：{e!r}")
+        return f"（{label} 发送失败：{e}）"
+    cost = time.monotonic() - t0
+    logger.info(f"语音：已发送（{label}，{len(data) // 1024} KB，{info or '非 wav'}，用时 {cost:.1f} 秒）")
+    return f"（{label} 已交给 NapCat：{len(data) // 1024} KB{'，' + info if info else ''}，用时 {cost:.1f} 秒。看看上面是不是语音条、能不能点开听）"
+
+
+@voice_cmd.handle()
+async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
+    words = arg.extract_plain_text().split()
+    if not words:
+        await voice_cmd.finish(VOICE_USAGE)
+    op = words[0]
+    if op == "测试":
+        await voice_cmd.finish(await _send_voice(bot, event, voice.test_tone(), "测试音"))
+    if op in ("列表", "list"):
+        names = voice_files.list_test()
+        if not names:
+            await voice_cmd.finish(f"（data/voice/test/ 里还没有测试音频。放 mp3、wav 进去再发 /语音 文件名）")
+        await voice_cmd.finish("（测试音频：" + "、".join(names) + "）")
+    path = voice_files.find_test(" ".join(words))
+    if not path:
+        await voice_cmd.finish(f"（data/voice/test/ 里没找到“{' '.join(words)}”，或者对上了好几个）\n" + VOICE_USAGE)
+    await voice_cmd.finish(await _send_voice(bot, event, path.read_bytes(), path.name))
 
 
 MEMORY_USAGE = "用法：/记忆 @某人（或 QQ号、我、本群）；/忘记 @某人（或 QQ号、我、本群）；/忘记 @某人 第3条（只删 /记忆 里的第 3 条，“她说过”接着往下编号，也能这样删）；/改记忆 @某人 第3条 新内容（开头可以先写类型，如“第3条 经历 兑现过……”）"
@@ -3376,7 +3427,7 @@ def interject_blocker(gid: int, text: str = "") -> str | None:
         return "刚看过，没什么想说的"
     st = _interject_state().get(str(gid), {})
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
-    if st.get("day") == today and st.get("count", 0) >= cfg.interject_daily_max:
+    if st.get("day") == today and over_cap(st.get("count", 0), cfg.interject_daily_max):
         return "今天插够了"
     if now_t - float(st.get("last", 0)) < cfg.interject_min_gap_hours * 3600:
         return "离上次插话太近"
@@ -3523,8 +3574,8 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         why = interject_blocker(gid) or "可以，群里再有人说话就有机会插"
         b = st.get("bubble_count", 0) if st.get("bubble_day") == today else 0
         bwhy = bubble_blocker(gid) or "可以，下次检查时有机会冒泡"
-        await interject_cmd.finish(f"（今天已插话 {n}/{cfg.interject_daily_max} 次｜现在：{why}）\n"
-                                   f"（今天已冒泡 {b}/{cfg.bubble_daily_max} 次｜现在：{bwhy}）")
+        await interject_cmd.finish(f"（今天已插话 {n}/{cap_text(cfg.interject_daily_max)} 次｜现在：{why}）\n"
+                                   f"（今天已冒泡 {b}/{cap_text(cfg.bubble_daily_max)} 次｜现在：{bwhy}）")
     said = await maybe_interject(bot, gid, "", force=True)
     if not said:
         await interject_cmd.finish("（她看了看最近的聊天，没什么想插的）")
@@ -3571,13 +3622,13 @@ def bubble_blocker(gid: int) -> str | None:
         return "正在想"
     st = _interject_state().get(str(gid), {})
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
-    if st.get("bubble_day") == today and st.get("bubble_count", 0) >= cfg.bubble_daily_max:
+    if st.get("bubble_day") == today and over_cap(st.get("bubble_count", 0), cfg.bubble_daily_max):
         return "今天冒过泡了"
     if time.time() - float(st.get("bubble_last", 0)) < cfg.bubble_min_gap_hours * 3600:
         return "离上次冒泡太近"
     all_st = _interject_state()
     today_total = sum(g.get("bubble_count", 0) for g in all_st.values() if isinstance(g, dict) and g.get("bubble_day") == today)
-    if today_total >= cfg.bubble_global_daily_max:
+    if over_cap(today_total, cfg.bubble_global_daily_max):
         return "今天所有群加起来冒够了"
     last_ts, last_role = _group_last_activity(gid)
     if last_ts is None:
@@ -3822,7 +3873,7 @@ async def check_letters() -> int:
     if not (cfg.letter_enabled and cfg.deepseek_api_key and _letter_window_now()):
         return 0
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
-    if _letters_sent.get(today, 0) >= cfg.letter_max_per_day or quota_left(None) <= 2:
+    if over_cap(_letters_sent.get(today, 0), cfg.letter_max_per_day) or quota_left(None) <= 2:
         return 0
     bots = list(get_bots().values())
     if not bots:
@@ -3838,7 +3889,7 @@ async def check_letters() -> int:
     candidates.sort(key=lambda q: familiarity_of(q) != "close")    # 很熟的排前面（同档位内保持随机），每天的名额别被熟人挤掉
     sent = 0
     for qq in candidates:
-        if _letters_sent.get(today, 0) >= cfg.letter_max_per_day:
+        if over_cap(_letters_sent.get(today, 0), cfg.letter_max_per_day):
             break
         p = _letter_prob_per_check(letter_daily_prob(qq))
         if random.random() < p and await write_letter(bot, qq):
@@ -3899,9 +3950,9 @@ def nudge_blocker(qq: int) -> str | None:
         return "不在搭话时段"
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
     cnt = _nudge_count.get(today, {})
-    if cnt.get(qq, 0) >= cfg.nudge_per_user_daily_max:
+    if over_cap(cnt.get(qq, 0), cfg.nudge_per_user_daily_max):
         return "今天已经搭过话了"
-    if cnt.get("all", 0) >= cfg.nudge_daily_max:
+    if over_cap(cnt.get("all", 0), cfg.nudge_daily_max):
         return "今天搭话次数用完了"
     if not _has_quota(None, qq):
         return "额度不够"
@@ -4043,7 +4094,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         lines = [f"· {ltm.get_user(qq).get('name') or qq}（{qq}｜{ltm.TIER_NAMES.get(familiarity_of(qq), '')}｜每天 {letter_daily_prob(qq):.0%}）："
                  f"{letter_blocker(qq, friends) or '符合，随时可能收到信'}" for qq in close]
         today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
-        head = f"（今天已寄 {_letters_sent.get(today, 0)}/{cfg.letter_max_per_day} 封｜现在{'可以' if _letter_window_now() else '不在'}寄信时段）"
+        head = f"（今天已寄 {_letters_sent.get(today, 0)}/{cap_text(cfg.letter_max_per_day)} 封｜现在{'可以' if _letter_window_now() else '不在'}寄信时段）"
         await letter_cmd.finish(head + "\n" + "\n".join(lines))
     target = _parse_target(event, arg)
     if not target or target[0] != "user":

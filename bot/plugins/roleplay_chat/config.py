@@ -135,7 +135,7 @@ class Config(BaseModel):
 
     # ---- 主动写信（写给“熟人”及以上的 QQ 好友，私聊发送；9/30 起熟人也会收到）----
     letter_enabled: bool = True
-    letter_daily_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.08, "close": 0.25}   # 每个符合条件的人每天收到信的概率，按关系分；0 = 这个档位不写信（9/30 从只写给很熟的 0.25 改）
+    letter_daily_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.12, "close": 0.35}   # 每个符合条件的人每天收到信的概率，按关系分（10/19 从 0.08 / 0.25 调高）；0 = 这个档位不写信（9/30 从只写给很熟的 0.25 改）
 
     @field_validator("letter_daily_prob", mode="before")
     @classmethod
@@ -154,18 +154,18 @@ class Config(BaseModel):
     letter_min_days: float = 3.0          # 同一个人两封信至少隔几天
     letter_min_silence_hours: float = 24.0   # 对方至少这么久没来找她，她才会写
     letter_hours: str = "10:00-22:00"     # 只在这段时间寄信（北京时间）；高峰时段也不寄
-    letter_max_per_day: int = 3           # 所有人合计每天最多寄几封（风控）
+    letter_max_per_day: int = 0           # 所有人合计每天最多寄几封；0 = 不限（10/19 从 3 改，同一个人还是至少隔 3 天）
     letter_check_interval: int = 1800     # 每隔多少秒看一次要不要写信
     letter_max_tokens: int = 250
 
     # ---- 私聊冷场后主动搭话：她回完以后对方一阵子没回，她有几率自己再说一句 ----
     nudge_enabled: bool = True
-    nudge_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.05, "friend": 0.1, "acquaintance": 0.2, "close": 0.45}   # 每次冷场时搭话的概率，关系越好越高
+    nudge_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.08, "friend": 0.15, "acquaintance": 0.3, "close": 0.55}   # 每次冷场时搭话的概率，关系越好越高（10/19 调高）
     nudge_delay_min: float = 5.0          # 对方多少分钟没回，才可能搭话（在这两个数之间随机）
     nudge_delay_max: float = 30.0
     nudge_hours: str = "09:00-23:30"      # 只在这段时间搭话（北京时间）；高峰时段也不搭
-    nudge_per_user_daily_max: int = 2     # 每人每天最多被搭话几次
-    nudge_daily_max: int = 10             # 所有人合计每天最多几次（风控）
+    nudge_per_user_daily_max: int = 0     # 每人每天最多被搭话几次；0 = 不限（10/19 从 2 改；每次冷场只搭一次，对方回了才会再抽）
+    nudge_daily_max: int = 0              # 所有人合计每天最多几次；0 = 不限（10/19 从 10 改）
 
     # ---- QQ 空间日记：每天一条说说（图 + 文案），回复说说下的评论 ----
     qzone_enabled: bool = False           # 总开关。先用 /空间测试 测通接口，再在 .env 里改成 true
@@ -242,13 +242,13 @@ class Config(BaseModel):
 
     # ---- 主动插话：群里聊得正热时，她偶尔自己插一句（没人叫她）----
     interject_enabled: bool = True
-    interject_daily_max: int = 2          # 每个群每天最多主动插几次
-    interject_min_gap_hours: float = 3.0  # 同一个群两次插话至少隔几小时
+    interject_daily_max: int = 0          # 每个群每天最多主动插几次；0 = 不限（10/19 从 2 改）
+    interject_min_gap_hours: float = 1.0  # 同一个群两次插话至少隔几小时（10/19 从 3 改）
     interject_hot_minutes: float = 5.0    # “聊得正热”：这么多分钟内……
     interject_hot_messages: int = 6       # ……至少这么多条消息……
     interject_hot_people: int = 2         # ……来自至少这么多人
-    interject_prob: float = 0.3           # 聊到她感兴趣 / 想吐槽的话题时，每来一条消息有多大概率让她看一眼要不要插话
-    interject_offtopic_prob: float = 0.02 # 别的话题：很少插（插话集中在她感兴趣的话题上）
+    interject_prob: float = 0.4           # 聊到她感兴趣 / 想吐槽的话题时，每来一条消息有多大概率让她看一眼要不要插话（10/19 从 0.3 改）
+    interject_offtopic_prob: float = 0.04 # 别的话题：很少插（插话集中在她感兴趣的话题上；10/19 从 0.02 改）
     interject_topics: list[str] = [
         # 她感兴趣的
         "面包", "旅行", "旅游", "魔法", "金币", "银币", "铜币", "赚钱", "委托", "报酬", "书", "旅馆", "甜点", "咖啡", "占卜",
@@ -261,10 +261,10 @@ class Config(BaseModel):
     # ---- 冒泡：白名单群里很久没人说话时，她偶尔自己说一句 ----
     bubble_enabled: bool = True
     bubble_quiet_hours: float = 4.0       # 群里这么多小时没人说话，才可能冒泡
-    bubble_daily_max: int = 1             # 每个群每天最多冒泡几次
-    bubble_min_gap_hours: float = 36.0    # 同一个群两次冒泡至少隔几小时（大概两天一次，免得像定时机器人）
-    bubble_global_daily_max: int = 2      # 所有群加起来每天最多冒泡几次
-    bubble_prob: float = 0.08             # 满足条件时，每次检查有多大概率冒泡
+    bubble_daily_max: int = 0             # 每个群每天最多冒泡几次；0 = 不限（10/19 从 1 改）
+    bubble_min_gap_hours: float = 8.0     # 同一个群两次冒泡至少隔几小时（10/19 从 36 改：一天最多两三次，免得像定时机器人）
+    bubble_global_daily_max: int = 0      # 所有群加起来每天最多冒泡几次；0 = 不限（10/19 从 2 改）
+    bubble_prob: float = 0.12             # 满足条件时，每次检查有多大概率冒泡（10/19 从 0.08 改）
     bubble_check_minutes: float = 20.0    # 多久检查一次
     bubble_hours: str = "10:00-22:00"     # 只在这段时间冒泡（北京时间）；高峰时段也不冒
 

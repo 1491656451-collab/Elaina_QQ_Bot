@@ -991,8 +991,8 @@ async def test_letter_rules_and_send(app: App, monkeypatch):
     assert p.letter_blocker(7703, friends) == "最近刚聊过"
     assert p.letter_blocker(7704, friends) == "还没到熟人"
     assert p.letter_blocker(7705, friends) == "不是机器人的 QQ 好友"
-    assert p.letter_daily_prob(7701) == 0.25 and p.letter_daily_prob(7702) == 0.08 and p.letter_daily_prob(7704) == 0
-    assert 0 < p._letter_prob_per_check(0.08) < p._letter_prob_per_check(0.25) < 0.05
+    assert p.letter_daily_prob(7701) == 0.35 and p.letter_daily_prob(7702) == 0.12 and p.letter_daily_prob(7704) == 0   # 10/19 调高
+    assert 0 < p._letter_prob_per_check(0.12) < p._letter_prob_per_check(0.35) < 0.05
     assert p._letter_prob_per_check(0) == 0
     monkeypatch.setattr(p.cfg, "letter_max_per_day", 1)          # 只剩一个名额：很熟的先拿到
 
@@ -1888,7 +1888,8 @@ async def test_interject_declined_and_limits(app: App, monkeypatch):
             ctx.receive_event(bot, gev(f"随便聊聊{i}", False, uid=9601 + i % 2, mid=9800 + i, card=f"群友{i % 2}"))
     assert len(CALLS) == 1                                   # 看了一次，觉得没什么想说的
     assert p.interject_blocker(555) == "刚看过，没什么想说的"   # 30 分钟内不再看（不再花 token）
-    # 每天最多 2 次
+    # 设了每天上限（10/19 起默认 0 = 不限）：到了就不插
+    monkeypatch.setattr(p.cfg, "interject_daily_max", 2)
     p._interject_skip_until.clear()
     today = p.datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")
     p._save_interject_state({"555": {"day": today, "count": 2, "last": time.time() - 5 * 3600}})
@@ -1939,7 +1940,7 @@ async def test_interject_command(app: App, monkeypatch):
         bot = mkbot(ctx)
         ev = gev("/插话 状态", True, uid=999, mid=9901)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "（今天已插话 1/2 次｜现在：离上次插话太近）\n（今天已冒泡 0/1 次｜现在：冒泡没开）", result=None, bot=bot)
+        ctx.should_call_send(ev, "（今天已插话 1/不限 次｜现在：离上次插话太近）\n（今天已冒泡 0/不限 次｜现在：冒泡没开）", result=None, bot=bot)
     # 普通人不能用
     n = len(CALLS)
     async with app.test_matcher() as ctx:
@@ -1992,7 +1993,7 @@ async def test_bubble_in_quiet_group(app: App, monkeypatch):
     assert "【冒泡】" in prompt and "5 个小时没人说话" in prompt
     assert p.get_history("group_555")[-1]["content"] == "今天路过的小镇，面包居然要两枚铜币"
     # 一天一次；而且现在最后一句是她说的
-    assert p.bubble_blocker(555) in ("今天冒过泡了", "最后一句是她说的，还没人接")
+    assert p.bubble_blocker(555) in ("今天冒过泡了", "最后一句是她说的，还没人接", "离上次冒泡太近")
     st = p._interject_state()["555"]
     assert st["bubble_count"] == 1
 
@@ -2282,7 +2283,7 @@ def test_interject_topics_and_prob():
     import plugins.roleplay_chat as p
     for w in ["自恋", "美少女", "魔女", "扫帚"]:
         assert w in p.cfg.interject_topics
-    assert p.cfg.interject_prob == 0.3 and p.cfg.interject_offtopic_prob <= 0.05
+    assert p.cfg.interject_prob == 0.4 and p.cfg.interject_offtopic_prob <= 0.05      # 10/19 从 0.3 调高
 
 
 @pytest.mark.asyncio
@@ -2312,15 +2313,16 @@ def test_bubble_not_too_often(monkeypatch):
     p._histories["group_555"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]
     p._histories["group_556"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]
     assert p.bubble_blocker(555) is None
-    # 昨天冒过（隔了不到 36 小时）：今天不冒
-    p._save_interject_state({"555": {"bubble_day": "2000-01-01", "bubble_count": 1, "bubble_last": now - 20 * 3600}})
+    # 刚冒过（隔了不到 8 小时）：不冒
+    p._save_interject_state({"555": {"bubble_day": "2000-01-01", "bubble_count": 1, "bubble_last": now - 5 * 3600}})
     assert p.bubble_blocker(555) == "离上次冒泡太近"
-    # 所有群加起来一天最多 2 次
+    # 设了所有群每天上限（10/19 起默认 0 = 不限）：到了就不冒
+    monkeypatch.setattr(p.cfg, "bubble_global_daily_max", 2)
     today = p.datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")
     p._save_interject_state({"700": {"bubble_day": today, "bubble_count": 1, "bubble_last": now - 40 * 3600},
                              "701": {"bubble_day": today, "bubble_count": 1, "bubble_last": now - 40 * 3600}})
     assert p.bubble_blocker(556) == "今天所有群加起来冒够了"
-    assert p.cfg.bubble_quiet_hours >= 4 and p.cfg.bubble_prob <= 0.1
+    assert p.cfg.bubble_quiet_hours >= 4 and p.cfg.bubble_prob <= 0.15
 
 
 # ---------------------------------------------------------------- DS 审查后的修复
@@ -2967,6 +2969,7 @@ async def test_nudge_skipped_cases(monkeypatch):
     p._nudge_due[9220] = {"at": time.time() - 1, "armed": 0}
     assert await p.check_nudges(bot) == 0 and CALLS == []
     monkeypatch.setattr(p, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.cfg, "nudge_per_user_daily_max", 2)       # 设了上限才拦（10/19 起默认 0 = 不限）
     p._nudge_count[datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")] = {9220: 2, "all": 2}
     p._nudge_due[9220] = {"at": time.time() - 1, "armed": 0}
     assert await p.check_nudges(bot) == 0 and CALLS == []
@@ -5383,3 +5386,25 @@ def test_caller_mark_not_on_pictures_1018():
     assert p.caller_lead_start(buf2, 1, now) is None
     buf3 = [(1, "A", "【A】[图片]", now - 20), (1, "A", "【A】你看这个", now - 10)]
     assert p.caller_lead_start(buf3, 1, now) == 0                        # 图加一句话：照常标
+
+
+# ---------------------------------------------------------------- 10/19：主动发言不设每天次数上限，概率调高
+def test_proactive_no_daily_caps_1019(monkeypatch):
+    import plugins.roleplay_chat as p
+    c = p.cfg
+    assert c.interject_daily_max == 0 and c.bubble_daily_max == 0 and c.bubble_global_daily_max == 0
+    assert c.nudge_per_user_daily_max == 0 and c.nudge_daily_max == 0 and c.letter_max_per_day == 0
+    assert c.interject_prob == 0.4 and c.bubble_prob == 0.12 and c.nudge_prob["acquaintance"] == 0.3
+    assert c.interject_min_gap_hours == 1 and c.bubble_min_gap_hours == 8 and c.letter_min_days == 3   # 间隔还在
+    assert p.over_cap(99, 0) is False and p.over_cap(2, 2) is True and p.over_cap(1, 2) is False
+    assert p.cap_text(0) == "不限" and p.cap_text(3) == "3"
+    # 冒泡：今天这个群、所有群都冒过很多次，只要离上次够久就还能冒
+    monkeypatch.setattr(c, "bubble_enabled", True)
+    monkeypatch.setattr(p, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p, "in_peak", lambda: False)
+    now = time.time()
+    today = p.datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")
+    p._histories["group_557"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]
+    p._save_interject_state({"557": {"bubble_day": today, "bubble_count": 5, "bubble_last": now - 9 * 3600},
+                             "700": {"bubble_day": today, "bubble_count": 9, "bubble_last": now - 9 * 3600}})
+    assert p.bubble_blocker(557) is None
