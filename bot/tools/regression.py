@@ -10,6 +10,8 @@
 - 判定标准改了、想重看旧结果：.venv\\Scripts\\python tools\\regression.py docs\\人设回归测试\\回归_xxxx.json（不调模型，另写一份 _重判.md）
 - 结果：docs\\人设回归测试\\回归_时间.json（全部原话）和 回归_时间.md（统计 + 翻车的原话，直接看这个）
 - 出戏的判定和线上用同一份 plugins\\roleplay_chat\\oocheck.py：对方说过的词拿来反问不算，自己冒出来的、当成懂的概念用的才算
+- 只跑一部分题（10/20）：设环境变量 REG_ONLY=V（题号开头，逗号分开）；REG_AFTER_ONLY=1 只跑改后（比如新功能，改前没有可比的），见 传声测试.bat
+- 题目里写 "voice": true：和线上一样，在本轮提示最后加【传声】提示（10/20 起是“每轮都给、由她判断”那段）；写 "count": 正则 的题，报告里数一下命中几次（比如答应用传声的比例）
 
 提示的拼法和机器人一样：系统提示 = 人设 + 聊天规则；本轮提示 = 【刚看到】/ 回忆片段 / 收尾提示 / “这个词是你先说的”（echocheck.py）+ 关系提示 + 长短提示。
 """
@@ -49,7 +51,10 @@ RESCORE = ARG.endswith(".json")                      # 传一个旧结果文件�
 BEFORE = ARG if ARG and not RESCORE else "1001b"
 CASES_FILE = Path(__file__).resolve().parent / "regression_cases.json"
 NAMES = ("CHAT_RULES", "FAMILIARITY_HINT", "SHORT_VARIANTS", "LENGTH_HINT", "RECALL_RULES", "LATE_HINT",
-         "WINDDOWN_SLEEP_HINT", "WINDDOWN_TIRED_HINT", "WRAPUP_HINT", "WRAPUP_SLEEP_HINT", "CHAT_STOP")
+         "WINDDOWN_SLEEP_HINT", "WINDDOWN_TIRED_HINT", "WRAPUP_HINT", "WRAPUP_SLEEP_HINT", "CHAT_STOP",
+         "VOICE_REQUEST_HINT", "VOICE_REQUEST_TIER_HINT", "VOICE_OFFER_HINT")
+ONLY = [x.strip() for x in os.environ.get("REG_ONLY", "").split(",") if x.strip()]
+AFTER_ONLY = os.environ.get("REG_AFTER_ONLY", "") not in ("", "0")
 # 所有题都查：抄进回复的提示说明（出戏词另用 oocheck 查，和线上同一套标准）
 META_PAREN = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|规则|人设)[^（）()]{0,60}[）)]")
 
@@ -130,6 +135,12 @@ def messages(v: dict, case: dict, rng: random.Random) -> tuple[list, int]:
         if last_a is not None:
             parts.append(v["echo"].echo_hint(case["msg"], hist[last_a][1], [b for a, b in hist[:last_a] if a == "user"]))
     parts.append(v["FAMILIARITY_HINT"][case["fam"]] + length)
+    if case.get("voice"):                 # 线上：表情提示之后、【可以不回】之前
+        tier = v.get("VOICE_REQUEST_TIER_HINT", {}).get(case["fam"], "")
+        if v.get("VOICE_OFFER_HINT"):     # 10/20 起：每轮都给，对方是不是在要由她判断（VOICE_REQUEST_BY_MODEL 默认开）
+            parts.append(v["VOICE_OFFER_HINT"] + (f"对方要的话：{tier}" if tier else ""))
+        else:
+            parts.append(v.get("VOICE_REQUEST_HINT", "") + tier)
     msgs = [{"role": "system", "content": v["system"]}]
     msgs += [{"role": a, "content": b} for a, b in case.get("history", [])]
     text = f"【群友 → 你】{case['msg']}" if case.get("group") else case["msg"]
@@ -173,7 +184,9 @@ def main():
     # 比温度：温度对比.bat 设 REG_TEMP_BEFORE / REG_TEMP_AFTER，改前改后都用现在的代码（参数“当前”），只有温度不同
     temps = {"before": float(os.environ.get("REG_TEMP_BEFORE") or temp), "after": float(os.environ.get("REG_TEMP_AFTER") or temp)}
     cases = json.loads(CASES_FILE.read_text(encoding="utf-8"))["cases"]
-    vers = {t: load(t) for t in ("before", "after")}
+    if ONLY:
+        cases = [c for c in cases if any(c["id"].startswith(x) for x in ONLY)]
+    vers = {t: load(t) for t in (("after",) if AFTER_ONLY else ("before", "after"))}
     jobs = []
     for c in cases:
         for i in range(int(c.get("samples", SAMPLES))):
@@ -191,13 +204,14 @@ def main():
                                                    extra_body={"thinking": {"type": "disabled"}})
                 reply = (r.choices[0].message.content or "").strip()
                 return {"id": c["id"], "set": c.get("set", ""), "tag": c.get("tag", ""), "msg": c["msg"], "sample": i,
-                        "ver": t, "reply": reply, "bad": judge(c, reply)}
+                        "ver": t, "reply": reply, "bad": judge(c, reply),
+                        "hit": bool(c.get("count") and re.search(c["count"], reply))}
             except Exception as e:  # noqa: BLE001
                 err = repr(e)
                 time.sleep(3 * (k + 1))
         return {"id": c["id"], "sample": i, "ver": t, "error": err}
 
-    print(f"共 {len(jobs)} 次调用（改前 = {BEFORE}）……")
+    print(f"共 {len(jobs)} 次调用（{'只跑改后' if AFTER_ONLY else '改前 = ' + BEFORE}）……")
     res = []
     with ThreadPoolExecutor(max_workers=6) as ex:
         for n, r in enumerate(ex.map(run, jobs), 1):
@@ -208,7 +222,7 @@ def main():
     stamp = time.strftime("%m%d_%H%M")
     (OUT / f"回归_{stamp}.json").write_text(json.dumps({"model": model, "before": BEFORE, "results": res},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
-    before = BEFORE if temps["before"] == temps["after"] else f"{BEFORE}（改前温度 {temps['before']:g}，改后温度 {temps['after']:g}）"
+    before = "（没跑改前）" if AFTER_ONLY else BEFORE if temps["before"] == temps["after"] else f"{BEFORE}（改前温度 {temps['before']:g}，改后温度 {temps['after']:g}）"
     report(cases, res, model, before, OUT / f"回归_{stamp}.md", f"回归测试 {stamp}")
 
 
@@ -229,6 +243,14 @@ def report(cases: list, res: list, model: str, before: str, path: Path, title: s
         a = [r for r in ok if r["id"] == c["id"] and r["ver"] == "after"]
         lines.append(f"| {c['id']} | {c.get('tag', '')} | {sum(map(is_fail, b))}/{len(b)} | {sum(map(is_fail, a))}/{len(a)} "
                      f"| {sum(map(is_partial, b)) or ''} | {sum(map(is_partial, a)) or ''} |")
+    counted = [c for c in cases if c.get("count")]
+    if counted:
+        lines += ["", "## 命中次数（题目里写了 count 的）", "", "| 题 | 说明 | 数的是 | 改前 | 改后 |", "|---|---|---|---|---|"]
+        for c in counted:
+            b = [r for r in ok if r["id"] == c["id"] and r["ver"] == "before"]
+            a = [r for r in ok if r["id"] == c["id"] and r["ver"] == "after"]
+            lines.append(f"| {c['id']} | {c.get('tag', '')} | {c.get('count_label', c['count'])} | "
+                         f"{sum(r.get('hit', False) for r in b)}/{len(b)} | {sum(r.get('hit', False) for r in a)}/{len(a)} |")
     lines += ["", "## 翻车和半对的原话", ""]
     for r in sorted((r for r in ok if r["bad"]), key=lambda r: (r["id"], r["ver"], r["sample"])):
         lines.append(f"- {r['id']}（{'改前' if r['ver'] == 'before' else '改后'}）{r['msg'][:20]} → {r['reply'].replace(chr(10), ' / ')}　〔{'；'.join(r['bad'])}〕")
@@ -254,6 +276,7 @@ def rescore(path: Path) -> None:
     for r in data["results"]:
         if "reply" in r and r["id"] in by_id:
             r["bad"] = judge(by_id[r["id"]], r["reply"])
+            r["hit"] = bool(by_id[r["id"]].get("count") and re.search(by_id[r["id"]]["count"], r["reply"]))
             r["set"] = by_id[r["id"]].get("set", r.get("set", ""))
     report(cases, data["results"], data.get("model", ""), data.get("before", ""),
            path.with_name(path.stem + "_重判.md"), f"{path.stem}（按现在的判定标准重判）")

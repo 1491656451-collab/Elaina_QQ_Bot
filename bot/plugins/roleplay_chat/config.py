@@ -48,6 +48,20 @@ class Config(BaseModel):
     sticker_private: bool = True          # 私聊也发
     sticker_sub_type: int = 1             # 1 = 显示成表情样式（小图）；发出来不对就改成 -1，按普通图片发
     sticker_dir: str = "data/stickers"
+    # ---- 语音（10/20）：你电脑上的语音合成服务，经 SSH 反向隧道接到服务器本机 ----
+    voice_tts_url: str = "http://127.0.0.1:9881"
+    voice_tts_token: str = ""             # 和电脑上 voice_service\本机配置.json 里的 token 一样；空着 = 不用语音合成
+    voice_tts_timeout: float = 20.0       # 等电脑念完一句最多多久（秒）
+    # ---- 聊天时自己发语音（10/20，见 docs\语音发送规则方案.md）：电脑上的语音服务连着才会发 ----
+    voice_enabled: bool = True            # 关掉 = 只在 /语音 说 时念，平时聊天不发
+    voice_prob_private: float = 0.20      # 私聊每次回复抽签发语音的概率（再乘下面的关系倍数）
+    voice_prob_group: float = 0.15        # 群聊每次回复抽签发语音的概率（再乘下面的关系倍数）
+    voice_tier_multiplier: dict[str, float] = {"disliked": 0.0, "stranger": 0.3, "friend": 0.7, "acquaintance": 1.0, "close": 1.5}
+    voice_daily_max: int = 30             # 所有人加起来每天最多几条语音（唯一的上限，10/20 定）
+    voice_text_max_chars: int = 120       # 技术上限：电脑上的语音服务最多念这么多字，再长就发文字
+    voice_interjection_prob: float = 0.3  # 她只回一个语气词（哈？嗯。欸？）时，用原声的概率
+    voice_request_by_model: bool = True   # 对方是不是在要语音，由她自己判断（每轮都给【传声】提示，10/20）；false = 认关键词
+    voice_chat_timeout: float = 8.0       # 聊天时等电脑念完最多几秒，超时就改发文字
     sticker_tier_multiplier: dict[str, float] = {"disliked": 0.5, "stranger": 0.7, "friend": 0.85, "acquaintance": 1.1, "close": 1.4}
 
     # ---- 小说知识库（摘要 + 原文检索）----
@@ -201,7 +215,7 @@ class Config(BaseModel):
     qzone_friend_post_max_age_hours: float = 6.0   # 只评论这么多小时内发的说说（翻出几天前的去评论很怪）
 
     # ---- DeepSeek 高峰时段：伊蕾娜“很忙”，少回、短回 ----
-    peak_enabled: bool = True
+    peak_enabled: bool = False            # 10/20 起默认关：高峰时段照常聊（只是按高峰价记账）；开了就“很忙”，少回、短回、不主动
     peak_ranges: str = "09:00-12:00,14:00-18:00"   # 北京时间，仅周一至周五
     peak_holidays: list[str] = []         # 额外的法定节假日（YYYY-MM-DD），2026 年的已内置
     peak_user_interval: int = 600         # 高峰时每个人最多每隔多少秒得到一次正经回复

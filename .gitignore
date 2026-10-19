@@ -82,3 +82,11 @@ docs/怪话清单-*.md
 *.db
 *.db-shm
 *.db-wal
+
+# 语音克隆：原声素材、处理中间文件、训练出的模型（10/19）
+voice_data/
+
+# 语音服务（电脑上跑）：本机配置里有和服务器对暗号的 token；日志（10/20）
+voice_service/本机配置.json
+voice_service/*.log
+voice_service/service.pid

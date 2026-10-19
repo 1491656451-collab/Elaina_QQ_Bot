@@ -5408,3 +5408,31 @@ def test_proactive_no_daily_caps_1019(monkeypatch):
     p._save_interject_state({"557": {"bubble_day": today, "bubble_count": 5, "bubble_last": now - 9 * 3600},
                              "700": {"bubble_day": today, "bubble_count": 9, "bubble_last": now - 9 * 3600}})
     assert p.bubble_blocker(557) is None
+
+
+# ---------------------------------------------------------------- 10/20：默认不再有“高峰时段很忙”
+def test_peak_off_by_default_1020(monkeypatch, tmp_path):
+    import plugins.roleplay_chat as p
+    from datetime import datetime as _dt
+    assert p.cfg.peak_enabled is False
+    # 工作日上午 10 点也不算高峰：照常回、照常主动
+    monkeypatch.setattr(p.peak, "is_peak", lambda *a, **k: True)
+    assert p.in_peak() is False
+    # 打开开关就恢复老样子
+    monkeypatch.setattr(p.cfg, "peak_enabled", True)
+    assert p.in_peak() is True
+    # 记账照旧按高峰价（DeepSeek 高峰时段本来就贵）
+    monkeypatch.undo()
+    b = p.budget.Budget(tmp_path, peak_multiplier=2.0)
+    bj = p.peak.BEIJING
+    assert b.cost_of(0, 1000, 100, _dt(2026, 10, 20, 10, 0, tzinfo=bj)) == 2 * b.cost_of(0, 1000, 100, _dt(2026, 10, 20, 20, 0, tzinfo=bj))
+
+
+# ---------------------------------------------------------------- 10/20：括号里的“过了多久”（《传声测试报告-1020_0521.md》）
+def test_action_paren_time_passed_1020():
+    import plugins.roleplay_chat as p
+    assert p.clean_reply("晚安。\n（过了十几秒）\n……做个好梦。") == "晚安。\n\n……做个好梦。"
+    for t in ("（过了 1 小时）", "（过了十几秒）", "（过了两秒）", "（过了好一会儿）", "（过了一阵）", "(过了3分钟)", "（过了半个小时）"):
+        assert "过了" not in p.clean_reply(f"晚安。\n{t}\n睡不着，又爬起来了。"), t
+    assert p.clean_reply("（过了十几秒）") == "（过了十几秒）"          # 整条只有动作就不动
+    assert p.clean_reply("都过了十几秒了，还没回？") == "都过了十几秒了，还没回？"   # 不在括号里不动

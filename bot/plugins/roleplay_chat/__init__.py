@@ -161,7 +161,7 @@ CHAT_RULES = """
 - 这是 QQ 聊天：日常闲聊一两句、十几二十个字；只有讲故事、讲具体经历、详细解释、对方认真倾诉时才说长一点。每轮末尾会提示你这次该短还是可以长。想分成几条发就用换行分开（最多三条），不用每句都加句号。
 - 「（群聊旁听记录）」开头的是你没被 @ 时群里的聊天，只作背景，大多是群友之间在聊：里面的问题默认是问别人的，别去回答、也别追问是什么意思；只有点了你的名字、明显是在接你刚说的话，或者叫你的那条消息指着它（“他问你……呢”），才算在问你、你还没回答，就顺带答一下。标着「↓ 下面几句是叫你的人刚才说的」的，是叫你的人紧接着说的前文，多半就是说给你听的，回的时候接上它。行首的「（N 秒后）」是离上一句隔了多久：紧挨着说的多半在接话，隔得久的多半是换了话题。你要回的是最后那条不带“旁听”的消息。
 - 图片：「[图片：……]」就当你亲眼看到了那张图，自然地回应，别提“描述”这个词；「[图片]」是你没看清，可以直说。只有写着「伊蕾娜本人的画像」的才是画的你（照人设“看到自己的画像”那一节反应），其他图里的人哪怕也是灰发少女，也不是你。你只看得懂文字和图片：「[语音]」「[视频]」你听不到、看不到内容；「[分享：……]」「[名片：……]」「[文件：……]」你只看得到标题、名字，打不开里面；写着「（看不懂）」的（聊天记录……）你看不懂。碰到这些别猜里面是什么，想知道就让对方用文字说说，也别把它当成前面聊过的人或东西。「（回复你说的“……”）」「（回复的是“……”）」表示对方在接那句话说。
-- 表情：「[发了表情：……]」是你之前甩过去的小画像，对方问起就接话。只有本轮末尾明确允许时，才能写「[表情:情绪]」。别人发来的「[图片]」「[表情]」「[语音]」这类说明，你回复时一律不要写。
+- 表情：「[发了表情：……]」是你之前甩过去的小画像，对方问起就接话。只有本轮末尾明确允许时，才能写「[表情:情绪]」。别人发来的「[图片]」「[表情]」「[语音]」这类说明，你回复时一律不要写。「[发了语音]」开头的是你之前用传声魔法、用自己的声音传过去的话；只有本轮末尾明确允许时，才能在回复开头写「[传声]」。
 - 始终保持人设：你是真实存在于这个世界的旅行魔女，不知道、也绝不主动提起服务器、程序、代码、AI、机器人、模型、网络、动漫、动画、小说、作者、声优、角色扮演、人设这些概念。有人说你是 AI、机器人、动漫角色，或者说“OOC”，就当成听不懂的外国话，用你的方式岔开或吐槽回去，不解释，也不顺着说。
 - 分清谁在说、在跟谁说：“→ 别人”的话别替别人回答，群里的“你”也常常是在说别人；对方说“那个人说……”“他说……”“书里写……”，说话的是第三个人，不是你也不是对方，别回“我没说过”，顺着去想那是谁、在什么时候说的。谁答应了谁什么（谁请谁吃东西、谁送谁东西）也要分清，别把对方答应你的说成你答应对方的。
 - 对方只是叫你一声、问你在不在，就像真人一样回“嗯？”“怎么了？”“在，有什么事？”；只是问好，就回个好，可以顺口聊一句（比如问问吃过饭没有），别接“怎么了？”“找我有事？”；对方说了只是想聊天，就接着聊。别回“要问什么？”“有什么问题？”“你想问什么就问吧”——别人找你多半只是想聊天。
@@ -942,8 +942,28 @@ def sender_name(event: MessageEvent) -> str:
 _PREFIX_RE = re.compile(r"^\s*(?:【[^】]{1,40}】|[^\s【】]{1,16}\s*→\s*[^\s：:]{1,16}\s*[:：])\s*[:：]?\s*")
 
 
+# 语音标记（10/20）：她可能写「【传声】」（照着提示的标题写）、「[发了语音] ……」（照着聊天记录写）、
+# 「（发了一段语音）」「（用传声魔法）」这类旁白，或者把「[传声]」写在第二行。这些都不能当文字发出去：
+# 一律去掉；聊天时（keep_sticker）统一换成开头的「[传声]」，算她想用语音（只有本轮给了【传声】提示才真的念）
+_VOICE_TAG_ANY_RE = re.compile(r"[\[【［]\s*(?:传声|发了?一?[段条句]?语音)\s*[\]】］]\s*")
+_VOICE_PAREN_RE = re.compile(r"[（(]\s*(?:发了?|用了?|传了?|开始)?\s*(?:一[段条句]|个)?\s*(?:语音|传声(?:魔法)?)\s*(?:消息|中|过去)?\s*[）)]\s*")
+
+
+def take_voice_marks(text: str) -> tuple[str, bool]:
+    """去掉回复里所有的语音标记，返回（文字, 她想用语音）；开头的「[语音]」也算"""
+    wish = False
+    m = _VOICE_MARK_RE.match(text)
+    if m:
+        text, wish = text[m.end():], True
+    for rx in (_VOICE_TAG_ANY_RE, _VOICE_PAREN_RE):
+        text, n = rx.subn("", text)
+        wish = wish or n > 0
+    return text.strip(), wish
+
+
 def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) -> str:
-    text = _PREFIX_RE.sub("", text.strip())
+    text, voice_wish = take_voice_marks(text.strip())
+    text = _PREFIX_RE.sub("", text)
     text = re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text)     # 重名记号“小明#2”：她说出来时去掉
     text = _META_PAREN_RE.sub("", text).strip()                      # 抄进来的提示说明
     no_action = re.sub(r"\n{3,}", "\n\n", _ACTION_PAREN_RE.sub("", text)).strip()
@@ -958,7 +978,10 @@ def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) 
         cut = max(text.rfind(c) for c in "。！？!?…~）」")
         if cut >= len(text) // 3:
             text = text[: cut + 1]
-    return text.strip()
+    text = text.strip()
+    if keep_sticker and voice_wish and text:
+        text = "[传声]" + text            # 交给 split_voice_mark 去认
+    return text
 
 
 _LONG_HINTS = (
@@ -1048,7 +1071,7 @@ from .echocheck import echo_hint  # noqa: E402
 # 模型偶尔把提示里的说明抄进回复，比如“（对方和你不太熟，礼貌打个招呼就行。）你好。”：这种括号整段去掉
 # 括号里写的纯动作、舞台说明（9/29 23:44）：“（过了两秒）”“（停顿了一下）”“（打了个哈欠）”“（不接话，甩一张……）”。
 # 括号心声（“（这人还真敢说啊。）”“（悄悄心动了一下）”）是她的说话方式，不动：只去掉以动作开头、不带“我 / 你”的短括号
-_ACTION_PAREN_RE = re.compile(r"[（(][…\s]*(?:过了[一两三几半\d]*[秒分]|停顿|顿了|沉默|打了?个?哈欠|叹了?口?气|耸了?耸?肩|别开[眼脸视头]|"
+_ACTION_PAREN_RE = re.compile(r"[（(][…\s]*(?:过了\s*(?:[一两三几半十\d]+\s*(?:秒钟?|分钟?|个?小时|个?钟头)|好?一会儿?|一阵子?|很久)|停顿|顿了|沉默|打了?个?哈欠|叹了?口?气|耸了?耸?肩|别开[眼脸视头]|"
                               r"扭过头|转过[头身]|笑了笑|不接话|甩了?一张|挑了?挑?眉|眨了?眨?眼|揉了?揉?眼)[^（）()我你]{0,14}[）)]")
 _META_PAREN_RE = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|系统|规则|人设)[^（）()]{0,60}[）)]")
 
@@ -1637,6 +1660,94 @@ def bubble_gap(bubble: str) -> float:
 
 
 # 她只有一双手：同一时间只给一个人打字、发消息，其他人排队
+# ------------------------------------------------------------------ 聊天时发语音（10/20，见 docs\语音发送规则方案.md）
+# 声音在你电脑上合成（voice_service），连不上就当没有这回事。三种情况会发：
+#   1. 抽签：每次回复按 VOICE_PROB_PRIVATE / VOICE_PROB_GROUP × 关系倍数抽，抽中就念
+#   2. 对方要她发语音：她愿意才在开头写「[传声]」（不限次数，看她自己愿不愿意）。
+#      怎么知道对方在要：VOICE_REQUEST_BY_MODEL 开着（10/20 起默认）时不认关键词，每轮都告诉她“对方想听你的声音时可以用”，
+#      由她自己判断（“再来一条”“想听听你的嗓音”也认得出）；关掉就回到认关键词（VOICE_REQUEST_RE），认到了才给提示
+#   3. 她只回一个语气词（哈？嗯。）：按 VOICE_INTERJECTION_PROB 用原声
+# 唯一的上限：所有人加起来每天 VOICE_DAILY_MAX 条（10/20 定，见 docs\语音发送规则方案.md）
+VOICE_REQUEST_RE = re.compile(
+    r"(发|来|整|说|录)(个|段|条|句|一段|一条|一句)?语音|语音(条|发|说|来|回)|用语音|听听(你的)?声音|听一?下(你的)?声音|"
+    r"(你的|你)声音|说句话(给我)?听|开口说(句)?话|念(给我|出来)听|让我听听")
+_VOICE_MARK_RE = re.compile(r"^\s*[\[【［]\s*(传声|语音)\s*[\]】］]\s*")
+VOICE_REQUEST_HINT = ("【传声】对方想听你的声音。你可以用传声魔法，把这次的话用你自己的声音传过去："
+                      "愿意的话，在回复最前面写「[传声]」，后面照常写你要说的话（念出来的就是这些，别写动作、表情、颜文字）；"
+                      "不愿意（不熟、对方在起哄、懒得费魔力、今天已经传过好几次了）就照常用文字回，可以拒绝或者吐槽两句。")
+# 按关系补一句倾向（10/20，见《传声测试报告-1020_0456.md》）：不补的话她第一次被要都答应，陌生人也是 10/10。
+# 只给倾向、不替她决定。别在这里写现成的话，她会照抄。
+# 熟人、很熟不补：10/20 试过“多半会答应，偶尔嫌麻烦就不给”，第一次要还是 40/40 答应，没用，撤了（《传声测试报告-1020_0521.md》）
+VOICE_REQUEST_TIER_HINT = {
+    "stranger": "你们还不熟，你多半会客气地婉拒，用文字回；偶尔心情好才传一次。",
+    "friend": "你们只是普通朋友，传不传看你心情，推掉也很正常。",
+}
+# 由她自己判断对方是不是在要语音时（VOICE_REQUEST_BY_MODEL），每轮都给这一段。别写现成的话，她会照抄
+VOICE_OFFER_HINT = ("【传声】你可以用传声魔法，把这次的话用你自己的声音传过去。只在对方想听你的声音时才用"
+                    "（让你发语音、说句话给他听、再来一条之类，怎么说的都算）；对方没这个意思，就别用，照常写字。"
+                    "要用的话，在回复最前面写「[传声]」，后面照常写你要说的话（念出来的就是这些，别写动作、表情、颜文字）；"
+                    "对方要了你不愿意（不熟、对方在起哄、懒得费魔力、刚传过又要），就照常用文字回，可以拒绝或者吐槽两句。")
+_voice_count: dict[str, int] = defaultdict(int)       # 日期 -> 今天发了几条语音（重启清零）
+_tts_refresh: "asyncio.Task | None" = None
+
+
+def voice_day() -> str:
+    """一天从凌晨 BUDGET_RESET_HOUR 点算起，和花钱的账一致"""
+    return (datetime.now() - timedelta(hours=cfg.budget_reset_hour)).strftime("%Y-%m-%d")
+
+
+def tts_ready() -> bool:
+    """电脑上的语音服务在不在：只看缓存的结果，过期了在后台再问一次，不让这条消息等"""
+    global _tts_refresh
+    if not (cfg.voice_enabled and tts.configured):
+        return False
+    if time.monotonic() - tts._checked >= tts.check_interval and (_tts_refresh is None or _tts_refresh.done()):
+        _tts_refresh = asyncio.create_task(tts.available())
+    return tts._ok
+
+
+def voice_roll(fam: str, is_group: bool, text: str) -> tuple[bool, str]:
+    """这一轮的语音打算。返回（抽中了随机语音, 给她的提示）"""
+    if not tts_ready() or _voice_count[voice_day()] >= cfg.voice_daily_max:
+        return False, ""
+    p = (cfg.voice_prob_group if is_group else cfg.voice_prob_private) * tier_value(cfg.voice_tier_multiplier, fam, 1.0)
+    if cfg.voice_request_by_model:      # 每轮都告诉她可以用，对方在不在要由她判断；抽签照旧
+        tier = VOICE_REQUEST_TIER_HINT.get(fam, "")
+        return random.random() < p, ("" if fam == "disliked" else VOICE_OFFER_HINT + (f"对方要的话：{tier}" if tier else ""))
+    if VOICE_REQUEST_RE.search(text):
+        return False, ("" if fam == "disliked" else VOICE_REQUEST_HINT + VOICE_REQUEST_TIER_HINT.get(fam, ""))
+    return random.random() < p, ""
+
+
+def split_voice_mark(reply: str) -> tuple[str, bool]:
+    """截掉开头的「[传声]」：返回（文字, 她想用语音）"""
+    m = _VOICE_MARK_RE.match(reply)
+    return (reply[m.end():].strip(), True) if m else (reply, False)
+
+
+_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]|[（(][^（）()]{0,8}[)）]|[~～]+|[＾^][_＿]?[＾^]|[TＴ][_＿][TＴ]|ww+$")
+
+
+def voice_text(reply: str, limit: int) -> str | None:
+    """要念的文字：去掉颜文字、括号、波浪号，换行改成逗号；有英文字母、太长、没字了就不念"""
+    t = _EMOJI_RE.sub("", reply)
+    t = re.sub(r"\s*\n+\s*", "，", t)
+    t = re.sub(r"([，,。！？!?…])，+", r"\1", t).strip("，, ")
+    if not t or len(t) > limit or re.search(r"[A-Za-z]", t) or not re.search(r"[\u4e00-\u9fff]", t):
+        return None
+    return t
+
+
+def voice_wav_seconds(data: bytes) -> float:
+    try:
+        import io
+        import wave
+        with wave.open(io.BytesIO(data)) as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:  # noqa: BLE001
+        return 2.0
+
+
 _hands = asyncio.Lock()
 _last_sent: dict = {"target": None, "at": -1e9}
 
@@ -1913,9 +2024,11 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
 
 # ------------------------------------------------------------------ 语音（仅管理员，10/19 第 0 步：先打通发送）
 voice_files = voice.VoiceFiles(BOT_DIR / "data" / "voice")
+tts = voice.TTSClient(cfg.voice_tts_url, cfg.voice_tts_token, cfg.voice_tts_timeout)
+interjections = voice.Interjections(BOT_DIR / "data" / "voice" / "interjections")
 voice_cmd = on_command("语音", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
-VOICE_USAGE = ("用法：/语音 测试 → 发一段“叮咚”测试音（wav，NapCat 直接转，不用 ffmpeg）；"
-               "/语音 文件名 → 发 data/voice/test/ 里的音频（mp3 等要靠 ffmpeg 转）；/语音 列表 → 看有哪些测试音频")
+VOICE_USAGE = ("用法：/语音 说 文字 → 用她的声音念这句（单个语气词用原声）；/语音 状态 → 电脑上的语音服务连没连上；"
+               "/语音 测试 → 发一段“叮咚”测试音；/语音 文件名 → 发 data/voice/test/ 里的音频；/语音 列表 → 看有哪些测试音频")
 
 
 async def _send_voice(bot: Bot, event: MessageEvent, data: bytes, label: str) -> str:
@@ -1942,6 +2055,30 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     op = words[0]
     if op == "测试":
         await voice_cmd.finish(await _send_voice(bot, event, voice.test_tone(), "测试音"))
+    if op in ("状态", "status"):
+        if not tts.configured:
+            await voice_cmd.finish("（没配置语音合成：服务器 .env 里要有 VOICE_TTS_TOKEN）")
+        ok = await tts.available(force=True)
+        n = interjections.load()
+        if ok:
+            i = tts.info
+            msg = f"（语音服务在线：{i.get('gpt', '?')} + {i.get('sovits', '?')}，电脑开机以来念了 {i.get('count', 0)} 句"
+        else:
+            msg = f"（语音服务连不上：{tts.last_error or '未知原因'}。电脑上的 启动语音服务.bat 开着吗？"
+        auto = "开" if cfg.voice_enabled else "关"
+        await voice_cmd.finish(msg + f"；原声语气词 {n} 种写法；聊天时自己发语音：{auto}，今天发了 {_voice_count[voice_day()]}/{cfg.voice_daily_max} 条）")
+    if op in ("说", "念"):
+        text = arg.extract_plain_text().strip()[len(op):].strip()
+        if not text:
+            await voice_cmd.finish("用法：/语音 说 你又在胡说什么呀，我可是很忙的。")
+        clip = interjections.match(text)
+        if clip:
+            await voice_cmd.finish(await _send_voice(bot, event, clip.read_bytes(), f"原声语气词 {clip.name}"))
+        data, note = await tts.speak(text)
+        if data is None:
+            await voice_cmd.finish(f"（没念成：{note}）")
+        logger.info(f"语音：/语音 说「{text}」{note}")
+        await voice_cmd.finish((await _send_voice(bot, event, data, "合成语音")) + f"（{note}）")
     if op in ("列表", "list"):
         names = voice_files.list_test()
         if not names:
@@ -2737,12 +2874,14 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         if use_sticker:
             only_ok = length_hint == SHORT_VARIANTS[0][1] and random.random() < cfg.sticker_only_prob
             sticker_memo = sticker_hint(sticker_emotions, only_ok)
+        # 语音：抽签 / 对方要她发语音时告诉她可以用传声魔法（电脑上的语音服务连着才有）
+        voice_auto, voice_memo = voice_roll(fam, is_group, text)
         skip_memo = ""
         if (cfg.skip_by_model and catchup_age is None and len(text) <= 12 and not _looks_like_question(text)
                 and not she_asked(history) and not gifts):
             skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                          "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
-        extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, skip_memo) if x)
+        extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo) if x)
         recall_msg = [{"role": "system", "content": extra}]
 
         messages = api_messages(
@@ -2885,13 +3024,36 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 logger.info(f"表情：想发“{emotion}”" + (f" → {sticker['no']} 号（{'、'.join(sticker['tags'])}）" if sticker else "，库里没有合适的"))
             else:
                 logger.info(f"表情：这轮没抽中，忽略她写的“{emotion}”")
+        # 语音：她写了「[传声]」（只有对方要求、给了提示时才算数）/ 抽中了随机语音 / 只回一个语气词
+        reply, wants_voice = split_voice_mark(reply)
+        voice_payload, voice_label, voice_cost = None, "", 0.0
+        if reply and tts_ready() and _voice_count[voice_day()] < cfg.voice_daily_max:
+            vt, why = None, ""
+            if wants_voice and voice_memo:
+                vt, why = voice_text(reply, cfg.voice_text_max_chars), "对方要求"
+            elif voice_auto:
+                vt, why = voice_text(reply, cfg.voice_text_max_chars), "抽中"
+            clip = interjections.match(reply) if "\n" not in reply else None
+            if clip and vt is None and fam != "disliked" and random.random() < cfg.voice_interjection_prob:
+                voice_payload, voice_label = clip.read_bytes(), f"原声 {clip.name}"
+            elif vt:
+                t0 = time.monotonic()
+                voice_payload, note = await tts.speak(vt, timeout=cfg.voice_chat_timeout)
+                voice_cost = time.monotonic() - t0
+                voice_label = f"合成（{why}，{note}）" if voice_payload else ""
+                if voice_payload is None:
+                    logger.info(f"语音：没念成，改发文字（{why}）：{note}")
+            if voice_payload:
+                logger.info(f"语音：这条用语音发 → {voice_label}：{reply[:30]}")
+        elif wants_voice:
+            logger.info("语音：她写了「[传声]」，但现在发不了语音，改发文字")
         if not reply and not sticker:
             _refund(stamp, gid_q, uid_q)
             return
         sticker_note = ""
         if sticker:
             sticker_note = f"[发了表情：{sticker['tags'][0]}" + (f"（{sticker['desc']}）" if sticker.get("desc") else "") + "]"
-        record = "\n".join(x for x in (reply, sticker_note) if x)
+        record = "\n".join(x for x in (("[发了语音] " + reply) if voice_payload else reply, sticker_note) if x)
 
         history.extend(new_entries)
         history.append({"role": "assistant", "content": record, "ts": time.time()})
@@ -2905,7 +3067,8 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 ltm.taboo_penalty(event.user_id, cfg.taboo_penalty * k, cfg.taboo_daily_max * k,
                                   f"说她{hit}（{ltm.TIER_NAMES.get(tier_now, tier_now)}）")
 
-    bubbles = split_bubbles(reply) if reply else []
+    bubbles = split_bubbles(reply) if reply and not voice_payload else []
+    out_text = reply if voice_payload else "\n".join(bubbles)       # 真正说出去的话（语音就是念的那句）
     # 同一时间只给一个人打字：别人的回复要等这边发完
     async with _hands:
         # 排队期间已经说了“我要上路了”：这条就不发了（不然告别完还在说话），也从记忆里拿掉
@@ -2915,7 +3078,10 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             _unrecord(key, record)
             return
         await switch_pause(target)
-        delay = typing_delay(bubbles[0] if bubbles else "")
+        if voice_payload:          # 发语音：不按打字算，按“录一段语音”算（合成已经花掉的时间扣掉）
+            delay = max(0.5, min(voice_wav_seconds(voice_payload) + random.uniform(1.0, 2.0), cfg.reply_delay_cap) - voice_cost)
+        else:
+            delay = typing_delay(bubbles[0] if bubbles else "")
         if busy:
             delay += random.uniform(cfg.peak_extra_delay_min, cfg.peak_extra_delay_max)
         await asyncio.sleep(delay)
@@ -2944,14 +3110,30 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         if sent < len(bubbles):
             sticker = None                                           # 文字没发全，表情也不发了
             _unrecord(key, record, keep="\n".join(bubbles[:sent]))
+        if voice_payload:
+            try:
+                await bot.send(event, voice.segment(voice_payload))   # 语音消息带不了引用
+                sent += 1
+                _voice_count[voice_day()] += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"语音：发送失败，改发文字：{e}")
+                try:
+                    await bot.send(event, reply)
+                    sent += 1
+                    _unrecord(key, record, keep="\n".join(x for x in (reply, sticker_note) if x))
+                except Exception as e2:  # noqa: BLE001
+                    logger.warning(f"回复没发出去：{target} user={event.user_id}：{e2}")
+                    _unrecord(key, record)
+                    _refund(stamp, gid_q, uid_q)
+                    return
         if sticker:
             # 文字后面隔一两秒再甩表情；只发表情时，中间有人插话就引用原消息
-            if bubbles:
+            if bubbles or voice_payload:
                 await asyncio.sleep(random.uniform(cfg.bubble_gap_min, cfg.bubble_gap_max))
                 _count_sent(gid_q, uid_q)
             try:
                 seg = stickers.segment(sticker, cfg.sticker_sub_type)
-                if not bubbles and _chat_seq[target] > seq_at_trigger:
+                if not bubbles and not voice_payload and _chat_seq[target] > seq_at_trigger:
                     seg = MessageSegment.reply(event.message_id) + seg
                 await bot.send(event, seg)
                 _last_sticker[target] = time.monotonic()
@@ -2959,17 +3141,17 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"表情：发送失败（{sticker['no']} 号）：{e}")
-                if not bubbles:
+                if not bubbles and not voice_payload:
                     _unrecord(key, record)
                     _refund(stamp, gid_q, uid_q)
                     return
                 # 文字发出去了、表情没发出去：聊天记录里只留文字，免得她以为自己甩过这张
-                _unrecord(key, record, keep=reply)
+                _unrecord(key, record, keep=("[发了语音] " + reply) if voice_payload else reply)
         # 真的发出去了，才收下面包、交给长期记忆（攒够一批就在后台整理档案、评估好感）
         if bread_first:                               # 今天第一次送面包：收下（讨厌的人送的不加分）
             ltm.take_bread(event.user_id, 0 if tier_now == "disliked" else cfg.gift_bread_affection)
         # 长期记忆不需要知道她甩了哪张画像；只发了表情的，给一个简短的说法
-        said = "\n".join(bubbles[:sent]) if bubbles else ""
+        said = "\n".join(bubbles[:sent]) if bubbles else (reply if voice_payload else "")
         ltm.add_pending(key, new_entries + [{"role": "assistant", "content": said or f"（甩了一张{sticker['tags'][0]}的表情）"}])
         mark_sent(target)
         _reply_done[ik] = time.monotonic()
@@ -2979,7 +3161,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         # 全局限额用完：最近在聊的群和私聊都告别一声；只是这个群的限额用完：只在这个群告别
         if cfg.farewell_on_limit and quota_left(gid_q, uid_q) <= 0:
             # 刚才这轮已经道别了（私聊里对方说了再见、她也回了再见；或者她自己说了要走）：这里就不再补一句告别
-            said = "\n".join(bubbles)
+            said = out_text
             already_bye = bool(_LEAVE_RE.search(said)) or (not is_group and bool(_BYE_RE.search(text) or _BYE_RE.search(said)))
             # 话还没说完（她最后在反问对方、或者对方又发来了还没回的消息）：先不告别，等收个尾
             open_end = not already_bye and (she_asked([{"role": "assistant", "content": said}]) or bool(_inbox.get(ik)))
@@ -2993,9 +3175,9 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 _wrapup.pop(target, None)
                 farewell = await say_farewells(bot, event, target, already_bye=already_bye)
         mark_sent(target)
-    if bubbles and cfg.knowledge_enabled:
-        note_topic(key, "\n".join(bubbles))          # 她讲了哪段经历：对方接着追问时还记得
-    if note_leaving(target, "\n".join(bubbles)):   # 她自己说了要走：接下来一阵子真的不在
+    if out_text and cfg.knowledge_enabled:
+        note_topic(key, out_text)                    # 她讲了哪段经历：对方接着追问时还记得
+    if note_leaving(target, out_text):   # 她自己说了要走：接下来一阵子真的不在
         _nudge_due.pop(event.user_id, None)
     elif not is_group:
         arm_nudge(event.user_id, text)            # 私聊：对方一阵子没回的话，她可能自己再说一句

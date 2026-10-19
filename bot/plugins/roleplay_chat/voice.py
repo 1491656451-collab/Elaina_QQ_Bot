@@ -83,3 +83,102 @@ class VoiceFiles:
             return self.test_dir / name
         hits = [n for n in names if n.startswith(name) or Path(n).stem == name]
         return self.test_dir / hits[0] if len(hits) == 1 else None
+
+
+# ------------------------------------------------------------------ 10/20：接你电脑上的语音合成服务
+# 你电脑上跑 voice_service\启动语音服务.bat（GPT-SoVITS + 定稿规则），用 SSH 反向隧道接到服务器的 127.0.0.1:9881。
+# 电脑关着、隧道断了：available() 为 False，她就只发文字。
+
+import json as _json
+import random as _random
+import time as _time
+
+import httpx as _httpx
+
+
+class TTSClient:
+    def __init__(self, url: str, token: str, timeout: float = 20.0, check_interval: float = 60.0):
+        self.url = url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+        self.check_interval = check_interval
+        self._ok = False
+        self._checked = 0.0
+        self.info: dict = {}
+        self.last_error = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url and self.token)
+
+    async def available(self, force: bool = False) -> bool:
+        """问一下电脑上的服务在不在；结果缓存 check_interval 秒，免得每条消息都去问"""
+        if not self.configured:
+            return False
+        now = _time.monotonic()
+        if not force and now - self._checked < self.check_interval:
+            return self._ok
+        self._checked = now
+        try:
+            async with _httpx.AsyncClient(timeout=3.0) as c:
+                r = await c.get(self.url + "/health", headers={"X-Token": self.token})
+            self.info = r.json() if r.status_code == 200 else {}
+            self._ok = r.status_code == 200 and bool(self.info.get("ok"))
+            self.last_error = "" if self._ok else f"HTTP {r.status_code} {r.text[:100]}"
+        except Exception as e:  # noqa: BLE001
+            self._ok, self.info, self.last_error = False, {}, f"{type(e).__name__}: {e}"
+        return self._ok
+
+    async def speak(self, text: str) -> tuple[bytes | None, str]:
+        """合成一句，返回 (wav, 说明)。失败返回 (None, 原因)，并把服务标成暂时不可用"""
+        if not self.configured:
+            return None, "没配置 VOICE_TTS_URL / VOICE_TTS_TOKEN"
+        t0 = _time.monotonic()
+        try:
+            async with _httpx.AsyncClient(timeout=self.timeout) as c:
+                r = await c.post(self.url + "/speak", headers={"X-Token": self.token}, json={"text": text})
+        except Exception as e:  # noqa: BLE001
+            self._ok, self._checked = False, _time.monotonic()
+            self.last_error = f"{type(e).__name__}: {e}"
+            return None, self.last_error
+        if r.status_code != 200:
+            try:
+                err = r.json().get("err", "")
+            except Exception:  # noqa: BLE001
+                err = r.text[:100]
+            return None, f"HTTP {r.status_code} {err}"
+        return r.content, f"合成 {r.headers.get('X-Cost', '?')} 秒，往返 {_time.monotonic() - t0:.1f} 秒"
+
+
+def _norm_interjection(s: str) -> str:
+    return s.strip().replace("?", "？").replace("!", "！").replace("...", "……").replace("…", "……").replace("…………", "……")
+
+
+class Interjections:
+    """单个语气词用她的原声（data/voice/interjections/：Y02_は.wav…… + 语气词表.json）"""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.table: dict[str, list[str]] = {}
+        self.load()
+
+    def load(self) -> int:
+        self.table = {}
+        p = self.root / "语气词表.json"
+        if not p.exists():
+            return 0
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return 0
+        for item in data.get("表", []):
+            files = [f for f in item.get("文件", []) if (self.root / f).exists()]
+            if not files:
+                continue
+            for w in item.get("写法", []):
+                self.table[_norm_interjection(w)] = files
+        return len(self.table)
+
+    def match(self, text: str) -> Path | None:
+        files = self.table.get(_norm_interjection(text))
+        return self.root / _random.choice(files) if files else None
