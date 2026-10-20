@@ -24,6 +24,7 @@ def voice_on(monkeypatch):
     monkeypatch.setattr(p.tts, "_checked", time.monotonic() + 1e6)
     monkeypatch.setattr(p.tts, "speak", speak)
     monkeypatch.setattr(p.cfg, "voice_enabled", True)
+    monkeypatch.setattr(p.cfg, "voice_lang", "zh")      # 这两个文件测的是直接念中文；念日语附中文的见 test_voice_ja.py
     monkeypatch.setattr(p.cfg, "voice_request_by_model", False)   # 这个文件测的是认关键词的老办法；她自己判断的见 test_voice_marks.py
     monkeypatch.setattr(p.cfg, "voice_prob_private", 0.0)
     monkeypatch.setattr(p.cfg, "voice_prob_group", 0.0)

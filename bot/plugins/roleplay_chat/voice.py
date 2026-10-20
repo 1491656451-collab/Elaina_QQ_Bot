@@ -91,6 +91,7 @@ class VoiceFiles:
 
 import json as _json
 import random as _random
+import re as _re
 import time as _time
 
 import httpx as _httpx
@@ -129,15 +130,16 @@ class TTSClient:
             self._ok, self.info, self.last_error = False, {}, f"{type(e).__name__}: {e}"
         return self._ok
 
-    async def speak(self, text: str, timeout: float | None = None) -> tuple[bytes | None, str]:
+    async def speak(self, text: str, timeout: float | None = None, lang: str = "zh") -> tuple[bytes | None, str]:
         """合成一句，返回 (wav, 说明)。失败返回 (None, 原因)，并把服务标成暂时不可用。
-        timeout：这次最多等几秒（聊天时用 VOICE_CHAT_TIMEOUT，不传就用 VOICE_TTS_TIMEOUT）"""
+        timeout：这次最多等几秒（聊天时用 VOICE_CHAT_TIMEOUT，不传就用 VOICE_TTS_TIMEOUT）
+        lang：text 是哪种语言，zh / ja（10/21 起聊天时念日语）"""
         if not self.configured:
             return None, "没配置 VOICE_TTS_URL / VOICE_TTS_TOKEN"
         t0 = _time.monotonic()
         try:
             async with _httpx.AsyncClient(timeout=timeout or self.timeout) as c:
-                r = await c.post(self.url + "/speak", headers={"X-Token": self.token}, json={"text": text})
+                r = await c.post(self.url + "/speak", headers={"X-Token": self.token}, json={"text": text, "lang": lang})
         except Exception as e:  # noqa: BLE001
             self._ok, self._checked = False, _time.monotonic()
             self.last_error = f"{type(e).__name__}: {e}"
@@ -183,3 +185,11 @@ class Interjections:
     def match(self, text: str) -> Path | None:
         files = self.table.get(_norm_interjection(text))
         return self.root / _random.choice(files) if files else None
+
+
+_KANA_RE = _re.compile(r"[\u3040-\u30ff]")
+
+
+def has_kana(text: str) -> bool:
+    """有平假名 / 片假名：当成日语"""
+    return bool(_KANA_RE.search(text or ""))

@@ -62,6 +62,8 @@ class Config(BaseModel):
     voice_interjection_prob: float = 0.3  # 她只回一个语气词（哈？嗯。欸？）时，用原声的概率
     voice_request_by_model: bool = True   # 对方是不是在要语音，由她自己判断（每轮都给【传声】提示，10/20）；false = 认关键词
     voice_chat_timeout: float = 8.0       # 聊天时等电脑念完最多几秒，超时就改发文字
+    voice_lang: str = "ja"                # 念哪种语言（10/21 定）：ja = 把她要说的中文先译成日语，用日语念，再把中文作为文字一起发；zh = 直接念中文、只发语音
+    voice_translate_timeout: float = 6.0  # voice_lang=ja 时，等译成日语最多几秒，超时就只发文字
     sticker_tier_multiplier: dict[str, float] = {"disliked": 0.5, "stranger": 0.7, "friend": 0.85, "acquaintance": 1.1, "close": 1.4}
 
     # ---- 小说知识库（摘要 + 原文检索）----

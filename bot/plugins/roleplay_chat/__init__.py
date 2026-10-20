@@ -1757,6 +1757,40 @@ def voice_text(reply: str, limit: int) -> str | None:
     return t
 
 
+# 10/21：她的声音只用日语素材训练过，念中文时卷舌音、鼻音念不好（见 voice_data\样音对比报告-第9轮.md），
+# 所以 VOICE_LANG=ja 时：她要说的中文先译成日语，用日语念，语音后面再把中文作为文字发出去
+VOICE_JA_PROMPT = """把下面这句中文译成日语口语。说这句话的是伊蕾娜（《魔女之旅》的主角，旅行中的魔女，“灰之魔女”），这是她用自己的声音说出来的话。
+要求：
+- 照她在日文原作里的说话方式：平时是带“です・ます”的礼貌说法，语气里带点自信、得意、毒舌；对很熟的人可以随意一点。自称“私”。
+- 保留原句的语气（反问、吐槽、撒娇、不耐烦），意思别增别减，别加原句没有的话。
+- 人名用原作写法：伊蕾娜→イレイナ、沙耶→サヤ、芙兰→フラン、希拉→シーラ、妮可→ニケ。别的中文名字、网名照写汉字或用片假名音译。
+- 只输出译好的那一句日语，不要引号、注释、罗马音、中文。
+
+中文：{text}"""
+
+
+async def translate_ja(text: str, user_id: int | None = None, group_id: int | None = None) -> str | None:
+    """把要念的中文译成日语；失败、超时、译出来不像日语都返回 None（这条就只发文字）"""
+    try:
+        r = await asyncio.wait_for(client.chat.completions.create(
+            model=cfg.deepseek_model,
+            messages=[{"role": "user", "content": VOICE_JA_PROMPT.format(text=text)}],
+            temperature=0.3,
+            max_tokens=200,
+            extra_body={"thinking": {"type": "disabled"}},
+        ), timeout=cfg.voice_translate_timeout)
+        budget.track(r, "voice_ja", user=user_id, group=group_id)
+        ja = (r.choices[0].message.content or "").strip().strip("「」『』\"' ")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"语音：译成日语失败：{e!r}")
+        return None
+    ja = re.sub(r"\s*\n+\s*", "", ja)
+    if not ja or not voice.has_kana(ja) or len(ja) > cfg.voice_text_max_chars or re.search(r"[A-Za-z]", ja):
+        logger.warning(f"语音：译出来的不像能念的日语，不念：{ja[:60]!r}")
+        return None
+    return ja
+
+
 def voice_wav_seconds(data: bytes) -> float:
     try:
         import io
@@ -2046,7 +2080,8 @@ voice_files = voice.VoiceFiles(BOT_DIR / "data" / "voice")
 tts = voice.TTSClient(cfg.voice_tts_url, cfg.voice_tts_token, cfg.voice_tts_timeout)
 interjections = voice.Interjections(BOT_DIR / "data" / "voice" / "interjections")
 voice_cmd = on_command("语音", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
-VOICE_USAGE = ("用法：/语音 说 文字 → 用她的声音念这句（单个语气词用原声）；/语音 状态 → 电脑上的语音服务连没连上；"
+VOICE_USAGE = ("用法：/语音 说 文字 → 用她的声音念这句（单个语气词用原声；写日语就直接念日语，写中文时 VOICE_LANG=ja 会先译成日语再念）；"
+               "/语音 说中文 文字 → 不翻译、直接念中文；/语音 状态 → 电脑上的语音服务连没连上；"
                "/语音 测试 → 发一段“叮咚”测试音；/语音 文件名 → 发 data/voice/test/ 里的音频；/语音 列表 → 看有哪些测试音频")
 
 
@@ -2084,20 +2119,28 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             msg = f"（语音服务在线：{i.get('gpt', '?')} + {i.get('sovits', '?')}，电脑开机以来念了 {i.get('count', 0)} 句"
         else:
             msg = f"（语音服务连不上：{tts.last_error or '未知原因'}。电脑上的 启动语音服务.bat 开着吗？"
-        auto = "开" if cfg.voice_enabled else "关"
+        auto = ("开" if cfg.voice_enabled else "关") + ("，念日语、附中文" if cfg.voice_lang == "ja" else "，念中文")
         await voice_cmd.finish(msg + f"；原声语气词 {n} 种写法；聊天时自己发语音：{auto}，今天发了 {_voice_count[voice_day()]}/{cfg.voice_daily_max} 条）")
-    if op in ("说", "念"):
+    if op in ("说", "念", "说中文", "念中文"):
         text = arg.extract_plain_text().strip()[len(op):].strip()
         if not text:
             await voice_cmd.finish("用法：/语音 说 你又在胡说什么呀，我可是很忙的。")
         clip = interjections.match(text)
         if clip:
             await voice_cmd.finish(await _send_voice(bot, event, clip.read_bytes(), f"原声语气词 {clip.name}"))
-        data, note = await tts.speak(text)
+        lang, ja_note = "zh", ""
+        if voice.has_kana(text):
+            lang = "ja"
+        elif cfg.voice_lang == "ja" and not op.endswith("中文"):
+            ja = await translate_ja(text, event.user_id)
+            if ja is None:
+                await voice_cmd.finish("（没译成日语，看日志；想直接念中文用 /语音 说中文 文字）")
+            text, lang, ja_note = ja, "ja", f"日语：{ja}；"
+        data, note = await tts.speak(text, lang=lang)
         if data is None:
             await voice_cmd.finish(f"（没念成：{note}）")
         logger.info(f"语音：/语音 说「{text}」{note}")
-        await voice_cmd.finish((await _send_voice(bot, event, data, "合成语音")) + f"（{note}）")
+        await voice_cmd.finish((await _send_voice(bot, event, data, "合成语音")) + f"（{ja_note}{note}）")
     if op in ("列表", "list"):
         names = voice_files.list_test()
         if not names:
@@ -3046,6 +3089,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         # 语音：她写了「[传声]」（只有对方要求、给了提示时才算数）/ 抽中了随机语音 / 只回一个语气词
         reply, wants_voice = split_voice_mark(reply)
         voice_payload, voice_label, voice_cost = None, "", 0.0
+        voice_with_text = False        # VOICE_LANG=ja：念的是日语，语音后面再发中文文字
         if reply and tts_ready() and _voice_count[voice_day()] < cfg.voice_daily_max:
             vt, why = None, ""
             if wants_voice and voice_memo:
@@ -3057,12 +3101,21 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 voice_payload, voice_label = clip.read_bytes(), f"原声 {clip.name}"
             elif vt:
                 t0 = time.monotonic()
+                ja = None
                 try:
-                    voice_payload, note = await tts.speak(vt, timeout=cfg.voice_chat_timeout)
+                    if cfg.voice_lang == "ja":
+                        ja = await translate_ja(vt, event.user_id, event.group_id if is_group else None)
+                        if ja is None:
+                            voice_payload, note = None, "没译成日语"
+                        else:
+                            voice_payload, note = await tts.speak(ja, timeout=cfg.voice_chat_timeout, lang="ja")
+                    else:
+                        voice_payload, note = await tts.speak(vt, timeout=cfg.voice_chat_timeout)
                 except Exception as e:  # noqa: BLE001  语音出什么错都不能让这条回复丢掉（10/20 13:04 线上就是这样丢的）
                     voice_payload, note = None, f"出错：{e!r}"
                 voice_cost = time.monotonic() - t0
-                voice_label = f"合成（{why}，{note}）" if voice_payload else ""
+                voice_with_text = bool(voice_payload) and ja is not None
+                voice_label = f"合成（{why}，{note}" + (f"，日语：{ja[:40]}" if ja else "") + "）" if voice_payload else ""
                 if voice_payload is None:
                     logger.info(f"语音：没念成，改发文字（{why}）：{note}")
             if voice_payload:
@@ -3089,7 +3142,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 ltm.taboo_penalty(event.user_id, cfg.taboo_penalty * k, cfg.taboo_daily_max * k,
                                   f"说她{hit}（{ltm.TIER_NAMES.get(tier_now, tier_now)}）")
 
-    bubbles = split_bubbles(reply) if reply and not voice_payload else []
+    bubbles = split_bubbles(reply) if reply and (not voice_payload or voice_with_text) else []
     out_text = reply if voice_payload else "\n".join(bubbles)       # 真正说出去的话（语音就是念的那句）
     # 同一时间只给一个人打字：别人的回复要等这边发完
     async with _hands:
@@ -3109,17 +3162,34 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         await asyncio.sleep(delay)
 
         sent = 0
+        voice_first = False
+        if voice_payload and voice_with_text:     # 日语语音先发，后面跟着中文文字
+            try:
+                await bot.send(event, voice.segment(voice_payload))   # 语音消息带不了引用
+                sent += 1
+                _voice_count[voice_day()] += 1
+                voice_first = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"语音：发送失败，只发文字：{e}")
+                keep = "\n".join(x for x in (reply, sticker_note) if x)
+                _unrecord(key, record, keep=keep)
+                record, voice_payload = keep, None
+            if voice_first and bubbles:
+                await asyncio.sleep(bubble_gap(bubbles[0]))
+                _count_sent(gid_q, uid_q)
+        nb = 0                                    # 文字发出去了几条
         for i, bubble in enumerate(bubbles):
             if i > 0:
                 await asyncio.sleep(bubble_gap(bubble))            # 后面几条：像在接着打字
                 _count_sent(gid_q, uid_q)                          # 多发的每条都算进限额
             msg = bubble
-            if i == 0 and _chat_seq[target] > seq_at_trigger:
+            if i == 0 and not voice_first and _chat_seq[target] > seq_at_trigger:
                 # 这条消息之后有别人说话了、或者她自己先说了别的（包括她排队的时候）：第一条引用原消息，免得大家不知道她在回哪句
                 msg = MessageSegment.reply(event.message_id) + bubble
             try:
                 await bot.send(event, msg)
                 sent += 1
+                nb += 1
             except Exception as e:  # noqa: BLE001
                 # 发不出去（被风控拦了、掉线了）：后面几条也别发了
                 logger.warning(f"回复没发出去（第 {i + 1} 条，共 {len(bubbles)} 条）：{target} user={event.user_id}：{e}")
@@ -3129,10 +3199,11 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
             _unrecord(key, record)
             _refund(stamp, gid_q, uid_q)
             return
-        if sent < len(bubbles):
+        if nb < len(bubbles):
             sticker = None                                           # 文字没发全，表情也不发了
-            _unrecord(key, record, keep="\n".join(bubbles[:sent]))
-        if voice_payload:
+            if not voice_first:                                      # 语音已经发出去了：这句话算说过了，记录不动
+                _unrecord(key, record, keep="\n".join(bubbles[:nb]))
+        if voice_payload and not voice_with_text:
             try:
                 await bot.send(event, voice.segment(voice_payload))   # 语音消息带不了引用
                 sent += 1
@@ -3173,7 +3244,7 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
         if bread_first:                               # 今天第一次送面包：收下（讨厌的人送的不加分）
             ltm.take_bread(event.user_id, 0 if tier_now == "disliked" else cfg.gift_bread_affection)
         # 长期记忆不需要知道她甩了哪张画像；只发了表情的，给一个简短的说法
-        said = "\n".join(bubbles[:sent]) if bubbles else (reply if voice_payload else "")
+        said = reply if voice_first else ("\n".join(bubbles[:nb]) if bubbles else (reply if voice_payload else ""))
         ltm.add_pending(key, new_entries + [{"role": "assistant", "content": said or f"（甩了一张{sticker['tags'][0]}的表情）"}])
         mark_sent(target)
         _reply_done[ik] = time.monotonic()

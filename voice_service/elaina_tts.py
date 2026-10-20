@@ -6,6 +6,9 @@ r"""
 2. 开一个小服务（127.0.0.1:9881），把"念什么"按定稿规则变成合成参数：
    去掉句尾句号；问句用 r11 参考、其余用 r8；整句合成；种子 3
    （规则和依据见 voice_data\样音对比报告-第6轮.md）
+   合成完再去掉句尾的“哈气”：陈述句重剪、问句轻剪（tail_trim.py，依据见 样音对比报告-第8轮.md）
+   10/21 起机器人聊天时让她念日语（中文念不好，见 样音对比报告-第9轮.md）：请求里 lang=ja 就按日语念，
+   保留标点、按标点切句（cut5），不去尾气（日语句尾“です”的“す”本来就是气声，剪了会剪掉字）
 3. 用 SSH 反向隧道把 9881 接到服务器上的 127.0.0.1:9881，机器人就能调用；断了自动重连
 窗口开着，她就能发语音；关掉或者电脑睡眠，她就只发文字。
 
@@ -29,13 +32,19 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)                 # 整合包自带的 python 不会自动把脚本所在目录加进来
+try:
+    import tail_trim as TRIM             # 要 numpy、scipy，GPT-SoVITS 整合包里都有
+except Exception as _e:  # noqa: BLE001
+    TRIM = None
+    _TRIM_ERR = repr(_e)
 ROOT = os.path.dirname(HERE)                                   # D:\QQBot
 CONF_PATH = os.path.join(HERE, "本机配置.json")
 DATASET = os.path.join(ROOT, "bot", "voice_data", "elaina_dataset")
 
 DEFAULT_CONF = {
     "gsv_dir": r"D:\GPT-SoVITS\GPT-SoVITS-v2pro-20250604",
-    "gpt_weights": r"GPT_weights_v2ProPlus\elaina-e10.ckpt",
+    "gpt_weights": r"GPT_weights_v2ProPlus\elaina-e5.ckpt",   # 10/21 改回最初版 e5：改念日语，e5 念日语你听过“很完美”
     "sovits_weights": r"SoVITS_weights_v2ProPlus\elaina_e2_s254.pth",
     "ref_statement": [os.path.join(DATASET, "wavs", "elaina_0025.wav"), "素直になる薬を超えるすごい薬を作りましたよ。"],
     "ref_question": [os.path.join(DATASET, "wavs", "elaina_0298.wav"), "この街に何があったのですか？それは記憶喪失ですか？"],
@@ -48,6 +57,13 @@ DEFAULT_CONF = {
     "tunnel": True,
     "token": "",             # 第一次运行自动生成；服务器 .env 里的 VOICE_TTS_TOKEN 要和它一样
     "max_chars": 120,
+    "tail_trim": True,       # 念中文时去掉句尾哈气
+    "tail_trim_ja": False,   # 念日语时去不去（默认不去）
+}
+
+# 以前写进 本机配置.json 的旧默认值：读到这些就换成上面的新默认值（你自己手改过的值不动）
+OLD_DEFAULTS = {
+    "gpt_weights": [r"GPT_weights_v2ProPlus\elaina-e10.ckpt", r"GPT_weights_v2ProPlus\elaina2-e3.ckpt"],
 }
 
 LOG_LOCK = threading.Lock()
@@ -72,13 +88,23 @@ def load_conf() -> dict:
         with open(CONF_PATH, encoding="utf-8") as f:
             conf.update(json.load(f))
     changed = not os.path.exists(CONF_PATH)
+    for k, olds in OLD_DEFAULTS.items():
+        if conf.get(k) in olds and conf[k] != DEFAULT_CONF[k]:
+            log(f"本机配置.json 里的 {k} 是旧默认值 {conf[k]}，换成 {DEFAULT_CONF[k]}")
+            conf[k] = DEFAULT_CONF[k]
+            changed = True
+    for k, v in DEFAULT_CONF.items():
+        if k not in conf:
+            conf[k] = v
+            changed = True
     if not conf.get("token"):
         conf["token"] = secrets.token_hex(16)
         changed = True
     if changed:
+        existed = os.path.exists(CONF_PATH)
         with open(CONF_PATH, "w", encoding="utf-8") as f:
             json.dump(conf, f, ensure_ascii=False, indent=1)
-        log(f"已生成 {CONF_PATH}")
+        log(f"已{'更新' if existed else '生成'} {CONF_PATH}")
     if not conf.get("server"):
         p = os.path.join(ROOT, "server.txt")
         if os.path.exists(p):
@@ -152,11 +178,15 @@ def prepare(text: str) -> tuple[str, bool]:
     return t, question
 
 
-def synth(conf, text: str) -> tuple[bytes, float]:
-    t, question = prepare(text)
+def synth(conf, text: str, lang: str = "zh") -> tuple[bytes, float]:
+    if lang == "ja":
+        t = " ".join(text.split()).strip()
+        question, split = t.endswith(("？", "?")), "cut5"
+    else:
+        (t, question), split = prepare(text), "cut0"
     ref, prompt = conf["ref_question"] if question else conf["ref_statement"]
-    body = dict(text=t, text_lang="zh", ref_audio_path=ref, prompt_text=prompt, prompt_lang="ja",
-                top_k=conf["top_k"], top_p=1.0, temperature=1.0, seed=conf["seed"], text_split_method="cut0",
+    body = dict(text=t, text_lang=lang, ref_audio_path=ref, prompt_text=prompt, prompt_lang="ja",
+                top_k=conf["top_k"], top_p=1.0, temperature=1.0, seed=conf["seed"], text_split_method=split,
                 batch_size=1, speed_factor=1.0, repetition_penalty=1.35, media_type="wav", streaming_mode=False)
     t0 = time.time()
     with SYNTH_LOCK:                          # 显卡一次只念一句
@@ -164,6 +194,11 @@ def synth(conf, text: str) -> tuple[bytes, float]:
     cost = time.time() - t0
     if code != 200:
         raise RuntimeError(data[:300].decode("utf-8", "replace"))
+    if conf.get("tail_trim_ja" if lang == "ja" else "tail_trim") and TRIM is not None:
+        try:
+            data, removed = TRIM.trim_wav_bytes(data, TRIM.preset_for(text))
+        except Exception as e:  # noqa: BLE001  剪坏了就发原样
+            log(f"去尾气失败，发原样：{e}")
     return data, cost
 
 
@@ -191,7 +226,8 @@ def make_handler(conf):
                 if not self._auth():
                     return
                 self._json(200, {"ok": port_open(conf["api_port"]), "gpt": os.path.basename(conf["gpt_weights"]),
-                                 "sovits": os.path.basename(conf["sovits_weights"]), "count": STATE["count"]})
+                                 "sovits": os.path.basename(conf["sovits_weights"]), "count": STATE["count"],
+                                 "tail_trim": bool(conf.get("tail_trim") and TRIM is not None)})
             else:
                 self._json(404, {"ok": False})
 
@@ -204,17 +240,18 @@ def make_handler(conf):
                 n = int(self.headers.get("Content-Length", "0"))
                 req = json.loads(self.rfile.read(n) or b"{}")
                 text = str(req.get("text", "")).strip()
+                lang = "ja" if req.get("lang") == "ja" else "zh"
             except Exception:  # noqa: BLE001
                 return self._json(400, {"ok": False, "err": "请求格式不对"})
             if not text or len(text) > conf["max_chars"]:
                 return self._json(400, {"ok": False, "err": f"文字为空或超过 {conf['max_chars']} 字"})
             try:
-                data, cost = synth(conf, text)
+                data, cost = synth(conf, text, lang)
             except Exception as e:  # noqa: BLE001
                 log(f"合成失败：{text}｜{e}")
                 return self._json(500, {"ok": False, "err": str(e)})
             STATE["count"] += 1
-            log(f"念了：{text}（{cost:.1f} 秒，{len(data) // 1024} KB）")
+            log(f"念了{'（日语）' if lang == 'ja' else ''}：{text}（{cost:.1f} 秒，{len(data) // 1024} KB）")
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(len(data)))
@@ -272,8 +309,14 @@ def main():
     stop = threading.Event()
     try:
         load_models(conf)
-        data, cost = synth(conf, "你好，我是伊蕾娜。")
+        data, cost = synth(conf, "こんにちは、イレイナです。", "ja")
         log(f"自检：合成一句用了 {cost:.1f} 秒（第一句会慢一点）")
+        if not conf.get("tail_trim"):
+            log("去尾气：关着（本机配置.json 里 tail_trim 是 false）")
+        elif TRIM is None:
+            log(f"去尾气：开不了，tail_trim.py 载入失败：{_TRIM_ERR}")
+        else:
+            log("去尾气：念中文时开着（陈述句重剪、问句轻剪）" + ("，念日语时也开着" if conf.get("tail_trim_ja") else "，念日语时不去"))
         srv = ThreadingHTTPServer(("127.0.0.1", conf["service_port"]), make_handler(conf))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         log(f"本机服务：http://127.0.0.1:{conf['service_port']}")
