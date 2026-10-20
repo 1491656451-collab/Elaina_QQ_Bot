@@ -138,3 +138,31 @@ def test_by_model_offline_or_capped_no_hint(by_model, monkeypatch):
     p._voice_count.clear()
     monkeypatch.setattr(p.tts, "_ok", False)
     assert p.voice_roll("close", False, "发个语音") == (False, "")
+
+
+# ---------------------------------------------------------------- 10/20 13:04 线上：speak() 不认 timeout，整条回复丢了
+@pytest.mark.asyncio
+async def test_real_tts_client_accepts_timeout():
+    """用真的 TTSClient（不是测试里的假 speak）：带 timeout 调用不报错，连不上就返回 (None, 原因)"""
+    import plugins.roleplay_chat as p
+    c = p.voice.TTSClient("http://127.0.0.1:9", "t", timeout=20.0)
+    data, note = await c.speak("你好", timeout=0.5)
+    assert data is None and note
+
+
+@pytest.mark.asyncio
+async def test_speak_error_falls_back_to_text(app: App, voice_on, monkeypatch):  # noqa: F811
+    """念的时候出了任何错：这条改发文字，不能整条丢掉"""
+    p, speak, spoken = voice_on
+
+    async def boom(text, timeout=None):
+        raise TypeError("boom")
+    monkeypatch.setattr(p.tts, "speak", boom)
+    monkeypatch.setattr(p.cfg, "voice_prob_private", 1.0)
+    p.client.chat.completions.create = fake_create("知道啦。")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("好的")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "知道啦。", result=None, bot=bot)
+    assert p.get_history("private_222")[-1]["content"] == "知道啦。"

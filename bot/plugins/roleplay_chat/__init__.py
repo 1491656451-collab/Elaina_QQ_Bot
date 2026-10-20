@@ -3038,7 +3038,10 @@ async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = N
                 voice_payload, voice_label = clip.read_bytes(), f"原声 {clip.name}"
             elif vt:
                 t0 = time.monotonic()
-                voice_payload, note = await tts.speak(vt, timeout=cfg.voice_chat_timeout)
+                try:
+                    voice_payload, note = await tts.speak(vt, timeout=cfg.voice_chat_timeout)
+                except Exception as e:  # noqa: BLE001  语音出什么错都不能让这条回复丢掉（10/20 13:04 线上就是这样丢的）
+                    voice_payload, note = None, f"出错：{e!r}"
                 voice_cost = time.monotonic() - t0
                 voice_label = f"合成（{why}，{note}）" if voice_payload else ""
                 if voice_payload is None:

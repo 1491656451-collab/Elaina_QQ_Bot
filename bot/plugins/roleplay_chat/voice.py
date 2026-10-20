@@ -129,13 +129,14 @@ class TTSClient:
             self._ok, self.info, self.last_error = False, {}, f"{type(e).__name__}: {e}"
         return self._ok
 
-    async def speak(self, text: str) -> tuple[bytes | None, str]:
-        """合成一句，返回 (wav, 说明)。失败返回 (None, 原因)，并把服务标成暂时不可用"""
+    async def speak(self, text: str, timeout: float | None = None) -> tuple[bytes | None, str]:
+        """合成一句，返回 (wav, 说明)。失败返回 (None, 原因)，并把服务标成暂时不可用。
+        timeout：这次最多等几秒（聊天时用 VOICE_CHAT_TIMEOUT，不传就用 VOICE_TTS_TIMEOUT）"""
         if not self.configured:
             return None, "没配置 VOICE_TTS_URL / VOICE_TTS_TOKEN"
         t0 = _time.monotonic()
         try:
-            async with _httpx.AsyncClient(timeout=self.timeout) as c:
+            async with _httpx.AsyncClient(timeout=timeout or self.timeout) as c:
                 r = await c.post(self.url + "/speak", headers={"X-Token": self.token}, json={"text": text})
         except Exception as e:  # noqa: BLE001
             self._ok, self._checked = False, _time.monotonic()
