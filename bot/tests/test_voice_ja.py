@@ -171,3 +171,8 @@ async def test_real_client_sends_lang(monkeypatch):
     c = p.voice.TTSClient("http://x", "t")
     data, _ = await c.speak("こんにちは", lang="ja")
     assert data == WAV and sent == {"text": "こんにちは", "lang": "ja"}
+
+
+def test_prompt_has_catchphrases():
+    import plugins.roleplay_chat as p
+    assert "没错，就是我→そう、私です" in p.VOICE_JA_PROMPT
