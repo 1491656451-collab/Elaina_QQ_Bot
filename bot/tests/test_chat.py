@@ -5436,3 +5436,62 @@ def test_action_paren_time_passed_1020():
         assert "过了" not in p.clean_reply(f"晚安。\n{t}\n睡不着，又爬起来了。"), t
     assert p.clean_reply("（过了十几秒）") == "（过了十几秒）"          # 整条只有动作就不动
     assert p.clean_reply("都过了十几秒了，还没回？") == "都过了十几秒了，还没回？"   # 不在括号里不动
+
+
+# ---------------------------------------------------------------- 10/20 13:19：整句话写在括号里发出去
+def test_paren_line_unwrapped_1020():
+    import plugins.roleplay_chat as p
+    # 先在规则里说，程序这边兜底；“括号只用来写心里话”那半句 13:39 测出来会让她更爱写括号，删了
+    assert "别包在括号里" in p.CHAT_RULES and "括号只用来写" not in p.CHAT_RULES
+    assert p.clean_reply("嗯，那就好。\n\n（说起来，隔了两周，你又画了张什么送来？）") == "嗯，那就好。\n\n说起来，隔了两周，你又画了张什么送来？"
+    assert p.clean_reply("（说起来，你最近在忙什么？）") == "说起来，你最近在忙什么？"
+    assert p.clean_reply("晚安。\n（这就睡了啊……）") == "晚安。\n（这就睡了啊……）"   # 心声照旧留着（9/29 定的）
+    assert p.clean_reply("嗯。\n（对了，你那幅画后来画完了吗）") == "嗯。\n对了，你那幅画后来画完了吗"
+    assert p.clean_reply("（他是不是在等我回话？）") == "（他是不是在等我回话？）"     # 没跟对方说话：心声
+    assert p.clean_reply("好吧（小声）") == "好吧（小声）"                   # 句子中间的不动
+    assert p.clean_reply("你看\n(｀・ω・´)") == "你看\n(｀・ω・´)"           # 颜文字不动
+    assert p.clean_reply("嗯\n（笑）") == "嗯\n（笑）"                         # 太短的不动
+    assert p.clean_reply("晚安。\n（过了十几秒）\n……做个好梦。") == "晚安。\n\n……做个好梦。"   # 纯动作照旧去掉
+
+
+# ---------------------------------------------------------------- 10/20 13:26：「[name=伊蕾娜]」让整条回复被当成外文截掉
+def test_pseudo_tag_stripped_1020():
+    import plugins.roleplay_chat as p
+    r = p.clean_reply("[传声][name=伊蕾娜]厉害啊。到底是有师父好好教过的。", keep_sticker=True)
+    assert r == "[传声]厉害啊。到底是有师父好好教过的。"
+    assert p.clean_reply("[name=伊蕾娜] 你好。") == "你好。"
+    assert p.clean_reply("[at:qq=123] 嗯") == "嗯"
+    assert p.clean_reply("[CQ:at,qq=123] 嗯") == "嗯"
+    assert p.clean_reply("好呀[表情:得意]", keep_sticker=True) == "好呀[表情:得意]"      # 表情标记不动
+    t, _ = p.split_voice_mark(r)
+    assert p.cut_derailed(t, "很厉害吗", ["群鲨鱼"]) == t                                  # 不再被当成外文截掉
+
+
+# ---------------------------------------------------------------- 10/20 反复更新的事按最后一次更新的日子标
+@pytest.mark.asyncio
+async def test_updated_fact_age_uses_last_change_1020(tmp_path):
+    """“最新一张是……”这种会反复更新的事：标“多久前”按内容最后一次改的日子，不按第一次记下的日子；
+    只是又聊到（touch）、内容没变的，不算改过"""
+    m, _ = _mem(tmp_path, lambda kw: {"people": [{"qq": 111, "update": [
+        {"id": 1, "text": "在画一组插画，最新一张是海边的伊蕾娜"},
+        {"id": 2, "text": "最近在准备考试"}], "affection": 0}]})
+    _prof_with(m, 111, [
+        {"text": "在画一组插画，最新一张是森林", "kind": "近况", "weight": 2, "scope": "private", "since": date_str(14)},
+        {"text": "最近在准备考试", "kind": "近况", "weight": 2, "scope": "private", "since": date_str(14)},
+    ])
+    await _feed(m, "private_111", text="新画好了 海边那张")
+    prof = m.get_user(111)
+    f1, f2 = prof["facts"]
+    assert f1["changed"] == date_str() and f1["since"] == date_str(14), "第一次记下的日子留着，另记改的日子"
+    assert "changed" not in f2, "内容没变不算改过"
+    ctx = m.context_for(111, "阿明", None, text="考试 插画 海边", recent="")
+    assert "最新一张是海边的你（今天说的）" in ctx
+    assert "最近在准备考试（2 周前的事，现在不一定还这样）" in ctx
+
+
+def test_edit_fact_marks_changed_1020(tmp_path):
+    m, _ = _mem(tmp_path, lambda kw: {})
+    _prof_with(m, 111, [{"text": "约好请伊蕾娜吃可颂", "kind": "约定", "weight": 2, "scope": "private", "since": date_str(10)}])
+    m.edit_fact(111, 1, "经历 请伊蕾娜吃过可颂")
+    f = m.get_user(111)["facts"][0]
+    assert f["changed"] == date_str() and f["since"] == date_str(10)

@@ -34,7 +34,8 @@ def voice_on(monkeypatch):
 
 
 def _sys_text(kw):
-    return "\n".join(str(m["content"]) for m in kw["messages"] if m["role"] == "system")
+    """本轮提示（不含第一条：人设 + 聊天规则。人设里本来就写着“【传声】”，10/20 部署时这里误报过）"""
+    return "\n".join(str(m["content"]) for m in kw["messages"][1:] if m["role"] == "system")
 
 
 @pytest.mark.asyncio

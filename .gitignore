@@ -90,3 +90,6 @@ voice_data/
 voice_service/本机配置.json
 voice_service/*.log
 voice_service/service.pid
+
+# 括号里的话排查记录：引了 10/20 私聊原话和对方档案（10/20 部署 agent 加）
+docs/问题排查记录-括号里的话-*.md

@@ -234,6 +234,12 @@ def _md(d: str | None) -> str:
         return ""
 
 
+def _when(f: dict) -> str | None:
+    """这条事“最近一次有新内容”是哪天：内容改过（又聊出了新情况）按改的那天，没改过按第一次记下的那天。
+    10/20：会反复更新的事（“最新一张是……”）按第一次记下的日子标成“2 周前”，她会以为是两周前的事"""
+    return f.get("changed") or f.get("since")
+
+
 def _ago(d: str | None) -> str:
     n = int(_days_since(d))
     if n <= 0:
@@ -686,6 +692,8 @@ class LongTermMemory:
         if 1 <= n <= len(facts) and isinstance(facts[n - 1], dict):
             f = facts[n - 1]
             old = f.get("text", "")
+            if _norm(new) != _norm(f.get("text", "")):
+                f["changed"] = _today_str()
             f["text"], f["seen"] = new, _today_str()
             f.pop("offered", None)
             f["tags"] = _clean_tags(f.get("tags"), new)
@@ -1270,6 +1278,8 @@ class LongTermMemory:
             for g in dropped:                        # 合进来的里有更私密的（私聊知道的、别的群知道的）：这条也按更私密的算
                 if _related(_grams(g.get("text", "")), text or f.get("text", "")) >= 2:
                     f["scope"] = _stricter_scope(f.get("scope"), g.get("scope"))
+                    if str(_when(g) or "") > str(_when(f) or ""):   # 合进来的那条更新：日子按新的算（睡前只是合并改写，不算“今天有新情况”）
+                        f["changed"] = _when(g)
         prof["facts"] = [f for f in facts if _int(f.get("id")) not in drops]
         self._merge_told(prof, {"told_update": d.get("told_update")}, "private")
         imp = _drop_her_topics(_clean_text(d.get("impression"), 40))
@@ -1356,6 +1366,8 @@ class LongTermMemory:
             f = by_id[got[0]]
             text = _clean_text(u.get("text"))
             if text:
+                if _norm(text) != _norm(f.get("text", "")):   # 内容真变了（又聊出了新情况）：记下改的日子，标“多久前”按这天算
+                    f["changed"] = today
                 f["text"] = text
             if u.get("kind") in KINDS:
                 f["kind"] = u["kind"]
@@ -2012,10 +2024,10 @@ class LongTermMemory:
         if ask:
             due = f"（大概是{_md(ask['due'])}的事）" if ask.get("due") else ""
             if ask.get("kind") == "约定":
-                parts.append(f"【可以问问】你和「{who}」{_ago(ask.get('since'))}约过：{_to_you(ask.get('text', ''))}。"
+                parts.append(f"【可以问问】你和「{who}」{_ago(_when(ask))}约过：{_to_you(ask.get('text', ''))}。"
                              "聊得上的话可以顺口提一句（别像在催）；接不上就不提。只提这一件。")
             else:
-                parts.append(f"【可以问问】「{who}」{_ago(ask.get('since'))}说过：{_to_you(ask.get('text', ''))}{due}。"
+                parts.append(f"【可以问问】「{who}」{_ago(_when(ask))}说过：{_to_you(ask.get('text', ''))}{due}。"
                              "隔了一阵了，聊得上的话可以顺口问一句后来怎么样；接不上就不提。只问这一件。")
             ask["offered"] = _today_str()          # 提过一次就不再提这件（问没问、对方怎么答，下次整理时会记进去）
             try:
@@ -2055,32 +2067,33 @@ class LongTermMemory:
                 continue
             if f.get("kind") == "计划" and f.get("due") and str(f["due"]) <= today:
                 plans.append(f)
-            elif (f.get("kind") == "约定" and _days_since(f.get("since")) >= ASK_RECENT_MIN_DAYS
+            elif (f.get("kind") == "约定" and _days_since(_when(f)) >= ASK_RECENT_MIN_DAYS
                   and not _her_topics(f.get("text", ""))):   # 还没兑现的约定（10/16）；面包这类不提，免得又催
                 promises.append(f)
-            elif f.get("kind") == "近况" and _weight(f.get("weight")) >= 2 and _days_since(f.get("since")) >= ASK_RECENT_MIN_DAYS:
+            elif f.get("kind") == "近况" and _weight(f.get("weight")) >= 2 and _days_since(_when(f)) >= ASK_RECENT_MIN_DAYS:
                 recents.append(f)
         if plans:
             return max(plans, key=lambda f: str(f.get("due")))
         if promises:
-            return max(promises, key=lambda f: (_weight(f.get("weight")), -_days_since(f.get("since"))))
+            return max(promises, key=lambda f: (_weight(f.get("weight")), -_days_since(_when(f))))
         if recents:
-            return max(recents, key=lambda f: (_weight(f.get("weight")), -_days_since(f.get("since"))))
+            return max(recents, key=lambda f: (_weight(f.get("weight")), -_days_since(_when(f))))
         return None
 
     @staticmethod
     def _fact_for_her(f: dict) -> str:
         t = _to_you(f.get("text", ""))
-        age = _days_since(f.get("since")) if f.get("since") else 0
+        when = _when(f)
+        age = _days_since(when) if when else 0
         if f.get("kind") == "近况" and age >= 5:      # 10/18：一周前的近况被当成现在的事（“找你的人别只拿戳的”）
-            t += f"（{_ago(f.get('since'))}的事，现在不一定还这样）"
+            t += f"（{_ago(when)}的事，现在不一定还这样）"
         elif f.get("kind") in ("近况", "计划"):
-            t += f"（{_ago(f.get('since'))}说的）"
+            t += f"（{_ago(when)}说的）"
             if f.get("due"):
                 later = str(f["due"]) > date.today().isoformat()
                 t = t[:-1] + f"，大概在{_md(f['due'])}" + ("，还没到，别问结果" if later else "") + "）"
         elif f.get("kind") == "经历" and age >= 2:
-            t += f"（{_ago(f.get('since'))}的事）"
+            t += f"（{_ago(when)}的事）"
         return t
 
     @staticmethod

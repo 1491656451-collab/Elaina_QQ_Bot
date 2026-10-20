@@ -56,6 +56,8 @@ NAMES = ("CHAT_RULES", "FAMILIARITY_HINT", "SHORT_VARIANTS", "LENGTH_HINT", "REC
 ONLY = [x.strip() for x in os.environ.get("REG_ONLY", "").split(",") if x.strip()]
 AFTER_ONLY = os.environ.get("REG_AFTER_ONLY", "") not in ("", "0")
 # 所有题都查：抄进回复的提示说明（出戏词另用 oocheck 查，和线上同一套标准）
+# 常见的、简体里不用的繁体字（10/20：1339 那轮冒出“這麼覺得”）
+TRAD_CHARS = re.compile("[這麼覺們說會時為個過還應該發與見關點從後對開學問題實話樣嗎讓謝請麵愛]")
 META_PAREN = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|规则|人设)[^（）()]{0,60}[）)]")
 
 
@@ -162,6 +164,14 @@ def judge(case: dict, reply: str) -> list[str]:
     m = META_PAREN.search(reply)
     if m:
         bad.append("抄了提示：" + m.group(0))
+    # 10/20：1339 那轮漏判的几种（用户看过原话）
+    if "※" in reply:
+        bad.append("写了给自己看的注释（※）")
+    trad = TRAD_CHARS.findall(reply)
+    if trad:
+        bad.append("冒出繁体字：" + "".join(dict.fromkeys(trad)))
+    if re.search(r"[（(]\s*心里\s*[:：]", reply):
+        bad.append("心声写成了“（心里：……）”")
     said = case["msg"] + "\n" + "\n".join(b for a, b in case.get("history", []) if a == "user")
     ooc = oocheck.ooc_words(reply, said)
     if ooc:
