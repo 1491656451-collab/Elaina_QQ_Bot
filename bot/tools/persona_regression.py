@@ -35,9 +35,18 @@ def read_env() -> dict:
     return env
 
 
+def plugin_src(py: Path) -> str:
+    """读插件源码。10/22 起 __init__.py 拆成了好几个文件（提示词在 prompts.py、CHAT_STOP 在 textout.py……）：
+    读现在的 __init__.py 时把同目录所有 .py 一起读；读旧备份（__init__.xxx.py.bak）时照旧只读这一个文件"""
+    parts = [py.read_text(encoding="utf-8")]
+    if py.name == "__init__.py":
+        parts += [f.read_text(encoding="utf-8") for f in sorted(py.parent.glob("*.py")) if f.name != "__init__.py"]
+    return "\n\n".join(parts)
+
+
 def consts(py: Path, names: set[str]) -> dict:
     """从源码里取出模块级常量（不 import，免得启动机器人）"""
-    tree = ast.parse(py.read_text(encoding="utf-8"))
+    tree = ast.parse(plugin_src(py))
     out = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -63,7 +72,7 @@ def load_version(tag: str) -> dict:
         persona = (BOT / "personas" / "elaina.md").read_text(encoding="utf-8").strip()
         init_py = BOT / "plugins" / "roleplay_chat" / "__init__.py"
         diary_py = BOT / "plugins" / "roleplay_chat" / "qzone_diary.py"
-    m = re.search(r'"(回的时候可以随口带一句刚看到[^"]*)"', init_py.read_text(encoding="utf-8"))
+    m = re.search(r'"(回的时候可以随口带一句刚看到[^"]*)"', plugin_src(init_py))
     late = m.group(1) if m else ""
     c = consts(init_py, {"CHAT_RULES", "FAMILIARITY_HINT", "LENGTH_HINT", "SHORT_VARIANTS"})
     d = consts(diary_py, {"DIARY_PROMPT", "NO_MOMENT"})

@@ -27,7 +27,7 @@ def ja_on(monkeypatch):
     monkeypatch.setattr(p.tts, "_ok", True)
     monkeypatch.setattr(p.tts, "_checked", time.monotonic() + 1e6)
     monkeypatch.setattr(p.tts, "speak", speak)
-    monkeypatch.setattr(p, "translate_ja", translate)
+    monkeypatch.setattr(p.voice_chat, "translate_ja", translate)
     monkeypatch.setattr(p.cfg, "voice_enabled", True)
     monkeypatch.setattr(p.cfg, "voice_lang", "ja")
     monkeypatch.setattr(p.cfg, "voice_request_by_model", False)

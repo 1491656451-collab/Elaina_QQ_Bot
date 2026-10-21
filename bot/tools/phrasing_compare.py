@@ -84,7 +84,8 @@ LEN_MORE_NEW = "（这轮可以多说一两句，用换行分开，像连着发�
 
 def apply_variant(p, v: str, base: dict) -> dict:
     """把插件改成这种做法；返回替换命中的情况（检查替换有没有生效）"""
-    p._persona, p.CHAT_RULES = base["persona"], base["rules"]
+    pr = getattr(p, "prompts", p)   # 10/22 拆分后人设和聊天规则在 prompts.py，要改那边的才生效
+    pr._persona, pr.CHAT_RULES = base["persona"], base["rules"]
     p.FAMILIARITY_HINT.clear(); p.FAMILIARITY_HINT.update(base["fam"])
     p.cfg.llm_temperature = base["temp"]
     p.SHORT_VARIANTS[:] = base["short"]
@@ -94,11 +95,11 @@ def apply_variant(p, v: str, base: dict) -> dict:
         p.SHORT_VARIANTS[:] = [(1.0, pick), (1.0, pick)]    # 对方写了 30 字以上时 short_hint 会跳过第一档，所以放两份
         hits["长短"] = pick[:12]
     if v in ("B", "E", "F"):
-        p.CHAT_RULES = p.CHAT_RULES.replace("\n- 不要主动问对方是男是女。", "\n" + SPEAK_PLAIN + "\n- 不要主动问对方是男是女。")
-        hits["说人话"] = int(SPEAK_PLAIN in p.CHAT_RULES)
+        pr.CHAT_RULES = pr.CHAT_RULES.replace("\n- 不要主动问对方是男是女。", "\n" + SPEAK_PLAIN + "\n- 不要主动问对方是男是女。")
+        hits["说人话"] = int(SPEAK_PLAIN in pr.CHAT_RULES)
     if v in ("C", "E"):
-        p._persona = _relax(p._persona, hits)
-        p.CHAT_RULES = _relax(p.CHAT_RULES, hits)
+        pr._persona = _relax(pr._persona, hits)
+        pr.CHAT_RULES = _relax(pr.CHAT_RULES, hits)
         for k in list(p.FAMILIARITY_HINT):
             p.FAMILIARITY_HINT[k] = _relax(p.FAMILIARITY_HINT[k], hits)
     if v in ("D", "F"):
@@ -175,14 +176,14 @@ async def replay_private(p, case: dict, lines: list, real) -> dict:
     p._histories[f"private_{uid}"] = hist
     clock = rc.Clock()
     clock.now = target_t
-    p.time = clock
+    rc.set_plugin_attr(p, "time", clock)
 
     class _DT(datetime):
         @classmethod
         def now(cls, tz=None):
             d = datetime.fromtimestamp(clock.now, tz or BEIJING)
             return d if tz else d.replace(tzinfo=None)
-    p.datetime = _DT
+    rc.set_plugin_attr(p, "datetime", _DT)
     state = {"prompt": None}
 
     async def create(**kw):
@@ -262,7 +263,8 @@ async def test_phrasing(app: App, monkeypatch):
     nicks = rc._nicknames()
     import nonebot
     monkeypatch.setattr(nonebot.get_driver().config, "nickname", set(nicks))
-    base = {"persona": p._persona, "rules": p.CHAT_RULES, "fam": dict(p.FAMILIARITY_HINT), "temp": p.cfg.llm_temperature,
+    pr = getattr(p, "prompts", p)
+    base = {"persona": pr._persona, "rules": pr.CHAT_RULES, "fam": dict(p.FAMILIARITY_HINT), "temp": p.cfg.llm_temperature,
             "short": list(p.SHORT_VARIANTS)}
     assert "多说两句" in base["short"][2][1] and "一句话" in base["short"][1][1], "SHORT_VARIANTS 的顺序变了，L/H 要跟着改"
     real_time_mod, real_dt, real_fam = p.time, p.datetime, p.familiarity_of
@@ -276,16 +278,16 @@ async def test_phrasing(app: App, monkeypatch):
                 private_cache[(case["log"], case["user"])] = read_private(case["log"], int(case["user"]))
             fam_map = case.get("fam")
             if isinstance(fam_map, dict):
-                p.familiarity_of = lambda q, m=fam_map: m.get(str(q), "stranger")
+                rc.set_plugin_attr(p, "familiarity_of", lambda q, m=fam_map: m.get(str(q), "stranger"))
             else:
-                p.familiarity_of = lambda q, f=fam_map or "stranger": f
+                rc.set_plugin_attr(p, "familiarity_of", lambda q, f=fam_map or "stranger": f)
             for v in variants:
                 hits_all[v] = apply_variant(p, v, base)
                 for k in range(samples):
                     p._histories.clear(); p._passive.clear(); p._last_trigger.clear(); p._global_window.clear()
                     p._hour_window.clear(); p._group_hour.clear(); p._farewell_at.clear(); p._recent_chat.clear()
                     p._last_bot_msg.clear(); p._chat_seq.clear(); p._arrival_seq.clear(); p._private_hour.clear(); p._away.clear()
-                    p.time, p.datetime = real_time_mod, real_dt
+                    rc.set_plugin_attr(p, "time", real_time_mod); rc.set_plugin_attr(p, "datetime", real_dt)
                     shutil.rmtree("data/history", ignore_errors=True)
                     Path("data/history").mkdir(parents=True, exist_ok=True)
                     if case["kind"] == "group":
@@ -305,7 +307,7 @@ async def test_phrasing(app: App, monkeypatch):
                     results.append(row)
                     print(f"{case['id']} {v}#{k}: {r['reply'][:60]!r}")
     finally:
-        p.time, p.datetime, p.familiarity_of = real_time_mod, real_dt, real_fam
+        rc.set_plugin_attr(p, "time", real_time_mod); rc.set_plugin_attr(p, "datetime", real_dt); rc.set_plugin_attr(p, "familiarity_of", real_fam)
         apply_variant(p, "A", base)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

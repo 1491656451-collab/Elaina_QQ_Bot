@@ -65,7 +65,7 @@ async def test_copied_history_mark_not_sent_as_text(app: App, voice_on):  # noqa
 async def test_voice_request_tier_hint(app: App, voice_on, monkeypatch, fam, extra):  # noqa: F811
     """对方要语音：陌生人、普通朋友在【传声】提示后面补一句倾向，熟人、很熟不补（10/20；补过“偶尔不给”，没用，撤了）"""
     p, speak, spoken = voice_on
-    monkeypatch.setattr(p, "familiarity_of", lambda qq: fam)
+    monkeypatch.setattr(p.core, "familiarity_of", lambda qq: fam)
     hint = p.voice_roll(fam, False, "发个语音听听嘛")[1]
     assert hint.startswith("【传声】对方想听你的声音")
     if extra:

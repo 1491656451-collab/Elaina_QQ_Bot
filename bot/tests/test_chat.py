@@ -94,7 +94,7 @@ def clean_state():
         p.OFFLINE_FILE.unlink(missing_ok=True)
     if hasattr(p, "_sticker_loop"):           # 表情库后台轮询：测试里不跑（会抢走模拟的 API 调用）
         async def _no_loop(bot): return None
-        p._sticker_loop = _no_loop
+        p.stickers_chat._sticker_loop = _no_loop     # 10/22 拆分：挪到了 stickers_chat.py
     JUDGE.update(answer="否", calls=0)
     VISION.update(calls=0)
     p.vision._cache.clear()
@@ -263,8 +263,8 @@ def test_clip_and_truncate():
 @pytest.mark.asyncio
 async def test_recall_injected(app: App):
     import plugins.roleplay_chat as p
-    if p._kb is None:
-        p._kb = p.knowledge.build_or_load(Path("knowledge/summaries"), Path("../novel"),
+    if p.story._kb is None:
+        p.story._kb = p.knowledge.build_or_load(Path("knowledge/summaries"), Path("../novel"),
                                           Path("data/novel_index.pkl"), Path("knowledge/characters.md"))
     p.client.chat.completions.create = fake_create("嗯，那段旅途我记得很清楚。")
     q = "你还记得和艾姆妮西亚一起去伊斯特的事吗"
@@ -608,7 +608,7 @@ def test_is_peak():
 @pytest.mark.asyncio
 async def test_peak_behaviour(app: App, monkeypatch):
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "in_peak", lambda: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: True)
     p.client.chat.completions.create = fake_create("忙着呢，晚点说。")
     # 1) 随机抽到“正经回复”：调用模型，但是 busy 模式、上限 50、不检索小说
     monkeypatch.setattr(p.random, "random", lambda: 0.99)
@@ -996,7 +996,7 @@ async def test_letter_rules_and_send(app: App, monkeypatch):
     assert p._letter_prob_per_check(0) == 0
     monkeypatch.setattr(p.cfg, "letter_max_per_day", 1)          # 只剩一个名额：很熟的先拿到
 
-    monkeypatch.setattr(p, "_letter_window_now", lambda: True)
+    monkeypatch.setattr(p.proactive_private, "_letter_window_now", lambda: True)
     monkeypatch.setattr(p.random, "random", lambda: 0.0)          # 必定写
     async def no_sleep(*a, **k): return None
     monkeypatch.setattr(p.asyncio, "sleep", no_sleep)
@@ -1844,8 +1844,8 @@ async def test_multi_group_queue(app: App, monkeypatch):
 # ---------------------------------------------------------------- 主动插话
 def _hot(monkeypatch, p):
     monkeypatch.setattr(p.cfg, "interject_enabled", True)
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
-    monkeypatch.setattr(p, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
 
 
 @pytest.mark.asyncio
@@ -1896,10 +1896,10 @@ async def test_interject_declined_and_limits(app: App, monkeypatch):
     assert p.interject_blocker(555) == "今天插够了"
     # 高峰时段、不在时段：不插
     p._save_interject_state({})
-    monkeypatch.setattr(p, "in_peak", lambda: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: True)
     assert p.interject_blocker(555) == "高峰时段"
-    monkeypatch.setattr(p, "in_peak", lambda: False)
-    monkeypatch.setattr(p, "_in_hours", lambda r: False)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: False)
     assert p.interject_blocker(555) == "不在插话时段"
 
 
@@ -1953,8 +1953,8 @@ async def test_interject_command(app: App, monkeypatch):
 def _quiet(monkeypatch, p):
     monkeypatch.setattr(p.cfg, "bubble_enabled", True)
     monkeypatch.setattr(p.cfg, "group_whitelist", [555])
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
-    monkeypatch.setattr(p, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
 
 
 def test_bubble_blocker(monkeypatch):
@@ -1972,7 +1972,7 @@ def test_bubble_blocker(monkeypatch):
     p._recent_chat[555].append((time.monotonic() - 60, 1, "群友", "刚说的"))   # 旁听里有 1 分钟前的
     assert p.bubble_blocker(555) == "群里最近有人说话"
     p._recent_chat.clear()
-    monkeypatch.setattr(p, "_in_hours", lambda r: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: False)
     assert p.bubble_blocker(555) == "不在冒泡时段"
 
 
@@ -2290,8 +2290,8 @@ def test_interject_topics_and_prob():
 async def test_interject_does_not_touch_affection(app: App, monkeypatch):
     import plugins.roleplay_chat as p
     monkeypatch.setattr(p.cfg, "interject_enabled", True)
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
-    monkeypatch.setattr(p, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
     p.client.chat.completions.create = fake_create("自恋？那叫实话")
     now = time.monotonic()
     for i in range(6):
@@ -2307,8 +2307,8 @@ async def test_interject_does_not_touch_affection(app: App, monkeypatch):
 def test_bubble_not_too_often(monkeypatch):
     import plugins.roleplay_chat as p
     monkeypatch.setattr(p.cfg, "bubble_enabled", True)
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
-    monkeypatch.setattr(p, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
     now = time.time()
     p._histories["group_555"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]
     p._histories["group_556"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]
@@ -2532,7 +2532,7 @@ async def test_send_failure_not_recorded(monkeypatch):
 @pytest.mark.asyncio
 async def test_busy_line_counts_quota(monkeypatch):
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "in_peak", lambda: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: True)
     monkeypatch.setattr(p.cfg, "peak_busy_prob", 1.0)
     monkeypatch.setattr(p.cfg, "global_rate_per_hour", 150)       # 9/29 起默认按钱限额；这里测按条数的
     sent = []
@@ -2558,7 +2558,7 @@ async def test_quiet_after_kick(app: App, monkeypatch):
     monkeypatch.setattr(p.cfg, "relogin_quiet_minutes", 5.0)
     p.client.chat.completions.create = fake_create("嗯")
     hb = asyncio.create_task(asyncio.sleep(3600))
-    p._heartbeat_task = hb
+    p.catchup._heartbeat_task = hb
     kick = NoticeEvent.model_validate({"time": int(time.time()), "self_id": 123, "post_type": "notice",
                                        "notice_type": "bot_offline", "user_id": 123, "tag": "BotOffline",
                                        "message": "登录已失效"})
@@ -2566,12 +2566,12 @@ async def test_quiet_after_kick(app: App, monkeypatch):
         bot = mkbot(ctx)
         ctx.receive_event(bot, kick)
     await asyncio.sleep(0)
-    assert hb.cancelled() and p._heartbeat_task is None             # 下线就停心跳
+    assert hb.cancelled() and p.catchup._heartbeat_task is None             # 下线就停心跳
     assert p._load_online().get("heartbeat")                        # 心跳停在下线这一刻
 
     started = []
-    monkeypatch.setattr(p, "start_catchup", lambda b: started.append(b))
-    monkeypatch.setattr(p, "send_offline_alert", lambda b, delay=15.0: asyncio.sleep(0))
+    monkeypatch.setattr(p.catchup, "start_catchup", lambda b: started.append(b))
+    monkeypatch.setattr(p.online, "send_offline_alert", lambda b, delay=15.0: asyncio.sleep(0))
     # 没断开就重新登录：又收到消息 → 开始安静，不回；私聊不记“看过”
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
@@ -2582,7 +2582,7 @@ async def test_quiet_after_kick(app: App, monkeypatch):
     assert 4300 not in p._seen_ids
     assert await p.maybe_interject(bot, 555, "扫帚", force=True) is None
     assert await p.check_bubbles() == 0 and await p.check_letters() == 0
-    p._quiet_until = 0.0
+    p.online._quiet_until = 0.0
     p._write_offline(None)                                          # （真的提醒会清掉下线记录）
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
@@ -2602,15 +2602,15 @@ async def test_connect_after_kick_quiet_then_catchup(monkeypatch):
     async def fake_catch_up(bot):
         order.append(("catch_up", p.quiet_left()))
         return 0
-    monkeypatch.setattr(p, "catch_up", fake_catch_up)
-    monkeypatch.setattr(p, "send_offline_alert", lambda b, delay=15.0: asyncio.sleep(0))
+    monkeypatch.setattr(p.catchup, "catch_up", fake_catch_up)
+    monkeypatch.setattr(p.online, "send_offline_alert", lambda b, delay=15.0: asyncio.sleep(0))
     monkeypatch.setattr(p.cfg, "sticker_enabled", False)
     await p._on_connect(SimpleNamespace(self_id="123"))
     assert p.quiet_left() > 0
-    await asyncio.wait_for(p._catchup_task, 2)
+    await asyncio.wait_for(p.catchup._catchup_task, 2)
     assert order and order[0][1] == 0                                # 安静完了才补回
-    if p._heartbeat_task:
-        p._heartbeat_task.cancel(); p._heartbeat_task = None
+    if p.catchup._heartbeat_task:
+        p.catchup._heartbeat_task.cancel(); p.catchup._heartbeat_task = None
 
 
 # ---------------------------------------------------------------- 9/27 晚第二批：改进建议（聊天）剩下的
@@ -2647,7 +2647,7 @@ async def test_vision_only_after_decided(monkeypatch):
     assert VISION["calls"] == 0 and bot.sent == []
     p._hour_window.clear()
     # 讨厌的人、直接不理：不看图
-    monkeypatch.setattr(p, "familiarity_of", lambda qq: "disliked")
+    monkeypatch.setattr(p.core, "familiarity_of", lambda qq: "disliked")
     monkeypatch.setattr(p.cfg, "dislike_ignore_prob", 1.0)
     await p.converse(bot, _img_pev(8502, 4401))
     assert VISION["calls"] == 0
@@ -2866,7 +2866,7 @@ async def test_friend_verify_notice_after_message(monkeypatch):
     import plugins.roleplay_chat as p
     p.FRIEND_REQ_FILE.unlink(missing_ok=True)
     p._friend_added.clear()
-    monkeypatch.setattr(p, "merge_delay", lambda text, names=(): 0.2)
+    monkeypatch.setattr(p.reply, "merge_delay", lambda text, names=(): 0.2)
     p.client.chat.completions.create = fake_create("你好。")
     bot = _SendBot()
     task = asyncio.create_task(p.converse(bot, pev("我是小李", uid=9105, mid=5200)))
@@ -2906,8 +2906,8 @@ class _PBot(_SendBot):
 
 def _nudge_env(monkeypatch, p):
     monkeypatch.setattr(p.cfg, "nudge_enabled", True)
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
-    monkeypatch.setattr(p, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
     p._nudge_due.clear(); p._nudge_count.clear()
 
 
@@ -2917,7 +2917,7 @@ async def test_nudge_armed_by_tier(monkeypatch):
     _nudge_env(monkeypatch, p)
     monkeypatch.setattr(p.random, "random", lambda: 0.1)
     tiers = {9201: "stranger", 9202: "acquaintance", 9203: "close", 9204: "disliked"}
-    monkeypatch.setattr(p, "familiarity_of", lambda qq: tiers[qq])
+    monkeypatch.setattr(p.core, "familiarity_of", lambda qq: tiers[qq])
     got = {qq: p.arm_nudge(qq, "今天去爬山了") for qq in tiers}
     assert got == {9201: False, 9202: True, 9203: True, 9204: False}   # 0.1：陌生人 5% 没抽中，熟人 15%、很熟 35% 抽中
     at = p._nudge_due[9202]["at"] - time.time()
@@ -2965,10 +2965,10 @@ async def test_nudge_skipped_cases(monkeypatch):
     assert await p.check_nudges(bot) == 0 and bot.sent == []
     # 不在时段、今天次数用完：不搭，也不调模型
     CALLS.clear()
-    monkeypatch.setattr(p, "_in_hours", lambda r: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: False)
     p._nudge_due[9220] = {"at": time.time() - 1, "armed": 0}
     assert await p.check_nudges(bot) == 0 and CALLS == []
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
     monkeypatch.setattr(p.cfg, "nudge_per_user_daily_max", 2)       # 设了上限才拦（10/19 起默认 0 = 不限）
     p._nudge_count[datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")] = {9220: 2, "all": 2}
     p._nudge_due[9220] = {"at": time.time() - 1, "armed": 0}
@@ -3092,7 +3092,7 @@ class _FakeKB:
 def test_recall_keeps_topic(monkeypatch):
     import re as _re
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "_kb", _FakeKB())
+    monkeypatch.setattr(p.story, "_kb", _FakeKB())
     monkeypatch.setattr(p.cfg, "knowledge_min_summary_score", 14.0)
     monkeypatch.setattr(p.cfg, "knowledge_min_chunk_score", 20.0)
     p._last_recall.clear()
@@ -3127,7 +3127,7 @@ def test_rules_reported_speech():
 async def test_today_diary_not_from_novel(monkeypatch):
     import plugins.roleplay_chat as p
     qd = p.qzone_diary
-    monkeypatch.setattr(p, "_kb", _FakeKB())
+    monkeypatch.setattr(p.story, "_kb", _FakeKB())
     monkeypatch.setattr(p.cfg, "knowledge_enabled", True)
     monkeypatch.setattr(qd, "recent_posts", lambda n=5: [{"ts": time.time() - 30 * 3600, "text": "路过一片麦田，风很舒服。", "desc": "麦田里的伊蕾娜"}])
     monkeypatch.setattr(qd, "state", lambda: {"posted": False, "post_at": "21:34"})
@@ -3240,8 +3240,8 @@ def test_recall_ignores_her_name(monkeypatch):
             out.append((21.0, kb.clock_t))                    # 很短的一句，只是勉强过线
         return out[:k]
     kb.search = search
-    monkeypatch.setattr(p, "_kb", kb)
-    monkeypatch.setattr(p, "_her_names", lambda: ["伊蕾娜", "灰之魔女", "魔女小姐", "伊蕾娜小姐"])
+    monkeypatch.setattr(p.story, "_kb", kb)
+    monkeypatch.setattr(p.textin, "_her_names", lambda: ["伊蕾娜", "灰之魔女", "魔女小姐", "伊蕾娜小姐"])
     monkeypatch.setattr(p.cfg, "knowledge_min_summary_score", 14.0)
     monkeypatch.setattr(p.cfg, "knowledge_min_chunk_score", 20.0)
     p._last_recall.clear()
@@ -3358,7 +3358,7 @@ async def test_affection_command_negative(app: App):
 def test_affection_legacy_env_thresholds(monkeypatch):
     """.env 里还写着旧档位 -20/30/70：按新档位处理"""
     import importlib, plugins.roleplay_chat as p
-    src = Path(p.__file__).read_text(encoding="utf-8")
+    src = "\n".join(f.read_text(encoding="utf-8") for f in sorted(Path(p.__file__).parent.glob("*.py")))  # 拆分后这段在 core.py，读整个插件目录
     assert "(-20, 30, 70)" in src and "= 0, 90, 130" in src
 
 
@@ -3579,7 +3579,7 @@ async def test_sleep_wrapup_then_goodnight(monkeypatch):
     await p.converse(bot, pev("我今天去爬山了", uid=9801, mid=7500))      # 23:29，还没到点
     assert bot.sent == ["那你呢？"]
     monkeypatch.setattr(p.cfg, "sleep_enabled", True)
-    monkeypatch.setattr(p, "asleep", lambda now=None: True)               # 23:30 到了
+    monkeypatch.setattr(p.sleep, "asleep", lambda now=None: True)               # 23:30 到了
     await p.converse(bot, pev("我还行", uid=9801, mid=7501))              # 正在聊的人：先回完再说晚安
     assert bot.sent == ["那你呢？", "这样啊。", "晚安"]
     await p.converse(bot, pev("晚安~", uid=9801, mid=7502))
@@ -3591,9 +3591,9 @@ async def test_sleep_wrapup_then_goodnight(monkeypatch):
 async def test_goodnight_on_time(monkeypatch):
     import plugins.roleplay_chat as p
     monkeypatch.setattr(p.peak, "sleep_line", lambda private=False, avoid=(), fam=None: "晚安" if private else "大家晚安")
-    monkeypatch.setattr(p, "asleep", lambda now=None: True)
+    monkeypatch.setattr(p.sleep, "asleep", lambda now=None: True)
     bot = _PBot()
-    monkeypatch.setattr(p, "get_bots", lambda: {"123": bot})
+    monkeypatch.setattr(p.goodnight, "get_bots", lambda: {"123": bot})
     now = time.monotonic()
     p._active_chats["private_9811"] = {"at": now - 60, "group_id": None, "user_id": 9811}
     p._active_chats["group_562"] = {"at": now - 120, "group_id": 562, "user_id": 9812}
@@ -3655,7 +3655,7 @@ def test_winddown_hints(monkeypatch):
 @pytest.mark.asyncio
 async def test_winddown_hint_in_prompt(monkeypatch):
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "winddown_hint", lambda gid, uid, now=None: "【有点累了】测试")
+    monkeypatch.setattr(p.quota, "winddown_hint", lambda gid, uid, now=None: "【有点累了】测试")
     p.client.chat.completions.create = fake_create("嗯。")
     await p.converse(_PBot(), pev("在吗", uid=9902, mid=7600))
     assert "【有点累了】测试" in CALLS[-1]["messages"][-2]["content"]
@@ -3732,7 +3732,7 @@ def test_factcheck_places_and_people():
 @pytest.mark.asyncio
 async def test_factcheck_regenerates(monkeypatch):
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "_fc", _fc())
+    monkeypatch.setattr(p.story, "_fc", _fc())
     replies = iter(["有啊，前阵子就在梦回之城遇上艾姆妮西亚了", "有啊，在宁梦璃的梦境国度又见到了艾姆妮西亚"])
     base = fake_create("")
 
@@ -3751,7 +3751,7 @@ async def test_factcheck_regenerates(monkeypatch):
 @pytest.mark.asyncio
 async def test_factcheck_still_wrong_drops_sentence(monkeypatch):
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "_fc", _fc())
+    monkeypatch.setattr(p.story, "_fc", _fc())
     p.client.chat.completions.create = fake_create("有啊。前阵子就在梦回之城遇上艾姆妮西亚了。")
     bot = _PBot()
     await p.converse(bot, pev("遇到过以前的朋友吗", uid=9962, mid=7701))
@@ -3766,8 +3766,8 @@ STORY = "在宁梦璃的梦境国度又见到了艾姆妮西亚，她和史莱�
 def _story_env(monkeypatch, p, replies):
     VERIFY["calls"] = 0
     VERIFY["answer"] = '{"ok": true}'
-    monkeypatch.setattr(p, "_fc", _fc())
-    monkeypatch.setattr(p, "recall", lambda *a, **k: p.RECALL_RULES + "\n\n【角色资料·艾姆妮西亚】第24卷在宁梦璃的梦境国度重逢")
+    monkeypatch.setattr(p.story, "_fc", _fc())
+    monkeypatch.setattr(p.story, "recall", lambda *a, **k: p.RECALL_RULES + "\n\n【角色资料·艾姆妮西亚】第24卷在宁梦璃的梦境国度重逢")
     it = iter(replies)
     base = fake_create("")
 
@@ -5184,7 +5184,7 @@ def test_ask_includes_unfulfilled_promise_1016(tmp_path):
 
 def test_nightly_due_once_per_night_1016(monkeypatch, tmp_path):
     import plugins.roleplay_chat as p
-    monkeypatch.setattr(p, "_NIGHTLY_FILE", tmp_path / "nightly.json")
+    monkeypatch.setattr(p.memory_chat, "_NIGHTLY_FILE", tmp_path / "nightly.json")
     monkeypatch.setattr(p.cfg, "memory_nightly", True)
     monkeypatch.setattr(p.cfg, "sleep_enabled", False)
     night = datetime(2026, 10, 17, 4, 0, tzinfo=p.peak.BEIJING)
@@ -5372,7 +5372,7 @@ def test_short_query_summary_threshold_1018(monkeypatch):
             if kind == "summary":
                 return [(base * 1.1, p.knowledge.Doc("summary", "第15卷·第三十六话 艾姆妮西亚与艾维莉亚", "两姐妹的事"))]
             return []
-    monkeypatch.setattr(p, "_kb", KB())
+    monkeypatch.setattr(p.story, "_kb", KB())
     assert p.recall("只是怕你太无聊了") == ""                          # 短句：分数只比门槛高一点，不带
     assert "艾姆妮西亚与艾维莉亚" in p.recall("你还记得那对白发姐妹后来去了哪里吗，就是姐姐当剑士的那对")   # 长句照常
 
@@ -5400,8 +5400,8 @@ def test_proactive_no_daily_caps_1019(monkeypatch):
     assert p.cap_text(0) == "不限" and p.cap_text(3) == "3"
     # 冒泡：今天这个群、所有群都冒过很多次，只要离上次够久就还能冒
     monkeypatch.setattr(c, "bubble_enabled", True)
-    monkeypatch.setattr(p, "_in_hours", lambda r: True)
-    monkeypatch.setattr(p, "in_peak", lambda: False)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
     now = time.time()
     today = p.datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")
     p._histories["group_557"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]

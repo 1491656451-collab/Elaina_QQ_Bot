@@ -19,9 +19,9 @@ def _summary_uses_patched_client(load_bot):
     # 测试里改的是聊天客户端的 create；整理也走它（真实运行时整理用单独的客户端）
     from plugins import roleplay_chat as p
     p.ltm.summary_client = None
-    p._quiet_until = 0.0
+    p.online._quiet_until = 0.0        # 10/22 拆分：挪到了 online.py
     p._private_hour.clear(); p._away.clear(); p._wrapup.clear(); p._chat_seq.clear(); p._arrival_seq.clear()
-    p._same_names = {}
+    p.textin._same_names = {}          # 10/22 拆分：重名登记挪到了 textin.py
     p._SAME_NAMES_FILE.unlink(missing_ok=True)
     p.ltm._fails.clear(); p.ltm._retry_at.clear(); p.ltm._started.clear()
     import shutil

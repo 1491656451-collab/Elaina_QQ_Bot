@@ -61,9 +61,18 @@ TRAD_CHARS = re.compile("[這麼覺們說會時為個過還應該發與見關點
 META_PAREN = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|规则|人设)[^（）()]{0,60}[）)]")
 
 
+def plugin_src(py: Path) -> str:
+    """读插件源码。10/22 起 __init__.py 拆成了好几个文件（提示词在 prompts.py、CHAT_STOP 在 textout.py……）：
+    读现在的 __init__.py 时把同目录所有 .py 一起读；读旧备份（__init__.xxx.py.bak）时照旧只读这一个文件"""
+    parts = [py.read_text(encoding="utf-8")]
+    if py.name == "__init__.py":
+        parts += [f.read_text(encoding="utf-8") for f in sorted(py.parent.glob("*.py")) if f.name != "__init__.py"]
+    return "\n\n".join(parts)
+
+
 def consts(py: Path) -> dict:
     """从源码里取模块级常量（不 import，免得启动机器人）；旧版本里没有的就跳过"""
-    src = py.read_text(encoding="utf-8")
+    src = plugin_src(py)
     out = {}
     for node in ast.parse(src).body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -93,7 +102,7 @@ def load(tag: str) -> dict:
         py = BOT / "plugins" / "roleplay_chat" / "__init__.py"
     c = consts(py)
     c["echo"] = None                  # 这一版的机器人有没有“这个词是你先说的”提示；有的话用那一版的 echocheck
-    if "echocheck" in py.read_text(encoding="utf-8"):
+    if "echocheck" in plugin_src(py):
         bak = BACKUP / f"echocheck.{BEFORE}.py.bak"
         c["echo"] = _load_module(f"echocheck_{tag}", bak) if tag == "before" and BEFORE != "当前" and bak.exists() else echocheck
     c["system"] = f"{persona}\n\n{c['CHAT_RULES']}"

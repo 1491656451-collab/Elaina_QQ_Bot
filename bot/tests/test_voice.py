@@ -154,7 +154,7 @@ async def test_voice_interjection_clip(app: App, voice_on, monkeypatch, tmp_path
     p, speak, spoken = voice_on
     (tmp_path / "Y02_は.wav").write_bytes(b"CLIP")
     (tmp_path / "语气词表.json").write_text('{"表":[{"写法":["哈？"],"文件":["Y02_は.wav"]}]}', encoding="utf-8")
-    monkeypatch.setattr(p, "interjections", p.voice.Interjections(tmp_path))
+    monkeypatch.setattr(p.voice_chat, "interjections", p.voice.Interjections(tmp_path))
     monkeypatch.setattr(p.cfg, "voice_interjection_prob", 1.0)
     p.client.chat.completions.create = fake_create("哈？")
     async with app.test_matcher() as ctx:
@@ -182,7 +182,7 @@ async def test_voice_group(app: App, voice_on, monkeypatch):
 @pytest.mark.asyncio
 async def test_voice_disliked_no_hint(app: App, voice_on, monkeypatch):
     p, speak, spoken = voice_on
-    monkeypatch.setattr(p, "familiarity_of", lambda qq: "disliked")
+    monkeypatch.setattr(p.core, "familiarity_of", lambda qq: "disliked")
     monkeypatch.setattr(p.cfg, "dislike_ignore_prob", 0.0)
     monkeypatch.setattr(p.cfg, "voice_prob_private", 1.0)
     p.client.chat.completions.create = fake_create("哦。")

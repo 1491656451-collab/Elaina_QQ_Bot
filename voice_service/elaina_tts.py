@@ -9,6 +9,7 @@ r"""
    合成完再去掉句尾的“哈气”：陈述句重剪、问句轻剪（tail_trim.py，依据见 样音对比报告-第8轮.md）
    10/21 起机器人聊天时让她念日语（中文念不好，见 样音对比报告-第9轮.md）：请求里 lang=ja 就按日语念，
    保留标点、按标点切句（cut5），不去尾气（日语句尾“です”的“す”本来就是气声，剪了会剪掉字）
+   念得太短（吞了后半句）或太长（念重复）就换种子重念；念到名台词“そう、私です”时用原作那段做参考音频（phrase_refs）
 3. 用 SSH 反向隧道把 9881 接到服务器上的 127.0.0.1:9881，机器人就能调用；断了自动重连
 窗口开着，她就能发语音；关掉或者电脑睡眠，她就只发文字。
 
@@ -49,6 +50,14 @@ DEFAULT_CONF = {
     "ref_statement": [os.path.join(DATASET, "wavs", "elaina_0025.wav"), "素直になる薬を超えるすごい薬を作りましたよ。"],
     "ref_question": [os.path.join(DATASET, "wavs", "elaina_0298.wav"), "この街に何があったのですか？それは記憶喪失ですか？"],
     "seed": 3,
+    "retry_seeds": [1, 7, 11, 23],
+    # 10/21：念到她的名台词时，换成原作里说这句话的那段做参考音频，语气往原句靠
+    # [日语里怎么认（正则）, 参考音频, 参考音频里说的话]；参考音频要 3～10 秒
+    # 参考音频出自“伊蕾娜自恋发言合集”1 分 01 秒起（动画里自夸的那句，你挑的素材）
+    "phrase_refs": [
+        [r"そう[、，,]?\s*(私|わたし)です", os.path.join(DATASET, "ref", "ref_sou_watashidesu2.wav"),
+         "美しく咲いている彼女は誰でしょう？そう、私です。"],
+    ],   # 念得太短（模型提前收尾、吞掉后半句）时换这些种子重念，见 expected_seconds
     "top_k": 15,
     "api_port": 9880,
     "service_port": 9881,
@@ -63,6 +72,9 @@ DEFAULT_CONF = {
 
 # 以前写进 本机配置.json 的旧默认值：读到这些就换成上面的新默认值（你自己手改过的值不动）
 OLD_DEFAULTS = {
+    # 10/21 02:00 那版用错了原句（广播剧里不高兴时说的那句），换成合集里自夸的那句
+    "phrase_refs": [[[r"そう[、，,]?\s*(私|わたし)です", os.path.join(DATASET, "ref", "ref_sou_watashidesu.wav"),
+                      "今にも泣いてしまいそうな、儚くも美しい女性は誰でしょう？そう、私です。"]]],
     "gpt_weights": [r"GPT_weights_v2ProPlus\elaina-e10.ckpt", r"GPT_weights_v2ProPlus\elaina2-e3.ckpt"],
 }
 
@@ -178,6 +190,55 @@ def prepare(text: str) -> tuple[str, bool]:
     return t, question
 
 
+import re as _re
+import wave as _wave
+import io as _io
+
+_KANA = _re.compile(r"[\u3041-\u3096\u30a1-\u30fa\u30fc]")
+_SMALL = set("ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ")
+_KANJI = _re.compile(r"[\u4e00-\u9fff々]")
+
+
+def max_seconds(text: str, lang: str) -> float:
+    """这句话正常念出来最多要多久（偏宽的上限）：再长就是念重复了（10/21：“めでたしめでたし”念了三遍）。
+    日语每拍最多 0.16 秒，汉字按 2.5 拍算（宁可放宽）；每个标点再给 0.35 秒停顿；中文每字最多 0.35 秒"""
+    punct = len(_re.findall(r"[、。，,！？!?…]", text))
+    if lang == "ja":
+        mora = sum(1 for c in _KANA.findall(text) if c not in _SMALL) + 2.5 * len(_KANJI.findall(text))
+        return 0.16 * mora + 0.35 * punct + 0.3
+    return 0.35 * len(_KANJI.findall(text)) + 0.35 * punct + 0.4
+
+
+def expected_seconds(text: str, lang: str) -> float:
+    """这句话正常念出来至少要多久（偏宽的下限）。
+    日语按“拍”算：假名一个一拍（小写的ゃゅょ不算）、汉字算 1.5 拍，每拍至少 0.1 秒；中文每字至少 0.15 秒"""
+    if lang == "ja":
+        mora = sum(1 for c in _KANA.findall(text) if c not in _SMALL) + 1.5 * len(_KANJI.findall(text))
+        return 0.1 * mora
+    return 0.15 * len(_KANJI.findall(text))
+
+
+def speech_seconds(data: bytes) -> float:
+    """wav 里真正有声音的长度（不算末尾补的静音）"""
+    try:
+        with _wave.open(_io.BytesIO(data)) as w:
+            sr, n = w.getframerate(), w.getnframes()
+            raw = w.readframes(n)
+            if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                return n / float(sr)
+    except Exception:  # noqa: BLE001
+        return 0.0
+    import array
+    a = array.array("h")
+    a.frombytes(raw[: len(raw) // 2 * 2])
+    last = 0
+    for i in range(len(a) - 1, -1, -1):
+        if abs(a[i]) > 60:
+            last = i + 1
+            break
+    return last / float(sr)
+
+
 def synth(conf, text: str, lang: str = "zh") -> tuple[bytes, float]:
     if lang == "ja":
         t = " ".join(text.split()).strip()
@@ -185,15 +246,36 @@ def synth(conf, text: str, lang: str = "zh") -> tuple[bytes, float]:
     else:
         (t, question), split = prepare(text), "cut0"
     ref, prompt = conf["ref_question"] if question else conf["ref_statement"]
+    if lang == "ja":
+        for pat, pref, ptext in conf.get("phrase_refs", []):
+            if _re.search(pat, t) and os.path.exists(pref):
+                ref, prompt = pref, ptext
+                break
     body = dict(text=t, text_lang=lang, ref_audio_path=ref, prompt_text=prompt, prompt_lang="ja",
                 top_k=conf["top_k"], top_p=1.0, temperature=1.0, seed=conf["seed"], text_split_method=split,
                 batch_size=1, speed_factor=1.0, repetition_penalty=1.35, media_type="wav", streaming_mode=False)
+    # 短句容易被模型提前收尾（10/21：“そう、私です”只念出“そう”），也会念重复（“めでたしめでたし”念了三遍）：
+    # 念得明显太短或太长就换种子重念；都不合适就用离合适长度最近的那次
+    need, cap = expected_seconds(t, lang), max_seconds(t, lang)
     t0 = time.time()
+    best, best_off = None, 1e9
     with SYNTH_LOCK:                          # 显卡一次只念一句
-        code, data = api_post(conf, "/tts", body)
+        for i, seed in enumerate([conf["seed"]] + list(conf.get("retry_seeds", []))):
+            body["seed"] = seed
+            code, data = api_post(conf, "/tts", body)
+            if code != 200:
+                if best is None:
+                    raise RuntimeError(data[:300].decode("utf-8", "replace"))
+                break
+            got = speech_seconds(data)
+            off = max(need - got, got - cap, 0.0)
+            if off < best_off:
+                best, best_off = data, off
+            if off == 0.0:
+                break
+            log(f"念得太{'短' if got < need else '长'}（{got:.2f} 秒，这句该在 {need:.2f}～{cap:.2f} 秒），换种子重念：{t}")
+    data = best
     cost = time.time() - t0
-    if code != 200:
-        raise RuntimeError(data[:300].decode("utf-8", "replace"))
     if conf.get("tail_trim_ja" if lang == "ja" else "tail_trim") and TRIM is not None:
         try:
             data, removed = TRIM.trim_wav_bytes(data, TRIM.preset_for(text))

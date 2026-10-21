@@ -213,6 +213,22 @@ def make_event(e: dict, gid: int, nicks: list[str]) -> GroupMessageEvent:
 
 
 # ------------------------------------------------------------------ 回放
+# 10/22 拆分后，用到 time / datetime 的代码分在这几个文件里：回放时要和 __init__ 一起换成回放的时钟，换回来也一起换
+# （查档位 familiarity_of 挪进了 core.py，替换它也用这个）
+SPLIT_MODULES = ("core", "history", "turn_hints", "textin", "textout", "sleep", "quota",
+                 "voice_chat", "stickers_chat", "vision_chat", "memory_chat", "affection_turn",
+                 "online", "friends", "commands", "addressed", "catchup", "proactive_group", "proactive_private",
+                 "story", "goodnight", "reply")
+
+
+def set_plugin_attr(p, name: str, value) -> None:
+    setattr(p, name, value)
+    for m in SPLIT_MODULES:
+        mod = getattr(p, m, None)
+        if mod is not None and hasattr(mod, name):
+            setattr(mod, name, value)
+
+
 class Clock:
     """替换插件里的 time 模块：time() / monotonic() 返回回放到的时间，别的照旧"""
     def __init__(self):
@@ -275,14 +291,14 @@ async def replay_once(app: App, p, case: dict, events: list, sends: list, real, 
     target = next((e for e in reversed(window) if abs(e["t"] - target_t) < 1.5 and (not case.get("text") or case["text"] in e["raw"])), None)
     assert target, f"{case['id']}：日志里找不到 {case['target']} 那句"
     clock = Clock()
-    p.time = clock
+    set_plugin_attr(p, "time", clock)
 
     class _DT(datetime):                                # 插件里的 datetime.now() 也用回放到的时间（深夜提示、日期）
         @classmethod
         def now(cls, tz=None):
             d = datetime.fromtimestamp(clock.now, tz or BEIJING)
             return d if tz else d.replace(tzinfo=None)
-    p.datetime = _DT
+    set_plugin_attr(p, "datetime", _DT)
     state = {"phase": "before", "prompt": None, "sent": [], "mid": None}
     def addressed(e):
         return e.get("decided") is True or make_event(e, gid, nicks).to_me
@@ -383,7 +399,7 @@ async def test_replay(app: App, monkeypatch):
                                 "bad": judge_reply(case, r["reply"]),
                                 "prompt_tail": [m for m in (r["prompt"] or [])[-4:]]})
     finally:
-        p.time, p.datetime = real_time_mod, real_dt
+        set_plugin_attr(p, "time", real_time_mod); set_plugin_attr(p, "datetime", real_dt)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(BEIJING).strftime("%m%d_%H%M")
     safe_tag = re.sub(r"[^\w]", "_", TAG)
