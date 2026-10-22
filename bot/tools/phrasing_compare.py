@@ -9,6 +9,11 @@
   E B + C
   F B + 温度 1.0（10/18 第二轮加的）
   L / M / H：日常闲聊的长短提示固定成一档（10/18 第三轮）：L 现在的“可以多说两句”，M 新写法“多说一两句，说完就停”，H “一句话”
+  O 改前：人设、聊天规则、关系提示换成备份（docs\\人设打磨备份\\elaina.<PHRASING_OLD>.md.bak、prompts.<PHRASING_OLD>.py.bak，默认 1022），
+    其他和 A 一样；比“改前 / 改后”用（10/22 第三批“人设减肥”，A 就是改后，也就是现在的文件）
+  P 聊天主模型换成 pro（其他和 A 一样；10/22 第三批“主模型换不换 pro”用，见 主模型对比.bat）。
+    pro 用 .env 的 MEMORY_PRO_API_KEY（没填就用 DEEPSEEK_API_KEY）、MEMORY_PRO_MODEL（没填就是 deepseek-v4-pro）。
+    这一版里判断、讲往事核对这些调用也跟着用 pro（它们都读同一个模型设置）；判断在回放里本来就是假的
 
 怎么用：双击 bot\\措辞对比.bat。会把代码拷到临时目录，用 pytest 跑这个文件；不碰真的 data。
 - 题目：tools\\phrasing_cases.json。群聊题借用 replay_chat.py 的回放（旁听、合并、拼提示都走真实流程）；私聊题按 NapCat 日志把前面的聊天放进记录，再把关键那几句交给真实流程
@@ -23,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import time as _time
 import random
 import re
 import shutil
@@ -45,6 +51,7 @@ ONLY = [x for x in os.environ.get("PHRASING_ONLY", "").split(",") if x]
 ONLY_V = [x for x in os.environ.get("PHRASING_VARIANTS", "").split(",") if x]
 
 # ------------------------------------------------------------------ 几种做法
+PRO_MODEL = "deepseek-v4-pro"        # 运行时按 .env 的 MEMORY_PRO_MODEL 改
 SPEAK_PLAIN = ("- 说人话：像真人在 QQ 上随手打字，一句话让人一读就懂。宁可说得平常，也别硬凹比喻、金句和绕口的说法；"
                "意思没说完就多说几个字，别压成半句；对方没说过的事（“天天问候”“搭档”这类）别凭空接。")
 
@@ -76,10 +83,30 @@ def _relax(text: str, hits: dict) -> str:
 
 
 VARIANTS = {"A": "现在的样子", "B": "加“说人话”", "C": "放松“换着说”和挖苦", "D": "温度 1.0", "E": "B + C", "F": "B + 温度 1.0",
-            "L": "长短固定为“可以多说两句”（现在那档）", "M": "长短固定为新写法“多说一两句，说完就停”", "H": "长短固定为“一句话”"}
+            "L": "长短固定为“可以多说两句”（现在那档）", "M": "长短固定为新写法“多说一两句，说完就停”", "H": "长短固定为“一句话”",
+            "P": "主模型换成 pro", "O": "改前（备份的人设、聊天规则、关系提示）"}
 
 # 10/18 第三轮：怪的常是第二条（“半个月。/ 算了，你说的戏码我就当看戏”），怀疑是“可以多说两句”这档让她硬凑一句
 LEN_MORE_NEW = "（这轮可以多说一两句，用换行分开，像连着发了几条消息，总共不超过 40 字；不过意思一句就说完了的话就停，别为了凑够几句硬补一句。）"
+
+
+OLD_TAG = os.environ.get("PHRASING_OLD", "1022")
+
+
+def old_prompts() -> dict:
+    """做法 O：从备份里读改前的人设、聊天规则、关系提示（不 import，免得和现在的插件混在一起）"""
+    import ast
+    bak = BOT_DIR.parent / "docs" / "人设打磨备份"
+    out = {"persona": (bak / f"elaina.{OLD_TAG}.md.bak").read_text(encoding="utf-8").strip()}
+    for node in ast.parse((bak / f"prompts.{OLD_TAG}.py.bak").read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and getattr(node.targets[0], "id", "") in ("CHAT_RULES", "FAMILIARITY_HINT"):
+            val = node.value
+            if isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute) and val.func.attr == "strip":
+                out[node.targets[0].id] = ast.literal_eval(val.func.value).strip()
+            else:
+                out[node.targets[0].id] = ast.literal_eval(val)
+    assert "CHAT_RULES" in out and "FAMILIARITY_HINT" in out, "备份里没找到 CHAT_RULES / FAMILIARITY_HINT"
+    return out
 
 
 def apply_variant(p, v: str, base: dict) -> dict:
@@ -88,6 +115,7 @@ def apply_variant(p, v: str, base: dict) -> dict:
     pr._persona, pr.CHAT_RULES = base["persona"], base["rules"]
     p.FAMILIARITY_HINT.clear(); p.FAMILIARITY_HINT.update(base["fam"])
     p.cfg.llm_temperature = base["temp"]
+    p.cfg.deepseek_model = PRO_MODEL if v == "P" else base["model"]
     p.SHORT_VARIANTS[:] = base["short"]
     hits: dict = {}
     if v in ("L", "M", "H"):                     # 只管日常闲聊那几档长短（讲故事、倾诉等不变）
@@ -104,6 +132,11 @@ def apply_variant(p, v: str, base: dict) -> dict:
             p.FAMILIARITY_HINT[k] = _relax(p.FAMILIARITY_HINT[k], hits)
     if v in ("D", "F"):
         p.cfg.llm_temperature = 1.0
+    if v == "O":
+        old = base.setdefault("old", old_prompts())
+        pr._persona, pr.CHAT_RULES = old["persona"], old["CHAT_RULES"]
+        p.FAMILIARITY_HINT.clear(); p.FAMILIARITY_HINT.update(old["FAMILIARITY_HINT"])
+        hits["改前"] = f"{OLD_TAG}：人设 {len(old['persona'])} 字（现在 {len(base['persona'])} 字）"
     return hits
 
 
@@ -245,12 +278,31 @@ async def test_phrasing(app: App, monkeypatch):
             if kw.get("max_tokens") == 2:
                 return rc._resp("是")
             sys_text = "".join(str(m.get("content")) for m in kw.get("messages") or [] if m.get("role") == "system")
-            flags = [f"温度{kw.get('temperature')}", "说人话" if "说人话：" in sys_text else "", "换着说" if "每次换个说法" in sys_text else "",
+            flags = ["P模型" if "pro" in str(kw.get("model", "")) else "F模型", f"温度{kw.get('temperature')}", "说人话" if "说人话：" in sys_text else "", "换着说" if "每次换个说法" in sys_text else "",
                      "有日期" if "【现在】" in sys_text else ""]
             return rc._resp("好的 " + " ".join(x for x in flags if x))
     else:
         real = rc._real_client().chat.completions.create
     env = rc._env()
+    global PRO_MODEL
+    PRO_MODEL = env.get("MEMORY_PRO_MODEL") or PRO_MODEL
+    real_pro = real
+    if not fake and env.get("MEMORY_PRO_API_KEY"):
+        from openai import AsyncOpenAI
+        real_pro = AsyncOpenAI(api_key=env["MEMORY_PRO_API_KEY"], base_url=env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                               timeout=60).chat.completions.create
+    timing: list = []
+
+    def timed(fn):
+        async def call(**kw):
+            t0 = _time.time()
+            try:
+                return await fn(**kw)
+            finally:
+                if kw.get("max_tokens") != 2 and "response_format" not in kw:
+                    timing.append(_time.time() - t0)
+        return call
+    reals = {"flash": timed(real), "pro": timed(real_pro)}
     for key, attr, conv in (("DEEPSEEK_MODEL", "deepseek_model", str), ("LLM_TEMPERATURE", "llm_temperature", float),
                             ("LLM_THINKING", "llm_thinking", lambda v: v.lower() in ("1", "true", "yes"))):
         if env.get(key):
@@ -265,7 +317,7 @@ async def test_phrasing(app: App, monkeypatch):
     monkeypatch.setattr(nonebot.get_driver().config, "nickname", set(nicks))
     pr = getattr(p, "prompts", p)
     base = {"persona": pr._persona, "rules": pr.CHAT_RULES, "fam": dict(p.FAMILIARITY_HINT), "temp": p.cfg.llm_temperature,
-            "short": list(p.SHORT_VARIANTS)}
+            "short": list(p.SHORT_VARIANTS), "model": p.cfg.deepseek_model}
     assert "多说两句" in base["short"][2][1] and "一句话" in base["short"][1][1], "SHORT_VARIANTS 的顺序变了，L/H 要跟着改"
     real_time_mod, real_dt, real_fam = p.time, p.datetime, p.familiarity_of
     cases, samples, variants = _cases()
@@ -290,6 +342,8 @@ async def test_phrasing(app: App, monkeypatch):
                     rc.set_plugin_attr(p, "time", real_time_mod); rc.set_plugin_attr(p, "datetime", real_dt)
                     shutil.rmtree("data/history", ignore_errors=True)
                     Path("data/history").mkdir(parents=True, exist_ok=True)
+                    real = reals["pro" if v == "P" else "flash"]
+                    timing.clear()
                     if case["kind"] == "group":
                         c = dict(case, force_reply=True)
                         if case.get("seed_start"):          # 回放从这里开始（之前是冒泡，用 seed 放进记录）
@@ -301,7 +355,8 @@ async def test_phrasing(app: App, monkeypatch):
                         r = await rc.replay_once(app, p, c, events, sends, real, nicks)
                     else:
                         r = await replay_private(p, case, private_cache[(case["log"], case["user"])], real)
-                    row = {"id": case["id"], "variant": v, "sample": k, "reply": r["reply"]}
+                    row = {"id": case["id"], "variant": v, "sample": k, "reply": r["reply"], "model": p.cfg.deepseek_model,
+                           "secs": round(sum(timing), 2), "calls": len(timing)}
                     if v == variants[0] and k == 0:         # 每题留一份提示（最后几条），查回放对不对
                         row["prompt_tail"] = [{"role": m["role"], "content": str(m["content"])[:1500]} for m in (r["prompt"] or [])[-5:]]
                     results.append(row)
@@ -313,14 +368,23 @@ async def test_phrasing(app: App, monkeypatch):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(BEIJING).strftime("%m%d_%H%M")
     temp = base["temp"]
-    meta = {"stamp": stamp, "variants": {v: VARIANTS[v] for v in variants}, "base_temperature": temp,
+    meta = {"stamp": stamp, "variants": {v: VARIANTS[v] for v in variants}, "base_temperature": temp, "base_model": base["model"], "pro_model": PRO_MODEL,
             "replacement_hits": hits_all, "samples": samples, "fake": fake}
     (OUT_DIR / f"措辞对比_{stamp}.json").write_text(json.dumps({"meta": meta, "results": results}, ensure_ascii=False, indent=1), encoding="utf-8")
     # 盲评：每题的回复打乱，只标编号
     rnd = random.Random(stamp)
-    key, md = {}, [f"# 措辞对比 {stamp}：盲评用", "",
-                   "每题先看上下文，再看下面打乱顺序的回复。给每条打分：2 = 像正常人随口说的、一读就懂；1 = 能懂但有点别扭；0 = 读不通、硬凹、接不上。",
-                   "不用管她该不该提面包、记没记错事，只看话说得顺不顺、像不像真人。", ""]
+    if "P" in variants or "O" in variants:    # 比模型 / 比改前改后（10/22）：和回归测试的盲评稿用同一套打分
+        key, md = {}, [f"# 措辞对比 {stamp}：盲评稿", "",
+                       "每题先看上下文，再看下面打乱顺序的回复，给每条打两个分（0、1、2），写进打分表：",
+                       "- **顺**：2 = 像真人随口说的、一读就懂、接得上对方的话；1 = 能懂但有点别扭；0 = 读不通、硬凹、答非所问",
+                       "- **像**：2 = 就是伊蕾娜（自恋、嘴毒但有分寸、对熟人和陌生人分寸对）；1 = 不太像但不出格；0 = 不像她、出戏、替人说话、编了不该有的事",
+                       "- 有严重问题的，在打分表那一行最后写个 x，后面可以写几个字说明",
+                       "- 不知道哪条是哪种做法；同一题里的几条可以互相比较着打", ""]
+    else:
+        key, md = {}, [f"# 措辞对比 {stamp}：盲评用", "",
+                       "每题先看上下文，再看下面打乱顺序的回复。给每条打分：2 = 像正常人随口说的、一读就懂；1 = 能懂但有点别扭；0 = 读不通、硬凹、接不上。",
+                       "不用管她该不该提面包、记没记错事，只看话说得顺不顺、像不像真人。", ""]
+    sheet = [f"# 措辞对比 {stamp}：打分表（每行：编号 顺 像 [x 说明]，例如“G1-03 2 1”）", ""]
     for case in cases:
         rs = [r for r in results if r["id"] == case["id"]]
         rnd.shuffle(rs)
@@ -330,10 +394,16 @@ async def test_phrasing(app: App, monkeypatch):
         for i, r in enumerate(rs, 1):
             code = f"{case['id']}-{i:02d}"
             key[code] = r["variant"]
+            sheet.append(f"{code} ")
             md.append(f"- **{code}** {r['reply'].replace(chr(10), ' / ') or '（没回）'}")
         md.append("")
     (OUT_DIR / f"措辞对比_{stamp}_盲评.md").write_text("\n".join(md), encoding="utf-8")
     (OUT_DIR / f"措辞对比_{stamp}_答案.json").write_text(json.dumps(key, ensure_ascii=False, indent=1), encoding="utf-8")
+    (OUT_DIR / f"措辞对比_{stamp}_打分表.txt").write_text("\n".join(sheet) + "\n", encoding="utf-8")
+    for v in variants:
+        rs = [r for r in results if r["variant"] == v and r.get("calls")]
+        if rs:
+            print(f"做法 {v}：每题回一次平均 {sum(r['secs'] for r in rs) / len(rs):.1f} 秒（含重说），最慢 {max(r['secs'] for r in rs):.1f} 秒")
     print(f"\n结果在 {OUT_DIR}（措辞对比_{stamp}_盲评.md 用来盲评；答案在 措辞对比_{stamp}_答案.json）")
     for v, h in hits_all.items():
         print(f"做法 {v}（{VARIANTS[v]}）替换命中：{h}")

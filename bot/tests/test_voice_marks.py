@@ -11,14 +11,21 @@ from test_voice import WAV, voice_on  # noqa: F401
     ("[传声]好吧", "好吧", True),
     ("【传声】好吧", "好吧", True),                       # 提示的标题就是【传声】，她容易照着写
     ("［传声］ 好吧", "好吧", True),
-    ("[语音] 好吧", "好吧", True),
-    ("[发了语音] 哼，只此一次", "哼，只此一次", True),     # 照着聊天记录里自己的话写
-    ("（发了一段语音）听好了", "听好了", True),
-    ("（用传声魔法）听好了", "听好了", True),
+    # 10/23 起（语音 agent 同意、用户定的）：照着聊天记录抄的格式和旁白只去掉，不算想发；只有「[传声]」这类才算
+    ("[语音] 好吧", "好吧", False),
+    ("[发了语音] 哼，只此一次", "哼，只此一次", False),    # 照着聊天记录里自己的话写：多半是在推掉
+    ("（发了一段语音）听好了", "听好了", False),
+    ("（用传声魔法）听好了", "听好了", False),
+    ("[发了语音] 够了吧\n[传声]就一句", "够了吧\n就一句", True),   # 同时写了「[传声]」：照样算想发
     ("好吧\n[传声]就一句", "好吧\n就一句", True),
     ("传声魔法可是很费魔力的", "传声魔法可是很费魔力的", False),   # 正常说到传声魔法：不动
     ("（传声魔法很费魔力的，别老要）", "（传声魔法很费魔力的，别老要）", False),
     ("你那条语音我听了", "你那条语音我听了", False),
+    ("「传声」怎么，听得出是我吗？", "怎么，听得出是我吗？", True),   # 10/22：只有直角引号
+    ("「[传声]」好吧", "好吧", True),                              # 照人设里的写法连引号一起抄
+    ("『传声』好吧", "好吧", True),
+    ("好吧\n「传声」就一句", "好吧\n就一句", True),
+    ("我会一种叫「传声」的魔法", "我会一种叫「传声」的魔法", False),  # 句子中间正常说到：不动
 ])
 def test_voice_marks_cleaned(raw, text, wish):
     import plugins.roleplay_chat as p
@@ -63,11 +70,11 @@ async def test_copied_history_mark_not_sent_as_text(app: App, voice_on):  # noqa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fam,extra", [("stranger", "多半会客气地婉拒"), ("friend", "看你心情"), ("acquaintance", None), ("close", None)])
 async def test_voice_request_tier_hint(app: App, voice_on, monkeypatch, fam, extra):  # noqa: F811
-    """对方要语音：陌生人、普通朋友在【传声】提示后面补一句倾向，熟人、很熟不补（10/20；补过“偶尔不给”，没用，撤了）"""
+    """对方要语音：陌生人、普通朋友在【传声】提示后面补一句倾向，熟人、很熟不补（10/20 定；10/22 试过不偏向的写法，用户选回这一版）"""
     p, speak, spoken = voice_on
     monkeypatch.setattr(p.core, "familiarity_of", lambda qq: fam)
     hint = p.voice_roll(fam, False, "发个语音听听嘛")[1]
-    assert hint.startswith("【传声】对方想听你的声音")
+    assert hint.startswith(p.VOICE_REQUEST_HINT)
     if extra:
         assert extra in hint
     else:
@@ -132,12 +139,21 @@ def test_by_model_tier_and_disliked(by_model, fam, tier):
 
 
 def test_by_model_offline_or_capped_no_hint(by_model, monkeypatch):
+    """10/22 起：额度用完、服务没开时不再什么都不给，改给“这一轮传不了”（讨厌的人照旧不给；语音没配置也不给）"""
     p, speak, spoken = by_model
     p._voice_count[p.voice_day()] = p.cfg.voice_daily_max
-    assert p.voice_roll("close", False, "发个语音") == (False, "")
+    assert p.voice_roll("close", False, "发个语音") == (False, p.VOICE_UNAVAILABLE_HINT)
     p._voice_count.clear()
     monkeypatch.setattr(p.tts, "_ok", False)
+    assert p.voice_roll("close", False, "发个语音") == (False, p.VOICE_UNAVAILABLE_HINT)
+    assert p.voice_roll("close", False, "今天去哪了") == (False, p.VOICE_UNAVAILABLE_HINT)   # 每轮都给，由她判断
+    assert p.voice_roll("disliked", False, "发个语音") == (False, "")
+    monkeypatch.setattr(p.cfg, "voice_request_by_model", False)                              # 认关键词的老办法：认到了才给
+    assert p.voice_roll("close", False, "今天去哪了") == (False, "")
+    assert p.voice_roll("close", False, "发个语音") == (False, p.VOICE_UNAVAILABLE_HINT)
+    monkeypatch.setattr(p.cfg, "voice_enabled", False)
     assert p.voice_roll("close", False, "发个语音") == (False, "")
+    assert "[传声]" in p.VOICE_UNAVAILABLE_HINT and "魔力不够" not in p.VOICE_UNAVAILABLE_HINT
 
 
 # ---------------------------------------------------------------- 10/20 13:04 线上：speak() 不认 timeout，整条回复丢了
@@ -166,3 +182,33 @@ async def test_speak_error_falls_back_to_text(app: App, voice_on, monkeypatch): 
         ctx.receive_event(bot, ev)
         ctx.should_call_send(ev, "知道啦。", result=None, bot=bot)
     assert p.get_history("private_222")[-1]["content"] == "知道啦。"
+
+
+# ---------------------------------------------------------------- 10/22：她推掉了，这条又刚好抽中随机语音：不念
+@pytest.mark.asyncio
+async def test_refusal_not_voiced_by_lottery(app: App, by_model, monkeypatch):
+    """对方在要语音、她没写「[传声]」（推掉了），抽签又抽中：只发文字，免得用声音说“不给”"""
+    p, speak, spoken = by_model
+    monkeypatch.setattr(p.cfg, "voice_prob_private", 1.0)
+    p.client.chat.completions.create = fake_create("才不要，懒得开口。")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("发个语音听听嘛")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "才不要，懒得开口。", result=None, bot=bot)
+    assert spoken == []
+    assert p.get_history("private_222")[-1]["content"] == "才不要，懒得开口。"
+
+
+@pytest.mark.asyncio
+async def test_lottery_still_works_when_not_asked(app: App, by_model, monkeypatch):
+    """对方没在要语音：抽中照样念"""
+    p, speak, spoken = by_model
+    monkeypatch.setattr(p.cfg, "voice_prob_private", 1.0)
+    p.client.chat.completions.create = fake_create("今天去了趟集市。")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("今天去哪了")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, p.voice.segment(WAV), result=None, bot=bot)
+    assert spoken == ["今天去了趟集市。"]

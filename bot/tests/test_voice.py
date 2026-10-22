@@ -133,7 +133,8 @@ async def test_voice_daily_cap(app: App, voice_on, monkeypatch):
         ev = pev("发个语音")
         ctx.receive_event(bot, ev)
         ctx.should_call_send(ev, "知道啦。", result=None, bot=bot)
-    assert spoken == [] and "【传声】" not in _sys_text(CALLS[-1])
+    # 10/22 起：额度用完时给“这一轮传不了”，不给“可以传声”
+    assert spoken == [] and p.VOICE_UNAVAILABLE_HINT in _sys_text(CALLS[-1]) and p.VOICE_OFFER_HINT not in _sys_text(CALLS[-1])
 
 
 @pytest.mark.asyncio
@@ -146,7 +147,8 @@ async def test_voice_offline_no_hint(app: App, voice_on, monkeypatch):
         ev = pev("发个语音")
         ctx.receive_event(bot, ev)
         ctx.should_call_send(ev, "不要。", result=None, bot=bot)
-    assert "【传声】" not in _sys_text(CALLS[-1]) and spoken == []
+    # 10/22 起：服务没开时给“这一轮传不了”，不给“可以传声”
+    assert p.VOICE_UNAVAILABLE_HINT in _sys_text(CALLS[-1]) and p.VOICE_OFFER_HINT not in _sys_text(CALLS[-1]) and spoken == []
 
 
 @pytest.mark.asyncio

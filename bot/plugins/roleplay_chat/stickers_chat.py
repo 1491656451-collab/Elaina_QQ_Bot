@@ -1,5 +1,6 @@
-"""聊天时甩表情（10/22 从 __init__.py 拆出来，代码原样搬过来，没改）：
-这轮能不能带表情、按关系能用哪些情绪、【表情】提示、/表情、定时拉收藏和后台打标签。表情库本身还在 stickers.py"""
+"""聊天时甩表情（10/22 从 __init__.py 拆出来）：
+这轮能不能带表情、按关系能用哪些情绪、【表情】提示、/表情、定时拉收藏和后台打标签。表情库本身还在 stickers.py
+10/22 表情 agent 按《表情抽查-1022.md》改：抽中记一行日志；按关系限制情绪去掉了（用户定的）"""
 import asyncio
 import random
 import time
@@ -17,17 +18,16 @@ from .quota import quota_left
 from .stickers import EMOTIONS
 
 
-TIER_EMOTIONS = {
-    "disliked": {"嫌弃", "无语", "敷衍"},
-    "stranger": set(EMOTIONS) - {"害羞", "委屈"},
-    "friend": set(EMOTIONS) - {"委屈"},
-}
+# 按关系限制能用哪些情绪：10/22 用户定了不限制，对谁都能用全部情绪，由她自己看场合选。
+# 以前是：讨厌的人只给嫌弃、无语、敷衍；陌生人不给害羞、委屈；普通朋友不给委屈。想恢复就把对应的几行加回来
+TIER_EMOTIONS: dict[str, set[str]] = {}
 
 
 _last_sticker: dict[str, float] = {}                  # 会话 -> 上次发表情的时间
 
 
 _recent_stickers: dict[str, deque] = defaultdict(lambda: deque(maxlen=max(cfg.sticker_recent_avoid, 1)))
+stickers.recent_max = cfg.sticker_recent_global      # 不分会话、最近发过的几张也尽量不重复（存在 index.json 里）
 
 
 def sticker_roll(target: str, fam: str, is_group: bool, group_id: int | None, self_image: bool) -> tuple[bool, set[str] | None, list[str]]:
@@ -38,12 +38,16 @@ def sticker_roll(target: str, fam: str, is_group: bool, group_id: int | None, se
     emotions = stickers.emotions(allowed)
     if not emotions:
         return False, allowed, []
-    if time.monotonic() - _last_sticker.get(target, -1e9) < cfg.sticker_min_interval:
+    now = time.monotonic()
+    if now - _last_sticker.get(target, -1e9) < cfg.sticker_min_interval:
         return False, allowed, emotions
     if quota_left(group_id if is_group else None, None if is_group else int(target.split("_")[1])) < 2:     # 限额只剩最后一条了：留给文字
         return False, allowed, emotions
     p = cfg.sticker_self_react_prob if self_image else cfg.sticker_prob * tier_value(cfg.sticker_tier_multiplier, fam, 1.0)
-    return random.random() < p, allowed, emotions
+    hit = random.random() < p
+    if hit:
+        logger.info(f"表情：这轮可以发（{target}，{fam}，概率 {p:.2f}{'，看到自己的画' if self_image else ''}）")
+    return hit, allowed, emotions
 
 
 def sticker_hint(emotions: list[str], only_ok: bool) -> str:
@@ -90,7 +94,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     if op == "测试":
         if len(words) < 2:
             await sticker_cmd.finish("用法：/表情 测试 嫌弃")
-        it = stickers.pick(words[1])
+        it = stickers.pick(words[1], record=False)
         if not it:
             await sticker_cmd.finish(f"（库里没有“{words[1]}”或相近情绪的表情）")
         await bot.send(event, f"（{it['no']} 号：{'、'.join(it['tags'])}｜{it.get('desc') or ''}）")

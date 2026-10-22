@@ -68,6 +68,7 @@ if (cfg.affection_dislike, cfg.affection_acquaintance, cfg.affection_close) == (
     cfg.affection_dislike, cfg.affection_acquaintance, cfg.affection_close = 0, 90, 130
 ltm_affection = {
     "decay_after_days": cfg.affection_decay_after_days, "decay_per_day": cfg.affection_decay_per_day,
+    "mild_dislike": cfg.affection_mild_dislike,
     "min": cfg.affection_min, "max": cfg.affection_max, "start": cfg.affection_start,
     "dislike": cfg.affection_dislike, "friend": cfg.affection_friend,
     "acquaintance": cfg.affection_acquaintance, "close": cfg.affection_close,

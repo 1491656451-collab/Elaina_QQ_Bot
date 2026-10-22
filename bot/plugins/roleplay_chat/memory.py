@@ -32,7 +32,7 @@ from pathlib import Path
 from nonebot import logger
 
 from . import budget
-from .affection import AffectionMixin
+from .affection import AffectionMixin, SUMMARY_AFFECTION_RULES
 
 
 _DUP_MARK_RE = re.compile(r"#\d{1,2}$")     # 群里重名的记号（“小明#2”）
@@ -65,7 +65,6 @@ def _write(path: Path, data) -> None:
 
 # ------------------------------------------------------------------ 记忆条目的小工具
 KINDS = ("身份", "喜好", "习惯", "近况", "计划", "约定", "梗", "经历")
-FACT_CAP_BY_TIER = {"disliked": 8, "stranger": 8, "friend": 12, "acquaintance": 20, "close": 30}
 # 每轮最多带几条：（重要的几条，和这句话相关的几条）
 CONTEXT_LIMITS = {"disliked": (1, 2), "stranger": (1, 2), "friend": (2, 3), "acquaintance": (3, 5), "close": (3, 7)}
 FORGET_DAYS = {1: 30, 2: 90}                # 这么多天没再聊到就忘（重要度 3 不自动忘）
@@ -383,6 +382,7 @@ def _trim(items: list[dict], cap: int, protect_top: bool = True) -> list[dict]:
     return [items[i] for i in idx if i in keep]
 
 
+# 10/23：第四条“好感变化”的写法挪到 affection.py 的 SUMMARY_AFFECTION_RULES（好感 agent 管），拼回来一字不差（缓存照样命中）
 SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆整理员。用户消息里会给你今天的日期、已有的人物档案、群往事和她最近的一段聊天记录（“伊蕾娜（她自己）：”开头的是她自己说的话，其余是别人说的）。
 请像一个真人回想刚才的聊天那样，更新她对每个人的记忆，并评估好感变化。已有档案里每条都有编号 #id，**只写有变化的部分，不要把整份档案重写一遍**。
 
@@ -424,26 +424,7 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 - who：在场参与的人的 QQ 号（必须是档案列表里的人）。
 - 和已有往事重复的不要加；已经不对的写进 drop（写 #id）。
 
-四、好感变化 affection：站在伊蕾娜（自恋、爱钱、爱面包、讨厌蘑菇、嘴毒但重情、讨厌被冒犯）的角度，评价这段记录里每个人给她的感受，给一个整数。
-   先看档案里标的【关系】——同样的话，关系不同感受完全不同。
-   再分清是“玩笑”还是“恶意”：
-     - 玩笑：调侃、互损、斗嘴、起外号、拿她的自恋 / 爱钱 / 贪吃 / 身材开玩笑、故意逗她生气。越熟越是日常，普通朋友扣得少，熟人、很熟之间基本不扣。
-     - 恶意：辱骂、人身攻击、性骚扰、明知她在意还反复戳痛处、带着恶意的嘲讽和贬低。恶意不看关系，一律按陌生人的标准扣；很熟的人这样做，她反而更受伤，可以扣得更重。
-   ● 陌生人（基准）：
-     - +1～+5：聊得投机、有趣、尊重她、真诚关心她、夸得她心里舒服、陪她聊她感兴趣的事
-     - 0：普通寒暄、没什么感觉
-     - -1～-5：无聊纠缠、刷屏、硬要她做不想做的事、一上来就告白/叫老婆/强加关系、提蘑菇之类让她烦的事
-     - -6～-15：辱骂、人身攻击、性骚扰、恶意冒犯
-   ● 普通朋友：聊过一些、印象不坏。轻度调侃、开玩笑算正常，0～-1；告白、强加关系还是有点冒犯，-1～-3；恶意照样按基准扣
-   ● 熟人：调侃、互损、开玩笑算正常打闹，基本不扣（0，过火了最多 -1）；告白、撒娇不算冒犯，看她心情 0～+2；恶意照样按基准扣
-   ● 很熟：互损、开玩笑一律不扣（0），这是他们之间的相处方式；真心关心、陪伴、记得她的喜好可以多加 +2～+5；恶意按基准扣，可以更重
-   ● 讨厌：她本来就烦这个人，冒犯按基准再重一些；想加分很难，只有特别真诚、明显改过的表现才给 +1～+2
-   ● 倾诉不是冒犯：对方难过、倾诉烦恼、说丧气话，甚至说不想活了、要离开这个世界，这些话本身不扣分；真诚地说出来、没有别的恶意，就当作是信任她，可以 0～+2。
-   ● 卖惨算纠缠：拿难过当手段——逼她回应、逼她答应告白、一遍遍说“我要走了”来博关注——按“纠缠”扣（-1～-5）；扣的是纠缠本身，不是因为他说了难过的话。
-   ● 身材梗不在这里算分：拿她的身材开玩笑（平胸、飞机场、洗衣板等）已经由系统当场按关系扣过，这里不因此再扣；只有同时还有别的恶意（辱骂、骚扰等）才按那部分扣。
-   ● 送东西不在这里算分：说送面包、给钱（包括「[给面包]」「[给钱]」「转账」这类写法）已经由系统单独算过，这里不因此加分；付给她合理的报酬不加不减；拿钱引诱、无缘无故撒钱、用她不认识的钱糊弄她，不加分。
-   同时写一句不超过 20 字的理由 reason，并标出类别 affection_kind：“正常”（没扣分，或者只是玩笑过火）、“纠缠”（烦人但没有恶意：纠缠告白、刷屏、问个没完）、“恶意”（辱骂、人身攻击、性骚扰、恶意冒犯）。
-   同一件烦人的事，档案里已经记着“又来了”，这次也只按这段记录本身的程度扣，不要因为“又来了”越扣越重。
+""" + SUMMARY_AFFECTION_RULES + """
 
 五、性别 gender_guess：**只在这段里有明确证据时**才写“男”或“女”，在 gender_evidence 里写出证据（不超过 20 字），在 gender_evidence_kind 里写证据的种类：
    - “自称”：对方自己说的（“我一个女生”“本人男”）。自己说的也可能是骗她的，照实记下就行，程序会结合别的证据判断；
@@ -519,6 +500,13 @@ MIGRATE_INPUT = """今天是 {today}。
 {facts}"""
 
 
+def _default_facts_by_tier() -> dict[str, int]:
+    """每档关系最多记几条的默认值，直接取 config.py 的 memory_facts_by_tier（10/22：以前这里另抄了一份一样的数，启动时被配置覆盖，改的时候容易只改一处）。
+    服务器 .env 里写了 MEMORY_FACTS_BY_TIER 的，启动时在 core.py 再覆盖"""
+    from .config import Config
+    return dict(Config.model_fields["memory_facts_by_tier"].default)
+
+
 class LongTermMemory(AffectionMixin):
     def __init__(self, root: Path, client, model: str, *, batch: int = 8,
                  max_facts: int = 12, max_events: int = 8, enabled: bool = True, defer=None):
@@ -531,7 +519,7 @@ class LongTermMemory(AffectionMixin):
         self.max_events = max_events
         self.enabled = enabled
         self.defer = defer or (lambda: False)   # 返回 True 时先不整理（比如 API 高峰时段）
-        self.facts_by_tier = dict(FACT_CAP_BY_TIER)
+        self.facts_by_tier = dict(_default_facts_by_tier())   # 每档关系最多记几条：只在 config.py 的 memory_facts_by_tier 里写（10/22）
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)   # QQ -> 整理这个人档案时的锁
         self._tasks: set[asyncio.Task] = set()
@@ -1058,30 +1046,10 @@ class LongTermMemory(AffectionMixin):
                     note = self.gender_evidence(prof, guess, str(p.get("gender_evidence_kind", "")).strip(), ev)
                     if note:                     # 发现被骗了：记一笔，以后可以拿来挖苦
                         prof.setdefault("facts", []).append(self._new_fact(prof, note, "梗", 2, scope))
-                try:
-                    delta = int(p.get("affection", 0))
-                except (TypeError, ValueError):
-                    delta = 0
-                delta = max(-15, min(5, delta))
-                if tier == "disliked" and delta > 0:     # 讨厌的人想挽回，加分减半（至少 +1）
-                    delta = max(1, delta // 2)
+                # 10/23：按这段聊天给的好感分怎么落到档案上（封顶、讨厌的人减半、同一批不重复算、纠缠扣分上限、每天上限）
+                # 挪到 affection.py 的 _summary_affection，代码没改
+                self._summary_affection(prof, qq, tier, p, batch_id)
                 done_batches = prof.get("batches") or []
-                if batch_id is not None and batch_id in done_batches:
-                    delta = 0                                # 这一批上次已经算过好感（上次写到一半出错了）
-                if delta < 0:
-                    delta = self._nag_capped(prof, qq, delta, str(p.get("affection_kind", "")).strip())
-                cap = self.affection_cfg.get("summary_daily_cap", 0)
-                if delta > 0 and cap:                    # 每人每天靠整理最多加这么多（聊得再多也不会一天就熟起来）
-                    today = self._today()
-                    if prof.get("sum_gain_day") != today:
-                        prof["sum_gain_day"], prof["sum_gain_today"] = today, 0
-                    room = max(0, cap - int(prof.get("sum_gain_today", 0)))
-                    if delta > room:
-                        logger.info(f"长期记忆：{qq} 今天靠聊天已经涨了 {prof.get('sum_gain_today', 0)} 分，这次 +{delta} 只算 +{room}")
-                        delta = room
-                    prof["sum_gain_today"] = int(prof.get("sum_gain_today", 0)) + delta
-                if delta:
-                    self._apply_affection(prof, delta, str(p.get("reason", ""))[:30])
                 if batch_id is not None:
                     prof["batches"] = (done_batches + [batch_id])[-5:]
                 updated.append(prof)

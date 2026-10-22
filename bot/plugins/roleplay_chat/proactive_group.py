@@ -1,6 +1,8 @@
 """群里主动说话（10/22 从 __init__.py 拆出来，代码原样搬过来，没改）：群里旁听（没 @ 她的群消息）、
 聊得正热时插一句、很久没人说话时冒个泡、/插话、/冒泡。
-只改了一处写法：调 _in_hours() 写成 core._in_hours()，测试替换它才生效"""
+只改了一处写法：调 _in_hours() 写成 core._in_hours()，测试替换它才生效。
+10/23：调模型、看她想不想说、分条发到群里这几段挪到 proactive_common.py（插话、冒泡、搭话、写信共用）；
+手动 /插话、/冒泡 不再算进当天的次数和间隔（只记日志）"""
 import asyncio
 import json
 import random
@@ -14,15 +16,13 @@ from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
 from nonebot.rule import Rule, to_me
 
-from . import budget, core, peak
-from .oocheck import ooc_words
-from .core import _hands, alert_admins, BOT_DIR, cap_text, cfg, classify_error, client, mark_sent, over_cap, switch_pause
+from . import core, peak, proactive_common
+from .core import BOT_DIR, cap_text, cfg, over_cap
 from .prompts import BUBBLE_PROMPT, INTERJECT_PROMPT, system_prompt
-from .history import _locks, _passive, _recent_chat, _unrecord, api_messages, get_history, save_history
+from .history import _locks, _passive, _recent_chat, api_messages, get_history, save_history
 from .turn_hints import _WEEKDAY, clock_text, human_gap, now_hint, short_hint
 from .textin import clean_body, clip_input, group_body, is_bot_like, message_to_text, quote_note, sender_label, speaker_head, watch_block
-from .textout import CHAT_STOP, clean_reply, split_bubbles
-from .quota import _global_window, _group_hour, _has_quota, _hour_window, bubble_gap, quota_left, typing_delay
+from .quota import _global_window, _group_hour, _has_quota, _hour_window, quota_left
 from .online import quiet_left
 from .commands import is_slash_message
 from .addressed import _away, _is_group_not_to_me, _last_bot_msg, _last_smart, allowed, away_left
@@ -161,21 +161,10 @@ async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
             + [{"role": "user", "content": watch},
                {"role": "system", "content": now_hint() + "\n\n" + INTERJECT_PROMPT + short_hint()}]
         )
-        try:
-            resp = await client.chat.completions.create(
-                model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
-                max_tokens=cfg.short_reply_max_tokens, stop=CHAT_STOP, extra_body={"thinking": {"type": "disabled"}},
-            )
-            budget.track(resp, "interject", group=gid)
-            choice = resp.choices[0]
-            reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
-        except Exception as e:  # noqa: BLE001
-            kind = classify_error(e)
-            logger.warning(f"插话：调用失败（{kind or '其他错误'}）：{e}")
-            if kind:
-                await alert_admins(bot, kind)
+        reply = await proactive_common.ask(bot, messages, "interject", "插话：调用失败", group=gid)
+        if reply is None:
             return None
-        if not reply or _NO_INTERJECT_RE.search(reply) or ooc_words(reply, ""):
+        if proactive_common.declined(reply, _NO_INTERJECT_RE):
             _interject_skip_until[gid] = time.monotonic() + cfg.interject_retry_minutes * 60
             logger.info(f"插话：群{gid} 她看了看，没什么想说的")
             return None
@@ -190,25 +179,14 @@ async def _interject(bot: Bot, gid: int, force: bool) -> str | None:
         history.append({"role": "assistant", "content": reply, "ts": time.time()})
         save_history(key)
         # 插话不交给长期记忆整理：不因为这一句给谁加减好感
-    bubbles = split_bubbles(reply)[:2]
-    target = f"group_{gid}"
-    async with _hands:
-        await switch_pause(target)
-        await asyncio.sleep(typing_delay(bubbles[0]))
-        for i, b in enumerate(bubbles):
-            if i:
-                await asyncio.sleep(bubble_gap(b))
-            try:
-                await bot.send_group_msg(group_id=gid, message=b)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"插话：群{gid} 发送失败：{e}")
-                if not i:
-                    _unrecord(key, reply)
-                return None
-        mark_sent(target)
+    if not await proactive_common.send_to_group(bot, gid, reply, "插话"):
+        return None
     now = time.monotonic()
     _last_bot_msg[gid] = (now, 0, reply)     # 有人接她的话，走“她刚说完话”的判断
     _last_smart[gid] = now
+    if force:                                # 10/23：手动 /插话 不算进今天的次数，也不推后下一次自动插话
+        logger.info(f"插话：群{gid} 手动 /插话，她说了一句（不算进今天的次数和间隔）：{reply[:30]}")
+        return reply
     st = _interject_state()
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
     g = st.get(str(gid), {})
@@ -315,21 +293,10 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
                 + history[-6:]
                 + [{"role": "system", "content": prompt + short_hint()}]
             )
-            try:
-                resp = await client.chat.completions.create(
-                    model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
-                    max_tokens=cfg.short_reply_max_tokens, stop=CHAT_STOP, extra_body={"thinking": {"type": "disabled"}},
-                )
-                budget.track(resp, "bubble", group=gid)
-                choice = resp.choices[0]
-                reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
-            except Exception as e:  # noqa: BLE001
-                kind = classify_error(e)
-                logger.warning(f"冒泡：调用失败（{kind or '其他错误'}）：{e}")
-                if kind:
-                    await alert_admins(bot, kind)
+            reply = await proactive_common.ask(bot, messages, "bubble", "冒泡：调用失败", group=gid)
+            if reply is None:
                 return None
-            if not reply or _NO_BUBBLE_RE.search(reply) or ooc_words(reply, ""):
+            if proactive_common.declined(reply, _NO_BUBBLE_RE):
                 logger.info(f"冒泡：群{gid} 她不想说话")
                 return None
             if not force and not _take_group_quota(gid):
@@ -337,24 +304,14 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
             history.append({"role": "assistant", "content": reply, "ts": time.time()})
             save_history(key)
             _away.pop(key, None)                      # 她已经自己开口了，下次聊天不用再说“刚回来”
-        bubbles = split_bubbles(reply)[:2]
-        async with _hands:
-            await switch_pause(key)
-            await asyncio.sleep(typing_delay(bubbles[0]))
-            for i, b in enumerate(bubbles):
-                if i:
-                    await asyncio.sleep(bubble_gap(b))
-                try:
-                    await bot.send_group_msg(group_id=gid, message=b)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"冒泡：群{gid} 发送失败：{e}")
-                    if not i:
-                        _unrecord(key, reply)
-                    return None
-            mark_sent(key)
+        if not await proactive_common.send_to_group(bot, gid, reply, "冒泡"):
+            return None
         now_m = time.monotonic()
         _last_bot_msg[gid] = (now_m, 0, reply)
         _last_smart[gid] = now_m
+        if force:                            # 10/23：手动 /冒泡 不算进今天的次数，也不推后下一次自动冒泡
+            logger.info(f"冒泡：群{gid} 手动 /冒泡，她说了一句（不算进今天的次数和间隔）：{reply[:30]}")
+            return reply
         st = _interject_state()
         today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
         g = st.get(str(gid), {})

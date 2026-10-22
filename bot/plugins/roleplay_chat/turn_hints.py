@@ -49,7 +49,7 @@ def length_hint_for(mode: str, text: str, fam: str) -> str:
         return short_hint(text)
     if (mode == "long" and fam in ("stranger", "disliked") and any(k in text for k in _VENT_HINTS)
             and not any(k in text for k in _STORY_HINTS)):
-        return LENGTH_HINT["vent_stranger"]
+        return LENGTH_HINT["vent_disliked" if fam == "disliked" else "vent_stranger"]   # 10/22：讨厌的人单给一句
     return LENGTH_HINT[mode]
 
 

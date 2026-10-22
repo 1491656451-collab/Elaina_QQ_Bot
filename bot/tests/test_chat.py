@@ -524,7 +524,7 @@ def test_affection_tiers_and_decay(monkeypatch):
     assert L.effective_score(L.get_user(6001)) == -30
     # 很久不聊：向起步分回落，但不跨档位（9/30 起）
     prof = L.get_user(6001); prof["last_talk"] = time.time() - 17 * 86400; prof.pop("decay_settled", None); L.save_user(prof)
-    assert L.effective_score(L.get_user(6001)) == -10          # 超过 7 天后 10 天 × 2 = 20
+    assert L.effective_score(L.get_user(6001)) == -20          # 超过 7 天后 10 天 × 1 = 10（10/22 起每天 1 分）
     prof["last_talk"] = time.time() - 70 * 86400; L.save_user(prof)
     assert L.effective_score(L.get_user(6001)) == -1 and p.familiarity_of(6001) == "disliked"   # 讨厌不会自己淡成陌生人
     prof["score"], prof["last_talk"] = 100, time.time() - 70 * 86400; L.save_user(prof)
@@ -1022,10 +1022,11 @@ async def test_letter_rules_and_send(app: App, monkeypatch):
 
 
 def test_letter_prob_old_style_config():
-    # .env 老写法只写一个数：当作很熟的概率，熟人仍是默认 0.08
+    # .env 老写法只写一个数：当作很熟的概率，熟人仍是默认 0.12（10/22 从 0.08 改，跟着 10/19 的默认值）
     from plugins.roleplay_chat.config import Config
     assert Config(letter_daily_prob=0.3).letter_daily_prob["close"] == 0.3
-    assert Config(letter_daily_prob="0.3").letter_daily_prob["acquaintance"] == 0.08
+    assert Config(letter_daily_prob="0.3").letter_daily_prob["acquaintance"] == 0.12
+    assert Config(letter_daily_prob="0.3").letter_daily_prob["acquaintance"] == Config().letter_daily_prob["acquaintance"]
     assert Config(letter_daily_prob={"acquaintance": 0.1, "close": 0.2}).letter_daily_prob == {"acquaintance": 0.1, "close": 0.2}
     assert Config().letter_daily_prob["friend"] == 0.0
 
@@ -1045,6 +1046,7 @@ async def test_letter_command(app: App):
     letter = "致 小王：\n路过一个全是猫的国家。\n——伊蕾娜"
     p.client.chat.completions.create = fake_create(letter)
     _set_seen(p, 7801, 0.1, 10)
+    sent_before = dict(p._letters_sent)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = pev("/写信 7801", uid=999, mid=2200)
@@ -1052,6 +1054,7 @@ async def test_letter_command(app: App):
         ctx.should_call_api("get_friend_list", {}, [{"user_id": 7801}])
         ctx.should_call_api("send_private_msg", {"user_id": 7801, "message": letter}, {"message_id": 1})
         ctx.should_call_send(ev, "（信已寄给 7801｜平时不会自动写：还没到熟人）", result=None, bot=bot)
+    assert p._letters_sent == sent_before                 # 10/23：手动 /写信 不算进今天寄信的封数
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = pev("/写信 7802", uid=999, mid=2201)
@@ -1940,7 +1943,8 @@ async def test_interject_command(app: App, monkeypatch):
         bot = mkbot(ctx)
         ev = gev("/插话 状态", True, uid=999, mid=9901)
         ctx.receive_event(bot, ev)
-        ctx.should_call_send(ev, "（今天已插话 1/不限 次｜现在：离上次插话太近）\n（今天已冒泡 0/不限 次｜现在：冒泡没开）", result=None, bot=bot)
+        # 10/23 起手动 /插话 不算进今天的次数（以前这里是 1 次、“离上次插话太近”）
+        ctx.should_call_send(ev, "（今天已插话 0/不限 次｜现在：她刚在这个群说过话）\n（今天已冒泡 0/不限 次｜现在：冒泡没开）", result=None, bot=bot)
     # 普通人不能用
     n = len(CALLS)
     async with app.test_matcher() as ctx:
@@ -3684,18 +3688,53 @@ def test_decay_keeps_tier():
     # 还没到底的，照常每天 2 分
     L.set_gender(9957, "female"); L.adjust(9957, set_to=145)
     prof = L.get_user(9957); prof["last_talk"] = time.time() - 10 * 86400; prof.pop("decay_settled", None); L.save_user(prof)
-    assert L.effective_score(L.get_user(9957)) == 139              # 超过 7 天后 3 天 × 2 = 6
+    assert L.effective_score(L.get_user(9957)) == 142              # 超过 7 天后 3 天 × 1 = 3（10/22 起每天 1 分）
     # 回落停在 130 以后，别的扣分照扣，可以掉档；扣完以后不会再从很久以前重新落一遍（最后说话还是 100 天前）
     L.taboo_penalty(9950, 5, 16, "测试扣分")
     assert L.effective_score(L.get_user(9950)) == 125 and p.familiarity_of(9950) == "acquaintance"
     assert L.get_user(9950)["last_talk"] == long_ago
     # 结算以后再过 3 天：只落这 3 天的 6 分
     prof = L.get_user(9950); prof["decay_settled"] = time.time() - 3 * 86400; L.save_user(prof)
-    assert L.effective_score(L.get_user(9950)) == 119
+    assert L.effective_score(L.get_user(9950)) == 122
     # 以前“光聊天加分”留下的旧字段，说话时顺手清掉
     prof = L.get_user(9954); prof["gain_day"], prof["gain_today"] = "2026-09-29", 3; L.save_user(prof)
     L.bump_talk(9954)
     assert "gain_day" not in L.get_user(9954) and "gain_today" not in L.get_user(9954)
+
+
+def test_mild_dislike_fades():
+    """10/22：轻度讨厌（-10 以上、没被判过恶意）很久不来会慢慢淡回陌生人；重的、有过恶意的最多回到 -1"""
+    import plugins.roleplay_chat as p
+    L = p.ltm
+    long_ago = time.time() - 100 * 86400
+
+    def idle(qq, score, log=None, malice=None):
+        L.adjust(qq, set_to=score)
+        prof = L.get_user(qq)
+        if log is not None:
+            prof["affection_log"] = log
+        if malice:
+            prof["malice"] = malice
+        prof["last_talk"] = prof["last_msg"] = long_ago; prof.pop("decay_settled", None); L.save_user(prof)
+        return L.effective_score(L.get_user(qq)), p.familiarity_of(qq)
+
+    assert idle(9960, -5) == (20, "stranger")                                   # 轻度：淡回陌生人，回到起步分
+    assert idle(9961, -10) == (20, "stranger")                                  # 正好 -10 也算轻度
+    assert idle(9962, -10.5) == (-1, "disliked")                                # 更低的最多回到 -1
+    assert idle(9963, -5, malice="2026-10-22") == (-1, "disliked")              # 被判过恶意的不淡
+    assert idle(9964, -5, log=["2026-09-29 -8 性骚扰加反复冒犯"]) == (-1, "disliked")   # 旧档案：记录里有 -6 及以下的扣分
+    assert idle(9965, -5, log=["2026-10-01 -6 说她平胸（讨厌）"]) == (20, "stranger")    # 雷点词当场扣的不算恶意
+    assert idle(9966, -5, log=["2026-10-01 -60 管理员调整"]) == (20, "stranger")         # 管理员改的不算
+    # 回升得慢：-5 停聊 7 + 10 天，只回到 5（每天 1 分），中途已经变回陌生人
+    L.adjust(9967, set_to=-5)
+    prof = L.get_user(9967); prof["last_talk"] = time.time() - 17 * 86400; prof.pop("decay_settled", None); L.save_user(prof)
+    assert L.effective_score(L.get_user(9967)) == 5 and p.familiarity_of(9967) == "stranger"
+    # 整理时判成恶意：记一笔，之后不会自己淡掉
+    prof = L.get_user(9968)
+    assert L._nag_capped(prof, 9968, -8, "恶意") == -8 and prof.get("malice")
+    prof2 = L.get_user(9969)
+    assert L._nag_capped(prof2, 9969, -3, "纠缠") == -3 and not prof2.get("malice")
+
 
 
 # ---------------------------------------------------------------- 9/29 记混检查
@@ -4865,9 +4904,9 @@ async def test_tag_after_own_mention_is_asked_2320(app: App):
 
 
 def test_chat_stop_and_rule_0100():
-    """10/01：调模型时写到“【”就停；聊天规则讲明只写自己这一轮的话"""
+    """10/01：调模型时写到“【”就停；10/23 起只在另起一行的“【”停（开头的“【传声】”不再被截成空回复）；聊天规则讲明只写自己这一轮的话"""
     import plugins.roleplay_chat as p
-    assert p.CHAT_STOP == ["【"]
+    assert p.CHAT_STOP == ["\n【"]
     assert "只写你自己这一轮要说的话" in p.CHAT_RULES
     assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
 
@@ -4881,7 +4920,7 @@ async def test_chat_call_passes_stop_0100(app: App):
         bot = mkbot(ctx)
         ctx.receive_event(bot, ev)
         ctx.should_call_send(ev, "嗯。", result=None, bot=bot)
-    assert CALLS[-1].get("stop") == ["【"]
+    assert CALLS[-1].get("stop") == ["\n【"]
 
 
 def test_fragment_reply_0110():
@@ -5495,3 +5534,341 @@ def test_edit_fact_marks_changed_1020(tmp_path):
     m.edit_fact(111, 1, "经历 请伊蕾娜吃过可颂")
     f = m.get_user(111)["facts"][0]
     assert f["changed"] == date_str() and f["since"] == date_str(10)
+
+
+# ---------------------------------------------------------------- 10/22 按模型算价（限额 agent）
+def test_budget_price_by_model_1022(tmp_path):
+    """resp.model 带 pro 的按 pro 价记，其余（包括没有模型名）按 flash；高峰两倍对两种都一样；/花费 里看得到按 pro 记了几次"""
+    from plugins.roleplay_chat import budget as B, peak
+    b = B.Budget(tmp_path, total=1.5, reserve=0.15, peak_multiplier=1.0)
+    use = SimpleNamespace(prompt_cache_hit_tokens=1_000_000, prompt_cache_miss_tokens=1_000_000, completion_tokens=1_000_000)
+    pro = SimpleNamespace(usage=use, model="deepseek-v4-pro")
+    flash = SimpleNamespace(usage=use, model="deepseek-flash")
+    none = SimpleNamespace(usage=use)
+    assert b.track(pro, "memory_nightly") == pytest.approx(0.15 + 4.5 + 13.5)
+    assert b.track(flash, "memory_nightly") == pytest.approx(0.02 + 1 + 4)
+    assert b.track(none, "memory_nightly") == pytest.approx(0.02 + 1 + 4), "拿不到模型名按 flash"
+    assert b.track(none, "memory_nightly", model="DeepSeek-V4-Pro-0813") == pytest.approx(18.15), "返回里没有时用传进来的，不分大小写"
+    assert b.track(SimpleNamespace(usage=use, model=SimpleNamespace()), "memory_nightly") == pytest.approx(5.02), "模型名不是字符串当没有"
+    k = b.today()["kinds"]["memory_nightly"]
+    assert k["calls"] == 5 and k["pro_calls"] == 2
+    assert "其中按 pro 价 2 次" in b.report()
+    busy = datetime(2026, 9, 29, 10, 0, tzinfo=peak.BEIJING)        # 周二上午
+    b.peak_multiplier = 2.0
+    assert b.cost_of(0, 1_000_000, 0, busy, model="deepseek-v4-pro") == pytest.approx(9.0)
+    # 价格表可以换（DeepSeek 调价）；flash 的价照旧从 price 来
+    b2 = B.Budget(tmp_path / "b", model_prices={"pro": {"out": 20}}, price={"hit": 0.01})
+    assert b2.price_for("deepseek-v4-pro") == ("pro", {"hit": 0.01, "miss": 1.0, "out": 20})
+    assert b2.price_for("deepseek-flash")[0] is None
+
+
+@pytest.mark.asyncio
+async def test_nightly_billed_at_pro_price_1022(tmp_path, monkeypatch):
+    """睡前整理走 pro 客户端：memory.py 不用改，按返回里的模型名记成 pro 价"""
+    from plugins.roleplay_chat import budget as B
+    b = B.Budget(tmp_path / "usage", total=1.5, reserve=0.15, peak_multiplier=1.0)
+    monkeypatch.setattr(B, "_budget", b)
+    m, _ = _mem(tmp_path, lambda kw: {"update": [], "drop": []})
+    seen = []
+
+    async def pro_create(**kw):
+        seen.append(kw["model"])
+        r = resp(json.dumps({"update": [], "drop": [], "impression": "话多"}, ensure_ascii=False))
+        r.model = kw["model"]                       # DeepSeek 返回的就是实际用的模型名
+        r.usage = SimpleNamespace(prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=1000, completion_tokens=100)
+        return r
+    m.nightly_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=pro_create)))
+    m.nightly_model = "deepseek-v4-pro"
+    _prof_with(m, 111, [{"text": t, "kind": "梗"} for t in "abcd"], last_talk=time.time() - 3600)
+    assert await m.nightly() == 1 and seen == ["deepseek-v4-pro"]
+    k = b.today()["kinds"]["memory_nightly"]
+    assert k["pro_calls"] == 1
+    assert k["cost"] == pytest.approx((1000 * 4.5 + 100 * 13.5) / 1e6), "按 pro 价，不是 flash 的 (1000×1 + 100×4)/1e6"
+    assert b.today()["chat"] == 0, "睡前整理是后台类"
+
+
+# ---------------------------------------------------------------- 10/22 好感打分写法、每档记几条只留一处（《好感档位检查-1022》问题 1B、问题 7）
+def test_affection_prompt_tiers_1022():
+    """陌生人基准里写清楚 0 / +1～+2 / +2～+3 / +4～+5 几档；扣分的写法不动"""
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
+    assert "+1～+2：正常聊得愉快、有来有往" in SUMMARIZE_PROMPT
+    assert "+4～+5：只给特别打动她的事" in SUMMARIZE_PROMPT
+    assert "别因为谨慎只给 +1" in SUMMARIZE_PROMPT
+    assert "-1～-5：无聊纠缠、刷屏" in SUMMARIZE_PROMPT and "-6～-15：辱骂、人身攻击、性骚扰、恶意冒犯" in SUMMARIZE_PROMPT
+
+
+def test_facts_by_tier_from_config_1022(tmp_path):
+    from plugins.roleplay_chat import memory
+    from plugins.roleplay_chat.config import Config
+    assert not hasattr(memory, "FACT_CAP_BY_TIER"), "只在 config.py 里写一份"
+    m, _ = _mem(tmp_path, lambda kw: {})
+    assert m.facts_by_tier == Config().memory_facts_by_tier
+
+
+# ---------------------------------------------------------------- 10/22 讨厌的人：告别、晚安、累了单列；倾诉单给一句；搭话可以不说
+def test_disliked_tier_lines_1022():
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat.addressed import _LEAVE_RE
+    from plugins.roleplay_chat.proactive_private import _BYE_RE
+    assert p.peak.TIER_OF["disliked"] == "cold" and p.peak.TIER_OF["stranger"] == "far"
+    cold = p.peak.FAREWELL_PRIVATE_TIERS["cold"]
+    assert all(_LEAVE_RE.search(x) for x in cold)                      # 认得出她已经道过别
+    assert all(_BYE_RE.search(x) and "晚安" not in x for x in p.peak.SLEEP_PRIVATE_TIERS["cold"])
+    for _ in range(20):
+        assert p.peak.farewell_line(private=True, fam="disliked") in cold
+        assert p.peak.sleep_line(private=True, fam="disliked") in p.peak.SLEEP_PRIVATE_TIERS["cold"]
+        assert p.peak.tired_line(fam="disliked") in p.peak.TIRED_TIERS["cold"]
+        assert p.peak.farewell_line(private=True, fam="stranger") in p.peak.FAREWELL_PRIVATE_TIERS["far"]
+    assert set(cold) <= set(p.peak.FAREWELL_PRIVATE_LINES)
+
+
+def test_vent_disliked_1022():
+    import plugins.roleplay_chat as p
+    vent = "今天考试考砸了，爸妈骂了我一顿，感觉自己什么都做不好"
+    assert p.length_hint_for("long", vent, "disliked") == p.LENGTH_HINT["vent_disliked"]
+    assert p.length_hint_for("long", vent, "stranger") == p.LENGTH_HINT["vent_stranger"]
+    assert "不太熟" not in p.LENGTH_HINT["vent_disliked"]
+
+
+def test_nudge_prompt_she_decides_1022():
+    import plugins.roleplay_chat as p
+    assert "由你自己决定" in p.NUDGE_PROMPT and "熟不熟" in p.NUDGE_PROMPT and p.NUDGE_PROMPT.count("「[不说]」") == 2
+    assert p._NO_NUDGE_RE.search("[不说]")
+    p.NUDGE_PROMPT.format(gap="10 分钟")
+
+
+# ---------------------------------------------------------------- 10/23 第三批：装不懂、外文只删一句、开头的【传声】、发前清理日志
+def test_ooc_feigned_ignorance_next_sentence_1023():
+    """10/21 线上：“没听说过”写在下一句，也算装不懂，不算出戏"""
+    import plugins.roleplay_chat as p
+    r = "人工智能……听名字像是造出来替人做事的聪明玩意儿？\n可惜这两样我都没听说过"
+    assert p.ooc_words(r, "那你听过人工智能吗") == []
+    assert p.ooc_words("人工智能？那是什么。", "那你听过人工智能吗") == []
+    # 下一句不是装不懂、或者当成懂的在用：照旧算出戏
+    assert p.ooc_words("人工智能挺厉害的。今天天气不错", "那你听过人工智能吗") == ["人工智能"]
+    assert p.ooc_words("我才不是人工智能。我没听说过那种东西", "你是人工智能吧") == ["人工智能"]
+    assert p.ooc_words("有建议就说，别光喊 bug", "哇好多bug") == ["bug"]
+    # 隔了一句才说不懂的，不算
+    assert p.ooc_words("人工智能挺厉害的。天气不错。我没听说过", "那你听过人工智能吗") == ["人工智能"]
+
+
+def test_cut_derailed_only_that_sentence_1023():
+    import plugins.roleplay_chat as p
+    r = "这趟旅行还挺worthwhile的，路上风景不错。\n下次再跟你说。"
+    assert p.cut_derailed(r, "最近怎么样") == "下次再跟你说。"
+    r2 = "今天去了集市。这里的东西真是太worthwhile了吧哈哈。晚上写日记"
+    assert p.cut_derailed(r2, "") == "今天去了集市。晚上写日记"
+    # 像名字的一行（中文很少）：照旧从这句起全截掉
+    assert p.cut_derailed("先去看看书吧\n\nAAA记忆回收\n\n好 谢谢", "魔法") == "先去看看书吧"
+    assert p.cut_derailed("嗯，好的。", "") == "嗯，好的。"
+    assert p.cut_derailed("好啊。【群友 → 你】今天你吃了什么", "") == "好啊。"   # 同一行里替人说话：照样截
+    t = "嗯，好的。  "
+    assert p.cut_derailed(t, "") is t                     # 没删东西就原样返回
+
+
+def test_voice_title_at_start_now_survives_1023():
+    """停止符改成“另起一行的【”后，她用“【传声】”开头写出来的回复交给清理：去掉标题、认成想用语音"""
+    import plugins.roleplay_chat as p
+    assert p.clean_reply("【传声】嗯，听得见吗？", keep_sticker=True) == "[传声]嗯，听得见吗？"
+    assert p.clean_reply("【群友】嗯？", keep_sticker=True) == "嗯？"
+
+
+def test_clean_reply_summary_log_1023(caplog):
+    import logging
+    import plugins.roleplay_chat as p
+    from nonebot import logger
+    seen = []
+    hid = logger.add(lambda m: seen.append(str(m)), level="INFO")
+    try:
+        assert p.clean_reply("（过了两秒）好吧。") == "好吧。"
+        assert p.clean_reply("好吧。") == "好吧。"
+    finally:
+        logger.remove(hid)
+    hits = [x for x in seen if "发前清理" in x]
+    assert len(hits) == 1 and "动作括号" in hits[0]
+
+
+def test_time_mark_line_cut_1023():
+    """10/23 传声测试：回完晚安又另起一行“（过了 X）……”替对方写下一句：从那行起截掉"""
+    import plugins.roleplay_chat as p
+    assert p.clean_reply("嗯，晚安。\n\n（过了 X）今天做了什么事情呀，想听") == "嗯，晚安。"
+    assert p.clean_reply("好。\n（过了两小时）你在吗") == "好。"
+    assert p.clean_reply("好。\n（30 秒后）【群友】嗯") == "好。"
+    assert p.clean_reply("（过了两秒）好吧。") == "好吧。"                    # 开头的照旧当动作括号去掉
+    assert p.clean_reply("晚安。\n（过了十几秒）\n……做个好梦。") == "晚安。\n\n……做个好梦。"   # 单独一行：她自己的停顿，照旧
+    assert p.clean_reply("过了这么久才回，抱歉。") == "过了这么久才回，抱歉。"
+    assert "就别用" in p.VOICE_OFFER_HINT
+
+
+# ---------------------------------------------------------------- 10/23 重说以后整套再查一遍（最多重说一次）
+def _seq_create_1023(replies):
+    it = iter(replies)
+    base = fake_create("")
+
+    async def create(**kw):
+        r = await base(**kw)
+        if not ("response_format" in kw or kw.get("max_tokens") == 2):
+            r.choices[0].message.content = next(it)
+        return r
+    return create
+
+
+@pytest.mark.asyncio
+async def test_retry_then_full_recheck_1023(monkeypatch):
+    """记混重说出来的那一版冒出“服务器”：以前不再查出戏会原样发出去，现在第二遍删掉出戏的句子"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.story, "_fc", _fc())
+    p.client.chat.completions.create = _seq_create_1023(["有啊，前阵子就在梦回之城遇上艾姆妮西亚了",
+                                                    "有啊，在宁梦璃的梦境国度又见到了艾姆妮西亚。服务器那边也这么说。"])
+    n0 = len(CALLS)
+    bot = _PBot()
+    await p.converse(bot, pev("伊蕾娜小姐旅途中有遇到过以前的朋友吗", uid=9971, mid=7710))
+    sent = "".join(bot.sent)
+    assert "艾姆妮西亚" in sent and "服务器" not in sent
+    assert len(CALLS) - n0 == 2                       # 只重说了一次
+
+
+@pytest.mark.asyncio
+async def test_retry_at_most_once_1023(monkeypatch):
+    """出戏重说出来的那一版又提了没人说过的蘑菇：不再重说第二次，照发（只记日志）"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.story, "_fc", None)
+    p.client.chat.completions.create = _seq_create_1023(["我又不是机器人", "才不告诉你，蘑菇倒是很讨厌"])
+    n0 = len(CALLS)
+    bot = _PBot()
+    await p.converse(bot, pev("你是谁呀", uid=9972, mid=7711))
+    assert "".join(bot.sent).startswith("才不告诉你") and len(CALLS) - n0 == 2
+
+
+# ---------------------------------------------------------------- 10/23 手动 /冒泡、/搭话 不占自动的次数
+@pytest.mark.asyncio
+async def test_manual_bubble_nudge_not_counted_1023(monkeypatch):
+    import plugins.roleplay_chat as p
+    async def no_sleep(*a, **k): return None
+    monkeypatch.setattr(p.asyncio, "sleep", no_sleep)
+    p._save_interject_state({})
+    p.client.chat.completions.create = fake_create("有人在吗")
+    bot = _SendBot()
+    assert await p.bubble(bot, 556, force=True) == "有人在吗" and bot.sent == ["有人在吗"]
+    assert "bubble_count" not in p._interject_state().get("556", {})
+    _nudge_env(monkeypatch, p)
+    p.client.chat.completions.create = fake_create("在干嘛？")
+    pbot = _PBot()
+    assert await p.nudge(pbot, 9240, force=True) == "在干嘛？"
+    assert p._nudge_count.get(datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d"), {}).get(9240, 0) == 0
+    # 自动的照旧算
+    p.get_history("private_9241").append({"role": "assistant", "content": "嗯", "ts": time.time() - 900})
+    assert await p.nudge(pbot, 9241) == "在干嘛？"
+    assert p._nudge_count[datetime.now(p.peak.BEIJING).strftime("%Y-%m-%d")][9241] == 1
+
+
+# ---------------------------------------------------------------- 10/23 群里指令的说明改成私聊发给管理员
+@pytest.mark.asyncio
+async def test_admin_note_to_private_1023():
+    import plugins.roleplay_chat as p
+    from nonebot.adapters.onebot.v11 import Message, MessageSegment
+    from nonebot.internal.matcher import current_matcher
+    from nonebot.consts import PREFIX_KEY, CMD_KEY
+
+    class FakeBot:
+        config = SimpleNamespace(superusers={"999"})
+        def __init__(self, fail=False):
+            self.calls, self.fail = [], fail
+        async def call_api(self, api, **kw):
+            if self.fail:
+                raise RuntimeError("不是好友")
+            self.calls.append((api, kw))
+            return {"message_id": 7}
+
+    cmd = SimpleNamespace(state={PREFIX_KEY: {CMD_KEY: ("冒泡",)}})
+    chat = SimpleNamespace(state={})
+    note = Message("（她这会儿不想说话）")
+
+    async def run(bot, ev, m, msg=note):
+        tok = current_matcher.set(m)
+        try:
+            return await p.commands.admin_note_to_private(bot, ev, msg)
+        finally:
+            current_matcher.reset(tok)
+
+    admin_g = gev("/冒泡", True, uid=999, mid=8801)
+    bot = FakeBot()
+    assert await run(bot, admin_g, cmd) == {"message_id": 7}
+    assert bot.calls == [("send_private_msg", {"user_id": 999, "message": note})]
+    assert await run(FakeBot(), admin_g, cmd, msg="（字符串也认）") == {"message_id": 7}
+    # 不拦的：语音、不是指令（她正常聊天）、私聊里用、不是管理员、私聊发不出去
+    bot = FakeBot()
+    assert await run(bot, admin_g, cmd, msg=Message(MessageSegment.record(file="a.wav"))) is None
+    assert await run(bot, admin_g, chat) is None
+    assert await run(bot, pev("/冒泡", uid=999, mid=8802), cmd) is None
+    assert await run(bot, gev("/冒泡", True, uid=111, mid=8803), cmd) is None
+    assert bot.calls == []
+    assert await run(FakeBot(fail=True), admin_g, cmd) is None
+    # 真的 OneBot Bot.send 被包了一层
+    from nonebot.adapters.onebot.v11 import Bot as OBot
+    assert OBot.send is p.commands._bot_send
+
+
+# ---------------------------------------------------------------- 10/23 剩下的交接：C4 / B3 / B4
+def test_summary_affection_rules_moved_1023():
+    """C4：好感那一条挪到 affection.py，拼回整理提示里还在三和五中间"""
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat.affection import SUMMARY_AFFECTION_RULES
+    s = p.memory.SUMMARIZE_PROMPT
+    i = s.index(SUMMARY_AFFECTION_RULES)
+    assert s.rfind("三、", 0, i) != -1 and s.index("五、", i) > i
+    assert SUMMARY_AFFECTION_RULES.startswith("四、好感变化")
+    assert hasattr(p.ltm, "_summary_affection")
+
+
+def test_test_mode_expiry_1023(monkeypatch):
+    import plugins.roleplay_chat as p
+    c = p.commands
+    c._test_mode.clear()
+    assert not c.in_test_mode(9401)
+    c._test_mode[9401] = time.time()
+    assert c.in_test_mode(9401)
+    c._test_mode[9401] = time.time() - c.TEST_MODE_HOURS * 3600 - 1     # 6 小时后自动关
+    assert not c.in_test_mode(9401) and 9401 not in c._test_mode
+
+
+@pytest.mark.asyncio
+async def test_test_mode_skips_long_memory_1023(monkeypatch):
+    """B3：测试模式下照常回、照常进聊天记录，不交给长期记忆、不记聊天次数"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯，在。")
+    calls = []
+    monkeypatch.setattr(p.ltm, "bump_talk", lambda *a, **k: calls.append(("bump", a)))
+    sent = []
+
+    class FakeBot:
+        self_id = "123"
+        config = SimpleNamespace(superusers={"9402"}, command_start={"/"})
+        async def send(self, event, msg):
+            sent.append(str(msg))
+
+    p.commands._test_mode[9402] = time.time()
+    try:
+        await p.converse(FakeBot(), pev("在吗", uid=9402, mid=4901))
+    finally:
+        p.commands._test_mode.clear()
+    assert sent                                                       # 照常回
+    h = p.get_history("private_9402")
+    assert [x["role"] for x in h] == ["user", "assistant"]            # 照常进聊天记录
+    assert not p.ltm._pending_path("private_9402").exists()           # 不交给长期记忆
+    assert calls == []                                                # 不记聊天次数
+    # 关掉以后照旧
+    await p.converse(FakeBot(), pev("在吗", uid=9403, mid=4902))
+    assert p.ltm._pending_path("private_9403").exists() and calls
+
+
+def test_voice_say_noted_in_history_1023():
+    """B4：/语音 说 真的发出去才记进聊天记录"""
+    import plugins.roleplay_chat as p
+    ev = pev("/语音 说 你好", uid=9404, mid=4903)
+    p.voice_chat._note_said(ev, "你好", "（没发出去：NapCat 报错）")
+    assert p.get_history("private_9404") == []
+    p.voice_chat._note_said(ev, "你好", "（已交给 NapCat）")
+    h = p.get_history("private_9404")
+    assert h[-1]["role"] == "assistant" and h[-1]["content"] == "[发了语音] 你好"
+    assert not p.ltm._pending_path("private_9404").exists()           # 只进短期记忆

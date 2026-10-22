@@ -60,9 +60,13 @@ NEIGHBORS = {
     "害羞": [], "疑惑": ["震惊", "无语"], "委屈": [], "震惊": ["疑惑"], "敷衍": ["无语"],
 }
 
+# 10/23 第 2 版：第一个情绪必须是图里最主要的样子，第二个只有同样明显时才写。
+# 挑图时先挑“第一个情绪对得上”的；旧标签（第 1 版）上线后会在后台按这一版重打一遍
+LABEL_VERSION = 2
 LABEL_PROMPT = (
     "这是一张表情图，画的是伊蕾娜（灰色长发、平时戴黑色三角帽的旅行魔女）。\n"
-    "1. 判断它表达的情绪，只能从这些词里选 1～2 个最贴切的：" + "、".join(EMOTIONS) + "。\n"
+    "1. 判断它表达的情绪，只能从这些词里选：" + "、".join(EMOTIONS) + "。"
+    "第一个写这张图最主要、一眼就看得出的情绪；只有另一种情绪也同样明显时才写第二个，不确定就只写一个。\n"
     "2. 用不超过 25 个字描述她在图里的样子、动作和表情；图里有配字就写出配字原文。\n"
     "描述里不要用“动漫”“动画”“二次元”“表情包”“角色”这些词。\n"
     "严格按下面两行的格式输出，不要输出别的：\n"
@@ -138,6 +142,8 @@ class StickerStore:
         self.items: dict[str, dict] = {}      # 内容哈希 -> 记录
         self.next_no = 1
         self.last_refresh = 0.0
+        self.recent: list[str] = []           # 最近发过的几张（不分会话，存在 index.json 里，重启不丢）
+        self.recent_max = 10
         self._labeling = False
         self._refresh_lock = asyncio.Lock()
         try:
@@ -146,6 +152,7 @@ class StickerStore:
                 self.items = data.get("items", {})
                 self.next_no = int(data.get("next_no", 1))
                 self.last_refresh = float(data.get("last_refresh", 0))   # 存在文件里：重开 start.bat 不会重新拉
+                self.recent = [f for f in data.get("recent", []) if isinstance(f, str)]
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass
 
@@ -154,7 +161,7 @@ class StickerStore:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self.index_file.with_suffix(".tmp")
         tmp.write_text(json.dumps({"_v": INDEX_VERSION, "next_no": self.next_no, "last_refresh": self.last_refresh,
-                                   "items": self.items},
+                                   "recent": self.recent, "items": self.items},
                                   ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(self.index_file)
 
@@ -168,8 +175,11 @@ class StickerStore:
         return next((it for it in self.items.values() if it.get("no") == no), None)
 
     def unlabeled(self) -> list[dict]:
+        """要打标签的：还没打过的，或者是旧版提示打的（手动改过标签的不重打）。
+        重打期间旧标签照常能用，打好一张换一张"""
         return [it for it in self.items.values()
-                if not it.get("removed") and not it.get("labeled") and it.get("fails", 0) < 3]
+                if not it.get("removed") and it.get("fails", 0) < 3
+                and (not it.get("labeled") or (it.get("label_v", 1) < LABEL_VERSION and not it.get("manual")))]
 
     # ------------------------------------------------------------ 拉取收藏
     def _download_sync(self, url: str) -> bytes | None:
@@ -297,10 +307,11 @@ class StickerStore:
         if not tags:                             # 没按格式写：整段里找情绪词
             tags = parse_tags(out)
         desc = self.sanitize(desc.replace("表情包", "画像").replace("表情图", "画像"))[:30]
-        if not it.get("manual"):
+        if not it.get("manual") and (tags or not it.get("tags")):    # 重打时没认出情绪：留着旧标签
             it["tags"] = tags
-        it["desc"] = desc
+        it["desc"] = desc or it.get("desc", "")
         it["labeled"] = True
+        it["label_v"] = LABEL_VERSION
         it.pop("fails", None)
         logger.info(f"表情：{it['no']} 号 → {'、'.join(it.get('tags') or []) or '（没认出情绪）'}｜{desc}")
         return True
@@ -324,25 +335,49 @@ class StickerStore:
         return done
 
     # ------------------------------------------------------------ 挑选
-    def emotions(self, allowed: set[str] | None = None) -> list[str]:
-        """库里现在有哪些情绪（按词表顺序）"""
-        have = {t for it in self.usable() for t in it["tags"]}
-        return [e for e in EMOTIONS if e in have and (allowed is None or e in allowed)]
+    def _usable_for(self, allowed: set[str] | None) -> list[dict]:
+        """这个人能收到的表情：图上的情绪（两个标签都算）都在允许的范围里。
+        比如陌生人不给委屈：标着“委屈、无语”的那张也整张不给，不光是“想表达委屈”时不给"""
+        if allowed is None:
+            return self.usable()
+        return [it for it in self.usable() if all(t in allowed for t in it["tags"])]
 
-    def pick(self, emotion: str, avoid: set[str] | None = None, allowed: set[str] | None = None) -> dict | None:
-        """按情绪挑一张；最近发过的尽量不选；这个情绪没有就试相近的"""
+    def emotions(self, allowed: set[str] | None = None) -> list[str]:
+        """库里现在有哪些情绪（按词表顺序），只算这个人能收到的表情"""
+        have = {t for it in self._usable_for(allowed) for t in it["tags"]}
+        return [e for e in EMOTIONS if e in have]
+
+    def pick(self, emotion: str, avoid: set[str] | None = None, allowed: set[str] | None = None,
+             record: bool = True) -> dict | None:
+        """按情绪挑一张。
+        - 先挑第一个标签就是这个情绪的（图上最主要的样子），没有才用第二个标签对得上的；这个情绪完全没有就试相近的
+        - 这个人不能收的情绪：带这种标签的图整张不挑（见 _usable_for）
+        - avoid：这个会话最近发过的；self.recent：不分会话最近发过的。都尽量不选，实在没得选再放开
+        - 剩下的里面，以前发得越多的越不容易被挑中
+        - record=True：记下“发过一次”（/表情 测试 这种只是看看的，传 False）"""
         e = normalize(emotion)
         if not e:
             return None
         avoid = avoid or set()
+        base = self._usable_for(allowed)
         for cand in [e] + NEIGHBORS.get(e, []):
             if allowed is not None and cand not in allowed:
                 continue
-            pool = [it for it in self.usable() if cand in it["tags"]]
+            pool = [it for it in base if cand in it["tags"]]
             if not pool:
                 continue
-            fresh = [it for it in pool if it["file"] not in avoid]
-            return random.choice(fresh or pool)
+            primary = [it for it in pool if it["tags"][0] == cand]
+            pool = primary or pool
+            recent = set(self.recent)
+            fresh = ([it for it in pool if it["file"] not in avoid and it["file"] not in recent]
+                     or [it for it in pool if it["file"] not in avoid] or pool)
+            weights = [1.0 / (1 + it.get("used", 0)) for it in fresh]
+            it = random.choices(fresh, weights=weights)[0]
+            if record:
+                it["used"] = it.get("used", 0) + 1
+                self.recent = (self.recent + [it["file"]])[-max(self.recent_max, 0):] if self.recent_max > 0 else []
+                self.save()
+            return it
         return None
 
     def segment(self, it: dict, sub_type: int = 1) -> MessageSegment:
@@ -386,11 +421,14 @@ class StickerStore:
                 state = "（已禁用）"
             elif not it.get("labeled"):
                 state = "（还没打标签）"
+            elif it.get("label_v", 1) < LABEL_VERSION and not it.get("manual"):
+                state = "（旧标签，等重打）"
             else:
                 state = ""
             tags = "、".join(it.get("tags") or []) or "无情绪"
             manual = "✎" if it.get("manual") else ""
-            lines.append(f"{it['no']}. {tags}{manual}｜{it.get('desc') or ''}{state}")
+            used = f"｜发过 {it['used']} 次" if it.get("used") else ""
+            lines.append(f"{it['no']}. {tags}{manual}｜{it.get('desc') or ''}{used}{state}")
         return lines
 
     def summary(self) -> str:
@@ -400,10 +438,17 @@ class StickerStore:
                 counts[t] += 1
         have = "、".join(f"{e}{n}" for e, n in counts.items() if n) or "无"
         missing = "、".join(e for e, n in counts.items() if not n)
+        first = {e: 0 for e in EMOTIONS}          # 第一个标签（图上最主要的样子）是这个情绪的张数
+        for it in self.usable():
+            first[it["tags"][0]] += 1
+        have = "、".join(f"{e}{n}（主{first[e]}）" for e, n in counts.items() if n) or "无"
         s = f"可用 {len(self.usable())} 张｜各情绪：{have}"
         if missing:
             s += f"｜没有：{missing}"
-        pending = len(self.unlabeled())
-        if pending:
-            s += f"｜待打标签 {pending} 张"
+        todo = self.unlabeled()
+        new = sum(1 for it in todo if not it.get("labeled"))
+        if new:
+            s += f"｜待打标签 {new} 张"
+        if len(todo) - new:
+            s += f"｜旧标签待重打 {len(todo) - new} 张"
         return s

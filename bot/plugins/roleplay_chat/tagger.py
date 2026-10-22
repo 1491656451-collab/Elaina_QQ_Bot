@@ -7,6 +7,8 @@
   下载期间和下载失败时，识图照常工作，只是认不出角色。
 - 也可以手动下载 model.onnx 和 selected_tags.csv，放进 data/models/<模型名>/ 文件夹。
 - 依赖 onnxruntime、numpy、Pillow；没装的话只会在日志里提示一次，不影响机器人其他功能。
+- 内存记录（10/23）：每认一张图看一眼机器人占的内存，创了当天新高就在日志里记一行；每天 05:00 再汇总一行
+  前一天的识图张数和内存峰值。只在 Linux（服务器）上记，Windows 上什么都不做。见 _MemWatch。
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import io
 import threading
 import time
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from nonebot import logger
@@ -26,6 +29,109 @@ CHARACTER = 4       # selected_tags.csv 里 category=4 表示角色标签
 SELF_TAG = "elaina_(majo_no_tabitabi)"
 MAX_PIXELS = 16_000_000    # 超过约 1600 万像素（比如 4000×4000）的图不识别：解码一张就要几百 MB 内存
 MIN_MODEL_BYTES = 100 * 1024 * 1024   # v3 系列模型都在 300 MB 以上，比这小肯定是没下完整
+
+
+DAY_START_HOUR = 5          # 和花费账本一样，凌晨 5 点算新的一天
+MEM_LOG_STEP_MB = 20        # 当天新高比上次记的多出这么多才再记一行，免得刷屏
+
+
+def _proc_status_mb(field: str) -> int | None:
+    """读 /proc/self/status 里的 VmRSS（现在占的物理内存）或 VmHWM（启动以来最高）；不是 Linux 就返回 None"""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith(field + ":"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _cgroup_mb() -> dict[str, int | None]:
+    """机器人这个服务（systemd 的 cgroup）整体占的内存：当前、本次启动以来峰值、上限。读不到的项是 None"""
+    out: dict[str, int | None] = {"current": None, "peak": None, "max": None}
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as f:
+            line = next((x for x in f if x.startswith("0::")), "")
+        base = Path("/sys/fs/cgroup") / line.strip()[3:].lstrip("/")
+    except OSError:
+        return out
+    for key in out:
+        try:
+            v = (base / f"memory.{key}").read_text().strip()
+            out[key] = None if v == "max" else int(v) // (1024 * 1024)
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def _day_of(now: datetime) -> str:
+    return (now - timedelta(hours=DAY_START_HOUR)).strftime("%Y-%m-%d")
+
+
+class _MemWatch:
+    """识图时的内存记录：每认一张图调一次 sample()；每天 05:00 由 daily_loop() 汇总前一天"""
+
+    def __init__(self):
+        self.day = _day_of(datetime.now())
+        self.count = 0
+        self.high: int | None = None          # 当天识图后看到的进程内存最高值（MB）
+        self.logged: int | None = None        # 当天已经记过的最高值
+
+    def _roll(self, now: datetime) -> None:
+        d = _day_of(now)
+        if d != self.day:
+            self.summary()
+            self.day, self.count, self.high, self.logged = d, 0, None, None
+
+    def _service_text(self) -> str:
+        cg = _cgroup_mb()
+        parts = []
+        if cg["current"] is not None:
+            parts.append(f"服务整体现在 {cg['current']} MB")
+        if cg["peak"] is not None:
+            parts.append(f"本次启动以来最高 {cg['peak']} MB")
+        if cg["max"] is not None:
+            parts.append(f"上限 {cg['max']} MB")
+        return "，".join(parts)
+
+    def sample(self) -> None:
+        rss = _proc_status_mb("VmRSS")
+        if rss is None:                       # Windows 等：不记
+            return
+        self._roll(datetime.now())
+        self.count += 1
+        if self.high is None or rss > self.high:
+            self.high = rss
+        if self.logged is None or rss >= self.logged + MEM_LOG_STEP_MB:
+            self.logged = rss
+            svc = self._service_text()
+            logger.info(f"角色识别：内存今天新高，机器人进程 {rss} MB（今天第 {self.count} 张图）"
+                        + (f"；{svc}" if svc else ""))
+
+    def summary(self) -> None:
+        if _proc_status_mb("VmRSS") is None:
+            return
+        hwm = _proc_status_mb("VmHWM")
+        svc = self._service_text()
+        high = f"{self.high} MB" if self.high is not None else "—"
+        logger.info(f"角色识别：{self.day} 识图 {self.count} 张，识图时机器人进程最高 {high}"
+                    + (f"，进程启动以来最高 {hwm} MB" if hwm is not None else "")
+                    + (f"；{svc}" if svc else ""))
+
+    async def daily_loop(self) -> None:
+        if _proc_status_mb("VmRSS") is None:
+            return
+        while True:
+            now = datetime.now()
+            nxt = now.replace(hour=DAY_START_HOUR, minute=0, second=5, microsecond=0)
+            if nxt <= now:
+                nxt += timedelta(days=1)
+            await asyncio.sleep((nxt - now).total_seconds())
+            try:
+                self._roll(datetime.now())
+            except Exception as e:  # noqa: BLE001   记录出错不能影响识图
+                logger.warning(f"角色识别：内存汇总出错：{e}")
 
 
 class ImageTooLarge(Exception):
@@ -52,6 +158,8 @@ class Tagger:
         self._self_idx: int | None = None          # 伊蕾娜这个标签在输出里的下标
         self._lock = threading.Lock()
         self._task: asyncio.Task | None = None
+        self._mem_task: asyncio.Task | None = None
+        self.mem = _MemWatch()
         self.status = "未加载"
 
     # ------------------------------------------------------------ 加载
@@ -63,6 +171,8 @@ class Tagger:
         """机器人启动时调用：在后台准备模型（需要时先下载），不阻塞启动"""
         if self._task is None:
             self._task = asyncio.create_task(asyncio.to_thread(self._prepare))
+        if self._mem_task is None:
+            self._mem_task = asyncio.create_task(self.mem.daily_loop())
 
     def _prepare(self) -> None:
         try:
@@ -221,6 +331,10 @@ class Tagger:
         with self._lock:                     # 一次只处理一张（预处理也在锁里），避免同时占满 CPU 和内存
             x = self._preprocess(raw)
             probs = self._session.run(None, {self._input: x})[0][0]
+            try:
+                self.mem.sample()             # 刚认完一张图，看一眼内存
+            except Exception as e:  # noqa: BLE001   记录出错不能影响识图
+                logger.warning(f"角色识别：内存记录出错：{e}")
         found = [(name, float(probs[i])) for i, name in self._chars if probs[i] >= self.threshold]
         self_score = float(probs[self._self_idx]) if self._self_idx is not None else 0.0
         return sorted(found, key=lambda t: -t[1])[:3], self_score

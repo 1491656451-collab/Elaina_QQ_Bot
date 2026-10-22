@@ -99,6 +99,7 @@ async def _cookie() -> str:
 
 
 qz = Qzone(_cookie, DATA / "qzone.log")
+qz.CTX_TTL = cfg.qzone_cookie_max_minutes * 60      # 放久了先换新的，别拿过期凭证去碰（10/23）
 gallery = Gallery(BOT_DIR / cfg.qzone_image_dir, DATA, client, cfg.vision_model, tagger)
 
 
@@ -526,12 +527,12 @@ def _rounds_with(me: int, root: Comment, uin: int) -> int:
     return n
 
 
-COMMENT_PROMPT = """【这是你旅行日记（QQ 空间说说）下的评论】你那天写的是：「{post}」（配图是你自己：{desc}）
+COMMENT_PROMPT = """【这是你旅行日记（QQ 空间说说）下的评论】你{when}写的是：「{post}」（配图是你自己：{desc}）
 这一楼到目前为止：
 {thread}
 现在「{nick}」对你说了最后那句。像回评论一样回一句：一两句话，不要换行。"""
 
-ELSEWHERE_COMMENT_PROMPT = """【这是「{owner}」的 QQ 空间说说下的评论，有人在跟你说话】那条说说写的是：「{post}」{pic}
+ELSEWHERE_COMMENT_PROMPT = """【这是「{owner}」的 QQ 空间说说下的评论，有人在跟你说话】那条说说是{when}发的，写的是：「{post}」{pic}
 这一楼到目前为止：
 {thread}
 现在「{nick}」对你说了最后那句。像回评论一样回一句：一两句话，不要换行。"""
@@ -543,11 +544,32 @@ FRIEND_POST_PROMPT = """【你在刷 QQ 空间，刷到了「{nick}」刚发的�
 这不是在跟你说话，是你自己看到的。你顺手在下面评论一句：一两句话，不要换行，不要 @ 人，别像在回复谁找你；不想说的话不用硬凑。"""
 
 
+def _ago(ts: float, now: float | None = None) -> str:
+    """多久以前，说成人话：刚才 / 20 分钟前 / 3 小时前 / 昨天晚上 / 3 天前（10 月 18 日）。
+    10/23 加：回评论时她不知道说说和评论是哪天的，前一晚写的说成“前几天”，当天的说成“昨天”"""
+    if not ts:
+        return "不记得什么时候"
+    now = now or time.time()
+    t, n = datetime.fromtimestamp(ts, BJ), datetime.fromtimestamp(now, BJ)
+    sec = max(0, now - ts)
+    days = (n.date() - t.date()).days
+    part = "凌晨" if t.hour < 6 else "早上" if t.hour < 11 else "中午" if t.hour < 13 else "下午" if t.hour < 18 else "晚上"
+    if sec < 10 * 60:
+        return "刚才"
+    if days == 0:
+        return f"{int(sec // 60)} 分钟前" if sec < 3600 else f"{int(sec // 3600)} 小时前（今天{part}）"
+    if days == 1:
+        return f"昨天{part}"
+    if days == 2:
+        return f"前天{part}"
+    return f"{days} 天前（{t.month} 月 {t.day} 日）"
+
+
 def _thread_text(me: int, root: Comment, upto: Comment) -> str:
     lines = []
     for c in [root] + root.replies:
         who = "你" if c.uin == me else f"【{c.nick or c.uin}】"
-        lines.append(f"{who}：{c.text[:60]}")
+        lines.append(f"（{_ago(c.time)}）{who}：{c.text[:60]}")
         if c is upto:
             break
     return "\n".join(lines[-8:])
@@ -645,13 +667,16 @@ async def reply_comment(me: int, post: dict, root: Comment, item: Comment | None
     nick = c.nick or str(c.uin)
     if owner and owner != me:
         scene = ELSEWHERE_COMMENT_PROMPT.format(owner=owner_nick or owner, post=plain_text(str(post.get("content") or ""))[:200],
-                                               pic=pic, thread=_thread_text(me, root, c), nick=nick)
+                                               pic=pic, thread=_thread_text(me, root, c), nick=nick,
+                                               when=_ago(int(post.get("created_time") or 0)))
         where = f"在「{owner_nick or owner}」的说说下对你说"
     else:
         known = next((p for p in _read(POSTS_FILE, []) if p["tid"] == post.get("tid")), None)
         post_text = (known or {}).get("text") or str(post.get("content") or "")[:200]
         desc = (known or {}).get("desc") or "（记不清了）"
-        scene = COMMENT_PROMPT.format(post=post_text, desc=desc, thread=_thread_text(me, root, c), nick=nick)
+        written = (known or {}).get("ts") or int(post.get("created_time") or 0)
+        scene = COMMENT_PROMPT.format(post=post_text, desc=desc, thread=_thread_text(me, root, c), nick=nick,
+                                      when=_ago(written))
         where = "在你的日记下评论"
     async with _locks[f"qzone_{c.uin}"]:
         reply = await _respond(c.uin, nick, text, scene)

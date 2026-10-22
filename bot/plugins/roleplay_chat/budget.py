@@ -7,6 +7,8 @@
   这样聊天停下时，最后 reserve 这笔一定还在，只给记忆整理、20:00 日结和写说说用（9/30 改：以前只算聊天自己花的，
   后台白天花超了预留，聊天就会一直说到 total 花光，最后几段的记忆和当晚的说说都没钱）。
 - 每个人、每个群各自最多占多少（防止一个人刷屏把一天的钱花光）。
+- 按模型算价（10/22）：DeepSeek 每次返回的结果里带着实际用的模型名（resp.model），按它挑价格表——
+  名字里带 pro 的按 pro 价（MODEL_PRICES），其余按 flash 价（price）。各处调用不用改；拿不到模型名时按 flash 记。
 - 账记在 data/usage/日期.json，重启不清零。
 """
 from __future__ import annotations
@@ -27,6 +29,13 @@ KIND_NAMES = {
     "chat": "回消息", "judge": "判断是不是在跟她说话", "verify": "核对讲的往事", "vision": "看图", "interject": "插话", "bubble": "冒泡",
     "letter": "写信", "nudge": "冷场搭话", "qzone_reply": "回空间评论", "qzone_friend": "评论好友说说", "voice_ja": "把语音译成日语",
     "memory": "长期记忆整理", "memory_verify": "长期记忆核对", "memory_nightly": "睡前整理记忆", "qzone_post": "写说说", "gallery": "给说说配图写描述", "sticker": "给表情写描述",
+}
+
+# 除了 flash 以外的模型的价格（元 / 百万 token，空闲价；高峰时段一样按 peak_multiplier 倍）。
+# 键是模型名里的一段，不分大小写；10/22 查的 DeepSeek 官方价：deepseek-v4-pro 命中 0.15、没命中 4.5、输出 13.5（是 flash 的 7.5 / 4.5 / 3.4 倍）
+# DeepSeek 调价时改这里（flash 的价在 config.py 的 BUDGET_PRICE）
+MODEL_PRICES: dict[str, dict[str, float]] = {
+    "pro": {"hit": 0.15, "miss": 4.5, "out": 13.5},
 }
 
 # 这次调用是替谁花的（在处理某个人的消息时设置；看图、判断这些都算到这个人 / 这个群头上）
@@ -57,7 +66,7 @@ class Budget:
     def __init__(self, root: Path, *, enabled: bool = True, total: float = 1.5, reserve: float = 0.15,
                  user_share: float = 0.375, group_share: float = 0.75, reset_hour: int = 5,
                  price: dict | None = None, peak_multiplier: float = 2.0,
-                 peak_ranges: str = "09:00-12:00,14:00-18:00", holidays=()):
+                 peak_ranges: str = "09:00-12:00,14:00-18:00", holidays=(), model_prices: dict | None = None):
         self.root = Path(root)
         self.enabled = enabled
         self.total = float(total)
@@ -65,7 +74,8 @@ class Budget:
         self.user_share = float(user_share)
         self.group_share = float(group_share)
         self.reset_hour = int(reset_hour)
-        self.price = {"hit": 0.02, "miss": 1.0, "out": 4.0, **(price or {})}     # 元 / 百万 token（空闲价）
+        self.price = {"hit": 0.02, "miss": 1.0, "out": 4.0, **(price or {})}     # 元 / 百万 token（空闲价）：flash
+        self.model_prices = {str(k).lower(): {**self.price, **v} for k, v in (MODEL_PRICES if model_prices is None else model_prices).items()}
         self.peak_multiplier = float(peak_multiplier)
         self.peak_ranges = peak_ranges
         self.holidays = list(holidays)
@@ -117,25 +127,39 @@ class Budget:
         self._day, self._data = None, {}
 
     # ------------------------------------------------------------------ 记账
-    def cost_of(self, hit: int, miss: int, out: int, now: datetime | None = None) -> float:
+    def price_for(self, model: str | None) -> tuple[str | None, dict]:
+        """按模型名挑价格表：返回（价格表的名字，价格）；名字里带 MODEL_PRICES 的某个键就用那张，否则（包括拿不到名字）按 flash"""
+        name = str(model or "").lower()
+        for key, p in self.model_prices.items():
+            if key and key in name:
+                return key, p
+        return None, self.price
+
+    def cost_of(self, hit: int, miss: int, out: int, now: datetime | None = None, model: str | None = None) -> float:
         k = self.peak_multiplier if peak.is_peak(self.peak_ranges, self.holidays, now) else 1.0
-        p = self.price
+        p = self.price_for(model)[1]
         return (hit * p["hit"] + miss * p["miss"] + out * p["out"]) * k / 1e6
 
-    def track(self, resp, kind: str, user: int | None = None, group: int | None = None) -> float:
-        """记一次调用；返回这次花了多少元。拿不到用量（比如接口没返回）只记次数"""
+    def track(self, resp, kind: str, user: int | None = None, group: int | None = None, model: str | None = None) -> float:
+        """记一次调用；返回这次花了多少元。拿不到用量（比如接口没返回）只记次数。
+        model：一般不用传，按 resp.model（DeepSeek 返回的实际模型名）算价；返回里没有模型名时才用它"""
         d = self.today()
         if user is None and group is None:
             user, group = actor.get()
         nums = _usage_numbers(getattr(resp, "usage", None) if resp is not None else None)
         k = d["kinds"].setdefault(kind, {"cost": 0.0, "calls": 0, "hit": 0, "miss": 0, "out": 0})
         k["calls"] += 1
+        got = getattr(resp, "model", None) if resp is not None else None
+        model = got if isinstance(got, str) and got else model
+        tier = self.price_for(model)[0]
+        if tier:                                      # 按 pro 这类价格记的：单独记次数，/花费 里看得到
+            k[f"{tier}_calls"] = int(k.get(f"{tier}_calls", 0)) + 1
         if nums is None:
             d["unknown_calls"] = int(d.get("unknown_calls", 0)) + 1
             self._save()
             return 0.0
         hit, miss, out = nums
-        cost = self.cost_of(hit, miss, out)
+        cost = self.cost_of(hit, miss, out, model=model)
         k["cost"] += cost
         k["hit"] += hit
         k["miss"] += miss
@@ -201,8 +225,10 @@ class Budget:
                     if self.enabled else "（没开限额）")]
         lines.append(f"聊天类 {d['chat']:.3f} 元，后台类 {d['total'] - d['chat']:.3f} 元")
         for kind, k in sorted(d["kinds"].items(), key=lambda x: -x[1]["cost"]):
+            special = "、".join(f"{t} 价 {k[f'{t}_calls']} 次" for t in self.model_prices if k.get(f"{t}_calls"))
             lines.append(f"· {KIND_NAMES.get(kind, kind)}：{k['cost']:.3f} 元，{k['calls']} 次"
-                         f"（输入 {k['hit'] + k['miss']} token，命中缓存 {k['hit']}；输出 {k['out']}）")
+                         + (f"（其中按 {special}）" if special else "")
+                         + f"（输入 {k['hit'] + k['miss']} token，命中缓存 {k['hit']}；输出 {k['out']}）")
         if d.get("unknown_calls"):
             lines.append(f"· 有 {d['unknown_calls']} 次调用接口没返回用量，没算钱")
         top_u = sorted(d["users"].items(), key=lambda x: -x[1])[:5]
@@ -230,12 +256,12 @@ def get() -> Budget | None:
     return _budget
 
 
-def track(resp, kind: str, user: int | None = None, group: int | None = None) -> float:
-    """各处调完模型都调这个；没初始化（单独测某个模块时）就什么都不做"""
+def track(resp, kind: str, user: int | None = None, group: int | None = None, model: str | None = None) -> float:
+    """各处调完模型都调这个；没初始化（单独测某个模块时）就什么都不做。价格按 resp.model 挑（见 MODEL_PRICES）"""
     if _budget is None:
         return 0.0
     try:
-        return _budget.track(resp, kind, user, group)
+        return _budget.track(resp, kind, user, group, model=model)
     except Exception as e:  # noqa: BLE001   记账出错不能影响回复
         logger.warning(f"花费：记账出错：{e}")
         return 0.0

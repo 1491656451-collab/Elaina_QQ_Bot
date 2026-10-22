@@ -15,8 +15,9 @@ from nonebot.rule import to_me
 
 from . import budget, voice
 from .core import BOT_DIR, cfg, client, tier_value
-from .prompts import VOICE_OFFER_HINT, VOICE_REQUEST_HINT, VOICE_REQUEST_TIER_HINT
+from .prompts import VOICE_OFFER_HINT, VOICE_REQUEST_HINT, VOICE_REQUEST_TIER_HINT, VOICE_UNAVAILABLE_HINT
 from .textout import _VOICE_MARK_RE
+from .history import get_history, save_history, session_key
 
 
 # 声音在你电脑上合成（voice_service），连不上就当没有这回事。三种情况会发：
@@ -55,6 +56,10 @@ def tts_ready() -> bool:
 def voice_roll(fam: str, is_group: bool, text: str) -> tuple[bool, str]:
     """这一轮的语音打算。返回（抽中了随机语音, 给她的提示）"""
     if not tts_ready() or _voice_count[voice_day()] >= cfg.voice_daily_max:
+        # 10/22：语音配置了、这一轮却用不了（电脑上的服务没开 / 今天的条数用完）：告诉她这一轮传不了，免得嘴上答应却发不出声音。
+        # 每轮都给（用户定）；不是“由她判断”的模式时，照旧认出关键词才给；讨厌的人不给。见《交接-传声提示-语音这边-1022.md》
+        if cfg.voice_enabled and tts.configured and fam != "disliked" and (cfg.voice_request_by_model or VOICE_REQUEST_RE.search(text)):
+            return False, VOICE_UNAVAILABLE_HINT
         return False, ""
     p = (cfg.voice_prob_group if is_group else cfg.voice_prob_private) * tier_value(cfg.voice_tier_multiplier, fam, 1.0)
     if cfg.voice_request_by_model:      # 每轮都告诉她可以用，对方在不在要由她判断；抽签照旧
@@ -170,9 +175,12 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         text = arg.extract_plain_text().strip()[len(op):].strip()
         if not text:
             await voice_cmd.finish("用法：/语音 说 你又在胡说什么呀，我可是很忙的。")
+        said = text                     # 10/23：念出去以后把这句（中文原话）记进这个会话的聊天记录，她知道自己说过
         clip = interjections.match(text)
         if clip:
-            await voice_cmd.finish(await _send_voice(bot, event, clip.read_bytes(), f"原声语气词 {clip.name}"))
+            result = await _send_voice(bot, event, clip.read_bytes(), f"原声语气词 {clip.name}")
+            _note_said(event, said, result)
+            await voice_cmd.finish(result)
         lang, ja_note = "zh", ""
         if voice.has_kana(text):
             lang = "ja"
@@ -185,7 +193,9 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         if data is None:
             await voice_cmd.finish(f"（没念成：{note}）")
         logger.info(f"语音：/语音 说「{text}」{note}")
-        await voice_cmd.finish((await _send_voice(bot, event, data, "合成语音")) + f"（{ja_note}{note}）")
+        result = await _send_voice(bot, event, data, "合成语音")
+        _note_said(event, said, result)
+        await voice_cmd.finish(result + f"（{ja_note}{note}）")
     if op in ("列表", "list"):
         names = voice_files.list_test()
         if not names:
@@ -196,6 +206,17 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
         await voice_cmd.finish(f"（data/voice/test/ 里没找到“{' '.join(words)}”，或者对上了好几个）\n" + VOICE_USAGE)
     await voice_cmd.finish(await _send_voice(bot, event, path.read_bytes(), path.name))
 
+
+
+def _note_said(event: MessageEvent, said: str, result: str) -> None:
+    """/语音 说 真的发出去了：在这个会话的聊天记录里记一条“[发了语音] 原话”（10/23，用户定的；《测试指令会不会留下错误记忆》第 5 节第 4 条）。
+    以前不记，接着问“刚才那句……”她接不上。只进短期记忆，不交给长期记忆整理"""
+    if "已交给 NapCat" not in result:
+        return
+    key = session_key(event)
+    get_history(key).append({"role": "assistant", "content": "[发了语音] " + said, "ts": time.time()})
+    save_history(key)
+    logger.info(f"语音：/语音 说 的这句记进了 {key} 的聊天记录：{said[:30]}")
 
 
 async def _send_voice(bot: Bot, event: MessageEvent, data: bytes, label: str) -> str:

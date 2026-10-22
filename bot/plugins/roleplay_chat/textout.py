@@ -19,21 +19,33 @@ _PREFIX_RE = re.compile(r"^\s*(?:【[^】]{1,40}】|[^\s【】]{1,16}\s*→\s*[^
 # 语音标记（10/20）：她可能写「【传声】」（照着提示的标题写）、「[发了语音] ……」（照着聊天记录写）、
 # 「（发了一段语音）」「（用传声魔法）」这类旁白，或者把「[传声]」写在第二行。这些都不能当文字发出去：
 # 一律去掉；聊天时（keep_sticker）统一换成开头的「[传声]」，算她想用语音（只有本轮给了【传声】提示才真的念）
-_VOICE_TAG_ANY_RE = re.compile(r"[\[【［]\s*(?:传声|发了?一?[段条句]?语音)\s*[\]】］]\s*")
+# 10/22：外面可能还套一层「」『』（照人设里“写「[传声]」”的写法原样抄），一起去掉，免得剩下空的「」
+_VOICE_TAG_ANY_RE = re.compile(r"(?:[「『]\s*)?[\[【［]\s*(?:传声|发了?一?[段条句]?语音)\s*[\]】］](?:\s*[」』])?\s*")
+# 10/22 23:13 测试里写成了「传声」（只有直角引号、没有方括号）。只认行首的：句子中间的“叫「传声」的魔法”是正常说话，不动
+_VOICE_CORNER_RE = re.compile(r"(?m)^[ \t]*[「『]\s*传声\s*[」』][ \t]*")
 
 
 _VOICE_PAREN_RE = re.compile(r"[（(]\s*(?:发了?|用了?|传了?|开始)?\s*(?:一[段条句]|个)?\s*(?:语音|传声(?:魔法)?)\s*(?:消息|中|过去)?\s*[）)]\s*")
 
+# 10/23（语音 agent 同意，用户定的）：只有「[传声]」这类写法算她想发语音；“[发了语音] ……”“（发了一段语音）”“（用传声魔法）”
+# 是照着聊天记录抄的格式或旁白，只去掉、照常发文字。依据：回归_1023_0139 里这种写法 8 条，全在“刚发过语音”的两道题（V04、V14），
+# 大多是在推掉或吐槽（“够了吧，剩下的留到我下次心情好的时候”），当成想发就成了用声音说“不给”；10/22 的 320 条里答应时一次都没这么写
+_VOICE_WISH_TAG_RE = re.compile(r"(?:[「『]\s*)?[\[【［]\s*传声\s*[\]】］](?:\s*[」』])?\s*")
+_VOICE_NARR_TAG_RE = re.compile(r"(?:[「『]\s*)?[\[【［]\s*发了?一?[段条句]?语音\s*[\]】］](?:\s*[」』])?\s*")
+
 
 def take_voice_marks(text: str) -> tuple[str, bool]:
-    """去掉回复里所有的语音标记，返回（文字, 她想用语音）；开头的「[语音]」也算"""
+    """去掉回复里所有的语音标记，返回（文字, 她想用语音）。
+    算想发的：「[传声]」【传声】［传声］，开头的「传声」『传声』；只去掉、不算想发的：“[发了语音]”“（发了一段语音）”“（用传声魔法）”、开头的「[语音]」"""
     wish = False
     m = _VOICE_MARK_RE.match(text)
     if m:
         text, wish = text[m.end():], True
-    for rx in (_VOICE_TAG_ANY_RE, _VOICE_PAREN_RE):
+    for rx in (_VOICE_WISH_TAG_RE, _VOICE_CORNER_RE):
         text, n = rx.subn("", text)
         wish = wish or n > 0
+    for rx in (_VOICE_NARR_TAG_RE, _VOICE_PAREN_RE):
+        text = rx.sub("", text)
     return text.strip(), wish
 
 
@@ -55,27 +67,50 @@ def _unwrap_paren_line(m: "re.Match") -> str:
 _PSEUDO_TAG_RE = re.compile(r"[\[［](?:CQ:)?[A-Za-z_]{1,16}\s*[=:：][^\]］\n]{0,80}[\]］]")
 
 
+# 10/23 传声测试：她回完“嗯，晚安。”又另起一行写“（过了 X）今天做了什么事情呀，想听”——照着聊天记录里的时间标记
+# （聊天规则里写着“「（过了 X）」表示中间隔了这么久”）替对方写了下一句。另起一行、用这种时间标记开头的，从那行起全截掉。
+# 群里旁听记录的“（N 秒后）”同理。第一行不管（那是她整条回复的开头，交给下面的动作括号处理）
+# 只截“标记后面同一行还接着写话”的（聊天记录里对方的话就是这个格式）；单独一行的“（过了十几秒）”是她自己的停顿，照旧当动作括号去掉（10/20）
+_TIME_MARK_LINE_RE = re.compile(r"\n[ \t]*[（(]\s*(?:过了|隔了|\d+\s*(?:秒|分钟?|小时|天)后)[^（）()\n]{0,12}[）)][ \t]*(?=[^\s])")
+
+
 def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) -> str:
-    text, voice_wish = take_voice_marks(_PSEUDO_TAG_RE.sub("", text.strip()))
-    text = _PREFIX_RE.sub("", text)
-    text = re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text)     # 重名记号“小明#2”：她说出来时去掉
-    text = _META_PAREN_RE.sub("", text).strip()                      # 抄进来的提示说明
+    done: list[str] = []                  # 10/23：这次清理改了什么，最后汇总写一行日志（没改就不写）
+
+    def step(name: str, before: str, after: str) -> str:
+        if after != before:
+            done.append(name)
+        return after
+
+    raw = text.strip()
+    m = _TIME_MARK_LINE_RE.search(raw)
+    text = step("替对方续写（时间标记）", raw, raw[:m.start()].strip() if m else raw)
+    text = step("伪标签", text, _PSEUDO_TAG_RE.sub("", text))
+    before = text
+    text, voice_wish = take_voice_marks(text)
+    if voice_wish or text != before.strip():
+        done.append("语音标记")
+    text = step("开头前缀", text, _PREFIX_RE.sub("", text))
+    text = step("重名记号", text, re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text))     # 重名记号“小明#2”：她说出来时去掉
+    text = step("提示抄进括号", text, _META_PAREN_RE.sub("", text).strip())                   # 抄进来的提示说明
     no_action = re.sub(r"\n{3,}", "\n\n", _ACTION_PAREN_RE.sub("", text)).strip()
     if no_action:                         # 括号里写的纯动作（“（过了两秒）”“（打了个哈欠）”）：去掉；整条只有动作就不动
-        text = no_action
-    text = _PAREN_LINE_RE.sub(_unwrap_paren_line, text)   # 整行写在括号里、其实是在问对方的话：去掉括号照常说
+        text = step("动作括号", text, no_action)
+    text = step("整句括号", text, _PAREN_LINE_RE.sub(_unwrap_paren_line, text))   # 整行写在括号里、其实是在问对方的话：去掉括号照常说
     if not keep_sticker:                  # 写信、空间评论这些地方发不了表情：模型写了表情标记就去掉
-        text = _FAKE_MEDIA_RE.sub("", _STICKER_RE.sub("", text)).strip()
+        text = step("表情/占位符", text, _FAKE_MEDIA_RE.sub("", _STICKER_RE.sub("", text)).strip())
     if len(text) >= 2 and text[0] in "“\"" and text[-1] in "”\"":
-        text = text[1:-1]
+        text = step("整句引号", text, text[1:-1])
     if truncated:
         # 回复被长度上限截断了：切到最后一个完整句子，免得发出半句话
         cut = max(text.rfind(c) for c in "。！？!?…~）」")
         if cut >= len(text) // 3:
-            text = text[: cut + 1]
+            text = step("截断补句", text, text[: cut + 1])
     text = text.strip()
     if keep_sticker and voice_wish and text:
         text = "[传声]" + text            # 交给 split_voice_mark 去认
+    if done:
+        logger.info(f"发前清理：{'、'.join(done)}（{raw[:30]!r} → {text[:30]!r}）")
     return text
 
 
@@ -111,7 +146,10 @@ _META_PAREN_RE = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提
 
 
 # 调模型时一写到“【”就停：她的回复里本来不该有“【名字】”，写出来多半是开始照着聊天记录的格式替别人说话了（10/01）
-CHAT_STOP = ["【"]
+# 10/23 改成“另起一行的【”才停：以前她要是照着每轮提示的标题用“【传声】”开头，第一个字就停住，整条回复是空的，
+# 对方要语音时她一声不吭（《发前清理清单》5.1）。开头的“【传声】”“【名字】”交给 clean_reply 去掉；
+# 说完另起一行替对方说“【名字】……”照样停住；一行中间冒出来的“【名字】”由 cut_derailed 从那句起截掉
+CHAT_STOP = ["\n【"]
 
 
 _LATIN_RE = re.compile(r"[A-Za-z]{2,}")
@@ -124,17 +162,28 @@ def cut_derailed(reply: str, context: str, names=()) -> str:
     """模型写着写着开始替对方说话：9/30 22:44 她回完“先去看看书吧”，接着写了“AAA记忆回收 / 好 谢谢”——
     “AAA记忆回收”是对方的群昵称，后面是替对方写的下一句。从这一句起全部截掉。认两种：
     ① 照聊天记录的格式另起一段：“名字：……”“【名字】……”（单独叫一声对方的名字不算，那是她记得对方；10/01 用户说可以）；
-    ② 冒出对方和最近聊天都没出现过的外文（她只说中文；对方的名字里有字母的不算）"""
+    ② 冒出对方和最近聊天都没出现过的外文（她只说中文；对方的名字里有字母的不算）。
+    10/23：外文那句要是正常的中文句子里夹了个外文词（中文 6 个字以上，比如“这趟还挺 worthwhile 的”），只删这一句、后面照留；
+    中文很少的（“AAA记忆回收”这种像名字的一行）还是从这句起全截掉，后面多半是在替人说话"""
     names = [n.strip() for n in names if n and len(n.strip()) >= 2]
     seen = {w.lower() for w in _LATIN_RE.findall(context + "\n" + "\n".join(names))} | _LATIN_OK | \
         {w.lower() for n in cfg.smart_names for w in _LATIN_RE.findall(n)}
     parts = re.split(r"(?<=[。！？!?…~\n])", reply)
+    keep = []
     for i, part in enumerate(parts):
         head = part.strip()
         speaker = any(re.match(rf"^[【\[［]{re.escape(n)}[】\]］]|^{re.escape(n)}\s*[:：]", head) for n in names)
-        if speaker or any(w.lower() not in seen for w in _LATIN_RE.findall(part)):
-            return "".join(parts[:i]).strip()
-    return reply
+        # 10/23：停止符改成“另起一行的【”以后，同一行里句子后面冒出的“【群友 → 你】……”不会再被停住，在这里截掉
+        speaker = speaker or (i > 0 and bool(re.match(r"^【[^】\n]{1,40}】", head)))
+        if speaker:
+            return "".join(keep).strip()
+        if any(w.lower() not in seen for w in _LATIN_RE.findall(part)):
+            if len(re.findall(r"[\u4e00-\u9fff]", part)) < 6:
+                return "".join(keep).strip()      # 像名字的一行：后面多半是在替人说话，全截掉
+            logger.info(f"回复里夹了没人说过的外文，只删这一句：{head[:40]}")
+            continue                              # 正常句子里夹了个外文词：只删这一句
+        keep.append(part)
+    return reply if len(keep) == len(parts) else "".join(keep).strip()
 
 
 _ONE_CHAR_OK = set("嗯哦喔噢蛤啊诶欸好行在早对是不哈呵嘿切哼咦唔呃额嗷喵噗")
@@ -192,4 +241,5 @@ def split_sticker(reply: str) -> tuple[str, str | None]:
     return text, (found[-1].strip() if found else None)
 
 
-_VOICE_MARK_RE = re.compile(r"^\s*[\[【［]\s*(传声|语音)\s*[\]】］]\s*")
+# 开头的标记（发语音时 split_voice_mark 也用它认）：10/23 起只认“传声”，开头的「[语音]」不算想发（交给占位符清理去掉）
+_VOICE_MARK_RE = re.compile(r"^\s*(?:(?:[「『]\s*)?[\[【［]\s*传声\s*[\]】］](?:\s*[」』])?|[「『]\s*传声\s*[」』])\s*")

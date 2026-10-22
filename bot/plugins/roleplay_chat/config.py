@@ -39,10 +39,11 @@ class Config(BaseModel):
     # ---- 发表情包（用小号“收藏表情”里的伊蕾娜表情表达情绪）----
     sticker_enabled: bool = True
     sticker_prob: float = 0.15            # 一轮回复可以带表情的基础概率（再乘下面按关系的倍数）
-    sticker_min_interval: float = 180.0   # 同一个群（私聊按人）两次表情之间最少隔几秒
-    sticker_only_prob: float = 0.5        # 抽中表情、且这轮是“只回几个字”时，提示她可以只甩一个表情的概率
+    sticker_min_interval: float = 0.0     # 同一个群（私聊按人）两次表情之间最少隔几秒；0 = 不限（10/23 用户定：带表情的概率本来就不高，不用拦）
+    sticker_only_prob: float = 1.0        # 抽中表情、且这轮是“只回几个字”时，提示她可以只甩一个表情的概率（10/23 从 0.5 调到 1.0：三周里一次都没只发过表情）
     sticker_self_react_prob: float = 0.5  # 有人发了她的画像（斗图）时，这一轮可以带表情的概率
     sticker_recent_avoid: int = 5         # 同一个会话最近发过的几张不重复
+    sticker_recent_global: int = 10       # 不分会话、最近发过的几张也尽量不重复（存在 index.json 里，重启不丢）
     sticker_refresh_hours: float = 6.0    # 多久重新拉一次收藏表情
     sticker_fetch_count: int = 500        # 一次最多拉多少张收藏（拉满了就说明可能没拉全，那次不标取消收藏）
     sticker_private: bool = True          # 私聊也发
@@ -131,7 +132,8 @@ class Config(BaseModel):
     affection_summary_daily_cap: int = 10 # 长期记忆整理时，每人每天合计最多加几分（扣分不限）；0 = 不限
     affection_nag_daily_cap: int = 10     # 长期记忆整理时，因为“纠缠”（烦人但没恶意）每人每天合计最多扣几分；辱骂、骚扰这类恶意不限；0 = 不限
     affection_decay_after_days: int = 7   # 多少天没聊开始回落
-    affection_decay_per_day: float = 2.0  # 之后每天回落几分（只在本档位里落，不会因此掉档或升档）
+    affection_decay_per_day: float = 1.0  # 之后每天回落几分（只在本档位里落，不会因此掉档或升档；10/22 从 2 改成 1，淡得慢一点）
+    affection_mild_dislike: int = -10     # 轻度讨厌：分数不低于这个、又没被判过恶意的，很久不来会慢慢淡回陌生人（10/22）；更低的或有过恶意的最多回到 -1
     dislike_ignore_prob: float = 0.4      # 被讨厌的人叫她时，有多大概率直接不理（不调用模型）
     close_friends: list[int] = []         # 直接当作“很熟”的 QQ 号（管理员指定，不受性别限制）
     # 性别：只有确认是女生才能到“很熟”；男生和没确认的人好感最高到熟人（封顶在 AFFECTION_CLOSE - 1）
@@ -156,14 +158,14 @@ class Config(BaseModel):
     @field_validator("letter_daily_prob", mode="before")
     @classmethod
     def _letter_prob_old_style(cls, v):
-        """兼容老写法：.env 里只写一个数（如 LETTER_DAILY_PROB=0.25）时，当作很熟的概率，熟人仍用默认 0.08"""
+        """兼容老写法：.env 里只写一个数（如 LETTER_DAILY_PROB=0.25）时，当作很熟的概率，熟人仍用默认 0.12（10/19 默认从 0.08 调到 0.12，10/22 这里跟着改）"""
         if isinstance(v, str):
             try:
                 v = float(v)
             except ValueError:
                 return v
         if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.08, "close": float(v)}
+            return {"disliked": 0.0, "stranger": 0.0, "friend": 0.0, "acquaintance": 0.12, "close": float(v)}
         return v
 
     birthday: str = "10-17"               # 她的生日（月-日），当天和第二天会在提示里告诉她（人设里写的是十月十七日；10/18）
@@ -198,7 +200,7 @@ class Config(BaseModel):
     qzone_comment_poll_minutes: float = 120.0   # 每隔多久查一次评论（空间没有评论推送，只能定时查；查太勤容易被风控）
     qzone_comment_quiet: str = "01:00-09:00"   # 这段时间不查也不回（像在睡觉）
     qzone_comment_days: int = 7           # 只管最近几天发的说说
-    qzone_comment_daily_max: int = 30     # 每天最多回几条（自己说说下的评论 + 别人空间里的 @ 合计；9/29 从 10 调到 30，钱另按 BUDGET_* 算）
+    qzone_comment_daily_max: int = 15     # 每天最多回几条（自己说说下的评论 + 别人空间里的 @ 合计；9/29 从 10 调到 30，10/23 调回 15：实际一天最多 4 条，留着防突然很多人评论或程序出错）
     qzone_comment_max_rounds: int = 3     # 同一个人在同一条说说下最多来回几轮
     qzone_comment_max_age_hours: float = 24.0  # 太久以前的评论不补回（刚开功能时，旧评论不会被翻出来回一遍）
     qzone_max_replies_per_poll: int = 2   # 每一轮最多回几条（评论和 @ 合计），剩下的留到下一轮
@@ -208,11 +210,12 @@ class Config(BaseModel):
     qzone_startup_grace_max_minutes: float = 60.0   # 上限：每次上线在下限～上限之间随机，节奏别太固定
     qzone_quiet_release_max_minutes: float = 40.0   # 勿扰时段、高峰结束后，再随机推迟 0～这么多分钟才查（别每天 09:00 准点查）
     qzone_post_min_gap_hours: float = 12.0          # 离上一条说说（包括手动 /说说 立即发 的）不到这么久，定时说说就跳过
+    qzone_cookie_max_minutes: float = 50.0   # 空间凭证放了这么久就先换新的再用（服务器上凭证活不过 1 小时，原来每轮第一个请求都拿过期凭证去碰、报 -3000）；0 = 不主动换
     qzone_risk_pause_hours: float = 24.0  # 熔断：空间一出现风控信号（限流码 -10049、验证页、403），空间功能自动停这么久
     qzone_mention_reply: bool = True      # 别人在自己的说说里 @ 她、在别人说说下 @ 她或回她：也按聊天规则回（查评论时顺便读“与我相关”）
     # ---- 刷好友动态：看到好友发的说说，有几率评论一句（查评论时顺便刷一次；去别人空间写评论是风险最高的写操作，所以量压得很低）----
     qzone_friend_comment: bool = True     # 总开关
-    qzone_friend_comment_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.03, "friend": 0.08, "acquaintance": 0.2, "close": 0.45}   # 每条说说被评论的概率，关系越好越高
+    qzone_friend_comment_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.15, "friend": 0.3, "acquaintance": 0.5, "close": 0.7}   # 每条说说被评论的概率，关系越好越高（10/23 从 0/3%/8%/20%/45% 调高：22 天一条都没评过）
     qzone_friend_comment_daily_max: int = 5    # 每天最多评论几条好友的说说（单独算，不占上面回评论的条数；9/29 从 2 调到 5）
     qzone_friend_post_max_age_hours: float = 6.0   # 只评论这么多小时内发的说说（翻出几天前的去评论很怪）
 
@@ -318,7 +321,7 @@ class Config(BaseModel):
     budget_reset_hour: int = 5            # 北京时间几点算新的一天（0～3 点常有人聊天，按 0 点重置她刚告别就又回来了）
     budget_winddown_rounds: int = 8       # 今天的钱（或这个人、这个群的份额）只够这么多轮时，提示她有点累了、把话题往收尾靠；0 = 不提示
     budget_round_estimate: float = 0.003  # 估一轮聊天大约多少元，连同它引起的记忆整理（只用来换算“还剩几轮”，比如剩最后一轮就不带表情；9/30 按 9/29 实账从 0.004 调到 0.003）
-    budget_price: dict[str, float] = {"hit": 0.02, "miss": 1.0, "out": 4.0}   # 元 / 百万 token（空闲价）：输入命中缓存、输入没命中、输出；9/28 查的 deepseek-flash 官方价
+    budget_price: dict[str, float] = {"hit": 0.02, "miss": 1.0, "out": 4.0}   # 元 / 百万 token（空闲价）：输入命中缓存、输入没命中、输出；9/28 查的 deepseek-flash 官方价；pro 的价在 budget.py 的 MODEL_PRICES，按返回的模型名自动挑（10/22）
     budget_peak_multiplier: float = 2.0   # DeepSeek 高峰时段按几倍价
     budget_peak_ranges: str = "09:00-12:00,14:00-18:00"   # DeepSeek 的高峰时段（北京时间，工作日；节假日不算）
     budget_tired_reply: bool = True       # 钱用完后，才来私聊找她的人：回一句固定的“今天累了”（每人每天一次，不花钱）

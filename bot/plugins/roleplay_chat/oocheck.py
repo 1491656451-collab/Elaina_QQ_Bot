@@ -6,6 +6,8 @@
 不算出戏：对方说过的词，她拿来反问、表示不懂——“AI？那是什么”“「bug」是什么，外国话吗”“动漫是哪国的词”，
 加不加引号都一样。只重复一遍、看不出懂不懂的（“别光喊 bug”），按懂的算，照样算出戏。
 问号要紧跟在这个词后面才算反问（“AI？”）；“AI很厉害吧？”这种句尾的问号是当成懂的在问，算出戏（9/29 20:20）。
+装不懂的话写在下一句也算（10/23）：10/21 对方问“那你听过人工智能吗”，她回“人工智能……听名字像是造出来替人做事的聪明玩意儿？
+（换行）可惜这两样我都没听说过”，“没听说过”在下一句，以前被判成出戏、白重说了一次。
 
 这个文件只用标准库，回归测试（tools\\regression.py）直接读它，不用启动机器人。
 """
@@ -49,10 +51,12 @@ def ooc_words(reply: str, user_text: str = "") -> list[str]:
         if w.lower() not in said:
             bad.add(w)                     # 对方没说过，她自己冒出来的
             continue
-        for sent in _SENT_RE.findall(reply):
+        sents = _SENT_RE.findall(reply)
+        for i, sent in enumerate(sents):
             if w.lower() not in sent.lower():
                 continue
-            if _as_known(sent, w) or not (_UNKNOWN_RE.search(sent) or _echo_question(sent, w)):
+            nxt = sents[i + 1] if i + 1 < len(sents) else ""      # 装不懂写在紧接着的下一句也算（10/23）
+            if _as_known(sent, w) or not (_UNKNOWN_RE.search(sent) or _echo_question(sent, w) or _UNKNOWN_RE.search(nxt)):
                 bad.add(w)                 # 当成懂的概念来用，或者只是顺着用
                 break
     return sorted(bad)

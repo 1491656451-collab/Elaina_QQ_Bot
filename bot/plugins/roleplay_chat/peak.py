@@ -72,8 +72,9 @@ def is_peak(ranges: str, holidays: list[str], now: datetime | None = None) -> bo
 
 
 # 关系分档：告别、晚安、“今天累了”按关系挑台词（群里对大家说，不分档）
-#   far：讨厌的人、陌生人（客气、有距离）｜friend：普通朋友｜near：熟人（随意、偶尔嘴硬）｜close：很熟（嘴硬里带点在意）
-TIER_OF = {"disliked": "far", "stranger": "far", "friend": "friend", "acquaintance": "near", "close": "close"}
+#   cold：讨厌的人（爱答不理，不道晚安；10/22 起单列，以前和陌生人共用 far）｜far：陌生人（客气、有距离）
+#   friend：普通朋友｜near：熟人（随意、偶尔嘴硬）｜close：很熟（嘴硬里带点在意）
+TIER_OF = {"disliked": "cold", "stranger": "far", "friend": "friend", "acquaintance": "near", "close": "close"}
 
 # 限额用完时的告别。每句都要带上“先走了”“得走了”“先失陪”“下次再聊”这类说法（_LEAVE_RE 认得出来，才知道她已经道过别）
 FAREWELL_GROUP_LINES = [
@@ -93,6 +94,12 @@ FAREWELL_GROUP_LINES = [
     "今天就到这儿，下次再聊。",
 ]
 FAREWELL_PRIVATE_TIERS = {
+    "cold": [
+        "我走了。",
+        "先走了。",
+        "……该走了。",
+        "没空了，我得走了。",
+    ],
     "far": [
         "抱歉，我得走了。下次再聊吧。",
         "旅馆的热水快凉了，我先失陪了。",
@@ -146,6 +153,12 @@ SLEEP_GROUP_LINES = [
     "晚安。明天有好玩的事再告诉我。",
 ]
 SLEEP_PRIVATE_TIERS = {
+    "cold": [                       # 讨厌的人：不说“晚安”，只说要睡了
+        "睡了。",
+        "我去睡了。",
+        "……我先睡了。",
+        "困了，睡了。",
+    ],
     "far": [
         "不早了，我要休息了。晚安。",
         "抱歉，我该睡了。有事明天再说吧。",
@@ -179,6 +192,11 @@ SLEEP_PRIVATE_LINES = [x for v in SLEEP_PRIVATE_TIERS.values() for x in v]   # �
 
 # 今天的钱花完了之后才来私聊的人：回一句“今天累了”（不调用模型）
 TIRED_TIERS = {
+    "cold": [
+        "累了。",
+        "……明天吧。",
+        "今天不想说话。",
+    ],
     "far": [
         "今天有点累了，明天再说吧。",
         "抱歉，今天跑了太多地方，有事明天再说。",

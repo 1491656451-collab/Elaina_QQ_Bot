@@ -1,5 +1,7 @@
 """私聊主动说话（10/22 从 __init__.py 拆出来，代码原样搬过来，没改）：主动写信、冷场后搭话、/写信、/搭话。
-只改了一处写法：调 _in_hours() 写成 core._in_hours()，测试替换它才生效"""
+只改了一处写法：调 _in_hours() 写成 core._in_hours()，测试替换它才生效。
+10/23：调模型、看她想不想说这两段挪到 proactive_common.py（插话、冒泡、搭话、写信共用）；
+手动 /搭话 不算进当天的搭话次数，手动 /写信 不算进当天寄信的封数（只记日志）"""
 import asyncio
 import random
 import re
@@ -12,13 +14,12 @@ from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
 from nonebot.rule import to_me
 
-from . import budget, core, peak
-from .oocheck import ooc_words
-from .core import _hands, alert_admins, cap_text, cfg, classify_error, client, ltm, mark_sent, over_cap, switch_pause, tier_value
+from . import core, peak, proactive_common
+from .core import _hands, cap_text, cfg, ltm, mark_sent, over_cap, switch_pause, tier_value
 from .prompts import FAMILIARITY_HINT, LETTER_PROMPT, NUDGE_PROMPT, system_prompt
 from .history import _inbox, _locks, api_messages, get_history, save_history
 from .turn_hints import human_gap, now_hint, short_hint
-from .textout import CHAT_STOP, clean_reply, split_bubbles
+from .textout import split_bubbles
 from .quota import _count_sent, _global_window, _has_quota, _hour_window, _private_hour, bubble_gap, quota_left, typing_delay
 from .memory_chat import _parse_target
 from .online import quiet_left
@@ -71,8 +72,8 @@ def letter_blocker(qq: int, friends: set[int], force: bool = False) -> str | Non
     return None
 
 
-async def write_letter(bot: Bot, qq: int) -> str | None:
-    """写一封信并私聊发出去；成功返回信的内容"""
+async def write_letter(bot: Bot, qq: int, manual: bool = False) -> str | None:
+    """写一封信并私聊发出去；成功返回信的内容。manual=True（/写信）：不算进当天寄信的封数（10/23）"""
     key = f"private_{qq}"
     prof = ltm.get_user(qq)
     name = prof.get("name") or str(qq)
@@ -86,24 +87,11 @@ async def write_letter(bot: Bot, qq: int) -> str | None:
             + history[-6:]
             + [{"role": "system", "content": "\n\n".join(x for x in (long_memo, now_hint(), LETTER_PROMPT.format(name=name, gap=gap)) if x)}]
         )
-        try:
-            resp = await client.chat.completions.create(
-                model=cfg.deepseek_model,
-                messages=messages,
-                temperature=cfg.llm_temperature,
-                max_tokens=cfg.letter_max_tokens,
-                extra_body={"thinking": {"type": "disabled"}},
-            )
-            budget.track(resp, "letter", user=qq)
-            choice = resp.choices[0]
-            letter = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
-        except Exception as e:  # noqa: BLE001
-            kind = classify_error(e)
-            logger.error(f"写信失败（{kind or '其他错误'}）：{e}")
-            if kind:
-                await alert_admins(bot, kind)
+        letter = await proactive_common.ask(bot, messages, "letter", "写信失败", user=qq, max_tokens=cfg.letter_max_tokens,
+                                            stop=False, error_level="error")
+        if letter is None:
             return None
-        if not letter or ooc_words(letter, ""):
+        if proactive_common.declined(letter):
             logger.info(f"信写得不好（出戏或为空），这次不寄：{letter[:40]}")
             return None
         try:
@@ -121,6 +109,9 @@ async def write_letter(bot: Bot, qq: int) -> str | None:
     _private_hour[qq].append(time.monotonic())
     _hour_window.append(time.monotonic())
     _global_window.append(time.monotonic())
+    if manual:
+        logger.info(f"给 {name}（{qq}）寄了一封信（手动 /写信，不算进今天的封数）")
+        return letter
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
     _letters_sent[today] = _letters_sent.get(today, 0) + 1
     logger.info(f"给 {name}（{qq}）寄了一封信")
@@ -233,21 +224,10 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
         extra = "\n\n".join(x for x in (long_memo, now_hint(), NUDGE_PROMPT.format(gap=gap), FAMILIARITY_HINT[fam] + short_hint()) if x)
         messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-10:]
                                 + [{"role": "system", "content": extra}])
-        try:
-            resp = await client.chat.completions.create(
-                model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
-                max_tokens=cfg.short_reply_max_tokens, stop=CHAT_STOP, extra_body={"thinking": {"type": "disabled"}},
-            )
-            budget.track(resp, "nudge", user=qq)
-            choice = resp.choices[0]
-            reply = clean_reply(choice.message.content or "", truncated=choice.finish_reason == "length")
-        except Exception as e:  # noqa: BLE001
-            kind = classify_error(e)
-            logger.warning(f"主动搭话：调用失败（{kind or '其他错误'}）：{e}")
-            if kind:
-                await alert_admins(bot, kind)
+        reply = await proactive_common.ask(bot, messages, "nudge", "主动搭话：调用失败", user=qq)
+        if reply is None:
             return None
-        if not reply or _NO_NUDGE_RE.search(reply) or ooc_words(reply, ""):
+        if proactive_common.declined(reply, _NO_NUDGE_RE):
             logger.info(f"主动搭话：{qq} 她想了想，没说")
             return None
     bubbles = split_bubbles(reply)[:2]
@@ -279,6 +259,9 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
     said = "\n".join(bubbles)
     get_history(key).append({"role": "assistant", "content": said, "ts": time.time()})
     save_history(key)
+    if force:                                        # 10/23：手动 /搭话 不算进今天的搭话次数
+        logger.info(f"主动搭话：手动 /搭话 {prof.get('name') or qq}（{qq}），她说：{said[:30]}（不算进今天的次数）")
+        return said
     today = datetime.now(peak.BEIJING).strftime("%Y-%m-%d")
     for d in [d for d in _nudge_count if d != today]:
         del _nudge_count[d]
@@ -360,7 +343,7 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     why = letter_blocker(qq, friends, force=True)
     if why:
         await letter_cmd.finish(f"（没法给 {qq} 写信：{why}）")
-    letter = await write_letter(bot, qq)
+    letter = await write_letter(bot, qq, manual=True)
     auto = letter_blocker(qq, friends)
     note = "自动写信条件：符合" if auto is None else f"平时不会自动写：{auto}"
     await letter_cmd.finish(f"（信已寄给 {qq}｜{note}）" if letter else "（这次没写成，看看后台日志）")
