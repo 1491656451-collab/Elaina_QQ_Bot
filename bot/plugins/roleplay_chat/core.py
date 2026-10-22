@@ -103,6 +103,14 @@ if cfg.memory_pro_api_key:                       # pro 单独一个 Key（10/16�
     if cfg.memory_verify_use_pro:
         ltm.verify_client, ltm.verify_model = _pro_client, cfg.memory_pro_model
 
+# 她自己的近况（10/23，长期记忆 agent 加）：她说过自己在哪、最近说过经历了什么（只记她自己说过的）
+from .self_memory import SelfMemory  # noqa: E402
+self_mem = SelfMemory(BOT_DIR / cfg.memory_dir / "self.json", ltm.summary_client, cfg.deepseek_model,
+                      enabled=cfg.memory_enabled, max_items=cfg.memory_self_max_items, keep_days=cfg.memory_self_keep_days,
+                      place_stale_days=cfg.memory_self_place_stale_days)
+self_mem.ltm = ltm
+ltm.self_mem = self_mem                  # 整理聊天时顺带收她讲的经历、说自己在哪（10/23）
+
 
 # ---- 查档位（10/22 拆分第 4 步从 __init__.py 搬来）
 def familiarity_of(qq: int) -> str:

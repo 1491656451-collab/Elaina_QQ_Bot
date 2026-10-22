@@ -5872,3 +5872,124 @@ def test_voice_say_noted_in_history_1023():
     h = p.get_history("private_9404")
     assert h[-1]["role"] == "assistant" and h[-1]["content"] == "[发了语音] 你好"
     assert not p.ltm._pending_path("private_9404").exists()           # 只进短期记忆
+
+
+# ---------------------------------------------------------------- 10/23 她的近况（存储在记忆 agent 的 self_memory.py）
+@pytest.fixture(autouse=True)
+def _self_mem_isolated_1023(tmp_path, monkeypatch):
+    """每个测试一份空的近况，不在后台调模型整理（整理归记忆 agent，它的测试在 test_self_memory.py）"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.core.self_mem, "path", tmp_path / "self.json")
+    monkeypatch.setattr(p.core.self_mem, "_data", None)
+    monkeypatch.setattr(p.core.self_mem, "kick", lambda: None)
+    yield
+
+
+def _life_spy_1023(monkeypatch, p, chat=None, proactive=None):
+    said, asked = [], []
+    monkeypatch.setattr(p.core.self_mem, "add_said", lambda text, **kw: said.append((text, kw)))
+
+    def lfc(key, text, recent="", now=None):
+        asked.append(("chat", key, text))
+        return chat or {}
+
+    def lfp(key, n=3, now=None):
+        asked.append(("proactive", key))
+        return proactive or {}
+    monkeypatch.setattr(p.core.self_mem, "life_for_chat", lfc)
+    monkeypatch.setattr(p.core.self_mem, "life_for_proactive", lfp)
+    return said, asked
+
+
+def test_life_hint_text_1023():
+    import plugins.roleplay_chat as p
+    th = p.turn_hints
+    assert th.life_hint({}) == "" and th.life_hint_proactive(None) == ""
+    h = th.life_hint({"place": {"name": "某片森林", "kind": "野外", "days_here": 3},
+                      "today": [{"text": "迷路绕了半天", "when": "今天上午", "mood": "烦"}],
+                      "related": [{"text": "被会学人说话的猫跟了半条街", "when": "3 天前", "mood": ""}]})
+    assert h.startswith("【你的近况】") and "不用主动提" in h
+    assert "某片森林（在野外赶路），已经待了 3 天左右" in h
+    assert "今天上午：迷路绕了半天（当时觉得烦）" in h and "3 天前：被会学人说话的猫跟了半条街。" in h
+    assert "待了" not in th.life_hint({"place": {"name": "钟声之镇", "kind": "城镇", "days_here": 1, "status": "现在"}})
+    assert th.life_hint({"place": {"status": "还没说过"}, "today": [], "related": []}) == ""      # 还没说过在哪、也没别的：不带
+    old = th.life_hint({"place": {"name": "钟声之镇", "kind": "城镇", "days_here": 8, "said": "7 天前", "status": "前几天说的"}})
+    assert "你7 天前说过自己在钟声之镇，之后没再提过，现在不一定还在那里。" in old and "待了" not in old
+    hp = th.life_hint_proactive({"place": {}, "fresh": [{"text": "淋了雨", "when": "昨天", "mood": "累"}],
+                                 "told_here": [{"text": "钟楼的钟", "when": "刚才", "mood": ""}]})
+    assert "最近说过的：昨天：淋了雨（当时觉得累）" in hp and "这里已经听你讲过（这次说点别的，别换个说法再讲同一件事）：钟楼的钟（刚才）" in hp
+
+
+@pytest.mark.asyncio
+async def test_life_in_chat_prompt_1023(monkeypatch):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯，还在林子里。")
+    _, asked = _life_spy_1023(monkeypatch, p, chat={"place": {"name": "某片森林", "kind": "野外", "days_here": 2}, "today": [], "related": []})
+    await p.converse(_PBot(), pev("你最近在哪呀", uid=9981, mid=7801))
+    fam_head = p.FAMILIARITY_HINT[p.core.familiarity_of(9981)][:8]
+    extra = next(m["content"] for m in CALLS[-1]["messages"] if m["role"] == "system" and fam_head in m["content"])
+    assert ("chat", "private_9981", "你最近在哪呀") in asked
+    assert "【你的近况】" in extra and "某片森林" in extra
+    assert extra.index("【你的近况】") < extra.index(p.FAMILIARITY_HINT[p.core.familiarity_of(9981)][:8])
+    # 近况出错：照常回，只是不带
+    def boom(*a, **k): raise RuntimeError("坏了")
+    monkeypatch.setattr(p.core.self_mem, "life_for_chat", boom)
+    bot = _PBot()
+    n0 = len(CALLS)
+    await p.converse(bot, pev("在吗", uid=9982, mid=7802))
+    # 只看这一轮回 9982 的那次调用（上一轮的后台调用在 Windows 上可能晚一点才记进 CALLS）
+    mine = [c for c in CALLS[n0:] if any(m["role"] == "user" and "在吗" in str(m["content"]) for m in c["messages"])]
+    assert bot.sent and mine
+    # 人设里也提到“【你的近况】”（10/23 人设 agent 加的那条），所以按这段提示的开头来认
+    assert not any(p.prompts.LIFE_CHAT_HEAD[:30] in str(m["content"]) for c in mine for m in c["messages"])
+
+
+@pytest.mark.asyncio
+async def test_proactive_said_goes_to_life_1023(monkeypatch):
+    """冒泡、搭话发出去以后交给近况，提示里带上近况；插话不交；没发出去的不交"""
+    import plugins.roleplay_chat as p
+    async def no_sleep(*a, **k): return None
+    monkeypatch.setattr(p.asyncio, "sleep", no_sleep)
+    said, asked = _life_spy_1023(monkeypatch, p, proactive={"place": {"name": "钟声之镇", "kind": "城镇", "days_here": 1},
+                                                            "fresh": [], "told_here": [{"text": "钟楼的钟", "when": "刚才", "mood": ""}]})
+    p._save_interject_state({})
+    p.client.chat.completions.create = fake_create("今天这里的钟敲得真准时")
+    assert await p.bubble(_SendBot(), 557, force=True)
+    assert said == [("今天这里的钟敲得真准时", {"source": "冒泡", "key": "group_557", "qq": None})]
+    sys_msg = CALLS[-1]["messages"][-1]["content"]
+    assert ("proactive", "group_557") in asked and "这里已经听你讲过" in sys_msg and "钟楼的钟" in sys_msg and sys_msg.index("【你的近况】") < sys_msg.index("【冒泡】")
+
+    said.clear()
+    _nudge_env(monkeypatch, p)
+    p.client.chat.completions.create = fake_create("在干嘛？")
+    assert await p.nudge(_PBot(), 9983, force=True) == "在干嘛？"
+    assert said == [("在干嘛？", {"source": "搭话", "key": "private_9983", "qq": 9983})]
+    assert "【你的近况】" in CALLS[-1]["messages"][-1]["content"]
+
+    said.clear()                                     # 插话不交
+    p.client.chat.completions.create = fake_create("自恋？那叫实话")
+
+    class B(_SendBot):
+        pass
+    await p.maybe_interject(B(), 557, "伊蕾娜好自恋", force=True)
+    assert said == []
+
+    class Fail(_SendBot):                            # 冒泡没发出去：不交
+        async def send_group_msg(self, group_id, message):
+            raise RuntimeError("被风控")
+    p.client.chat.completions.create = fake_create("又下雨了")
+    assert await p.bubble(Fail(), 558, force=True) is None and said == []
+
+
+@pytest.mark.asyncio
+async def test_letter_goes_to_life_1023(monkeypatch):
+    import plugins.roleplay_chat as p
+    async def no_sleep(*a, **k): return None
+    monkeypatch.setattr(p.asyncio, "sleep", no_sleep)
+    said, asked = _life_spy_1023(monkeypatch, p, proactive={"place": {"name": "雨伞之城", "kind": "城镇", "days_here": 2},
+                                                            "fresh": [], "told_here": []})
+    letter = "致 小王：\n这里一年到头都在下雨。\n——伊蕾娜"
+    p.client.chat.completions.create = fake_create(letter)
+    assert await p.write_letter(_PBot(), 9984, manual=True) == letter
+    assert said == [(letter, {"source": "写信", "key": "private_9984", "qq": 9984})]
+    assert "雨伞之城" in CALLS[-1]["messages"][-1]["content"]

@@ -85,7 +85,7 @@ async def write_letter(bot: Bot, qq: int, manual: bool = False) -> str | None:
         messages = api_messages(
             [{"role": "system", "content": system_prompt()}]
             + history[-6:]
-            + [{"role": "system", "content": "\n\n".join(x for x in (long_memo, now_hint(), LETTER_PROMPT.format(name=name, gap=gap)) if x)}]
+            + [{"role": "system", "content": "\n\n".join(x for x in (long_memo, proactive_common.life_memo(key), now_hint(), LETTER_PROMPT.format(name=name, gap=gap)) if x)}]
         )
         letter = await proactive_common.ask(bot, messages, "letter", "写信失败", user=qq, max_tokens=cfg.letter_max_tokens,
                                             stop=False, error_level="error")
@@ -105,6 +105,7 @@ async def write_letter(bot: Bot, qq: int, manual: bool = False) -> str | None:
             return None
         history.append({"role": "assistant", "content": letter, "ts": time.time()})
         save_history(key)
+    proactive_common.note_said(letter, "写信", key, qq)
     ltm.mark_letter(qq)
     _private_hour[qq].append(time.monotonic())
     _hour_window.append(time.monotonic())
@@ -221,7 +222,7 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
         fam = core.familiarity_of(qq)
         prof = ltm.get_user(qq)
         long_memo = ltm.context_for(qq, prof.get("name") or str(qq), None)
-        extra = "\n\n".join(x for x in (long_memo, now_hint(), NUDGE_PROMPT.format(gap=gap), FAMILIARITY_HINT[fam] + short_hint()) if x)
+        extra = "\n\n".join(x for x in (long_memo, proactive_common.life_memo(key), now_hint(), NUDGE_PROMPT.format(gap=gap), FAMILIARITY_HINT[fam] + short_hint()) if x)
         messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-10:]
                                 + [{"role": "system", "content": extra}])
         reply = await proactive_common.ask(bot, messages, "nudge", "主动搭话：调用失败", user=qq)
@@ -259,6 +260,7 @@ async def nudge(bot: Bot, qq: int, force: bool = False) -> str | None:
     said = "\n".join(bubbles)
     get_history(key).append({"role": "assistant", "content": said, "ts": time.time()})
     save_history(key)
+    proactive_common.note_said(said, "搭话", key, qq)
     if force:                                        # 10/23：手动 /搭话 不算进今天的搭话次数
         logger.info(f"主动搭话：手动 /搭话 {prof.get('name') or qq}（{qq}），她说：{said[:30]}（不算进今天的次数）")
         return said

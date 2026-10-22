@@ -15,6 +15,10 @@
   pro 用 .env 里的 MEMORY_PRO_API_KEY（没填就用 DEEPSEEK_API_KEY）。REG_BLIND=1 时另写一份打乱顺序的盲评稿和打分表（REG_BLIND_PICK=2：每版每题只挑 2 条进盲评稿）；REG_SAMPLES 统一每题问几次，见 主模型对比.bat
 - REG_VOICE_OFF=1（10/22）：语音题不给“可以传声”，改给“这一轮你用不了传声魔法”（VOICE_UNAVAILABLE_HINT，语音服务没开、当天额度用完时线上给的），
   看她会不会还写「[传声]」、嘴上答应；见 传声测试.bat 第二段
+- 近况（10/23）：题目里写 "life": {"place": {...}, "today": [...], "related": [...]}（格式和记忆 agent 的 self_mem.life_for_chat 返回的一样），
+  本轮提示最前面（线上是长期记忆后面，回归里没有长期记忆）加【你的近况】，拼法照 turn_hints.life_hint；改前那一版代码里没有 LIFE_CHAT_HEAD 就不加。
+  写 "bubble": true 的是冒泡题：没有对方的话，最后一条是冒泡提示（BUBBLE_PROMPT），"life" 按 life_for_proactive 的格式（place、fresh、told_here）。
+  只跑这几题：近况测试.bat（REG_ONLY=L）
 - 题目里写 "voice": true：和线上一样，在本轮提示最后加【传声】提示（10/20 起是“每轮都给、由她判断”那段）；写 "count": 正则 的题，报告里数一下命中几次（比如答应用传声的比例）
 
 提示的拼法和机器人一样：系统提示 = 人设 + 聊天规则；本轮提示 = 【刚看到】/ 回忆片段 / 收尾提示 / “这个词是你先说的”（echocheck.py）+ 关系提示 + 长短提示。
@@ -56,7 +60,8 @@ BEFORE = ARG if ARG and not RESCORE else "1001b"
 CASES_FILE = Path(__file__).resolve().parent / "regression_cases.json"
 NAMES = ("CHAT_RULES", "FAMILIARITY_HINT", "SHORT_VARIANTS", "LENGTH_HINT", "RECALL_RULES", "LATE_HINT",
          "WINDDOWN_SLEEP_HINT", "WINDDOWN_TIRED_HINT", "WRAPUP_HINT", "WRAPUP_SLEEP_HINT", "CHAT_STOP",
-         "VOICE_REQUEST_HINT", "VOICE_REQUEST_TIER_HINT", "VOICE_OFFER_HINT", "VOICE_UNAVAILABLE_HINT")
+         "VOICE_REQUEST_HINT", "VOICE_REQUEST_TIER_HINT", "VOICE_OFFER_HINT", "VOICE_UNAVAILABLE_HINT",
+         "LIFE_CHAT_HEAD", "LIFE_PROACTIVE_HEAD", "BUBBLE_PROMPT")
 ONLY = [x.strip() for x in os.environ.get("REG_ONLY", "").split(",") if x.strip()]
 AFTER_ONLY = os.environ.get("REG_AFTER_ONLY", "") not in ("", "0")
 VOICE_OFF = os.environ.get("REG_VOICE_OFF", "") not in ("", "0")    # 10/22：语音题改给“这一轮传不了”的提示
@@ -120,6 +125,56 @@ def character_doc(name: str) -> str:
     return f"【角色资料·{name}】{m.group(1).strip()[:900]}" if m else ""
 
 
+# 【你的近况】的拼法：照抄 plugins\roleplay_chat\turn_hints.py 的 life_hint / life_hint_proactive（那边改了这里跟着改）
+_KIND_NOTE = {"野外": "（在野外赶路）", "小说地点": "（以前来过的地方）"}
+
+
+def _life_place(place) -> str:
+    """status（记忆 agent 给的）：还没说过 → 不写；前几天说的 → 不一定还在；现在 → 待了几天"""
+    if not place or not place.get("name"):
+        return ""
+    where = f"{place['name']}{_KIND_NOTE.get(place.get('kind') or '', '')}"
+    if place.get("status") == "前几天说的":
+        return f"你{place.get('said') or '前几天'}说过自己在{where}，之后没再提过，现在不一定还在那里。"
+    n = int(place.get("days_here") or 1)
+    stay = f"，已经待了 {n} 天左右" if n >= 2 else ""
+    return f"你说过自己现在在{where}{stay}。"
+
+
+def _life_item(it: dict) -> str:
+    mood = f"（当时觉得{it['mood']}）" if it.get("mood") else ""
+    return f"{it.get('when') or '最近'}：{it.get('text', '')}{mood}"
+
+
+def life_block(v: dict, d: dict | None, proactive: bool) -> str:
+    head = v.get("LIFE_PROACTIVE_HEAD" if proactive else "LIFE_CHAT_HEAD")
+    if not d or not head:                # 改前那一版没有近况
+        return ""
+    parts = [_life_place(d.get("place"))]
+    if proactive:
+        if d.get("fresh"):
+            parts.append("最近说过的：" + "；".join(_life_item(it) for it in d["fresh"]) + "。")
+        if d.get("told_here"):
+            parts.append("这里已经听你讲过（这次说点别的，别换个说法再讲同一件事）：" + "；".join(f"{it.get('text', '')}（{it.get('when') or '最近'}）" for it in d["told_here"]) + "。")
+        body = "\n".join(p for p in parts if p)
+    else:
+        items = list(d.get("today") or []) + list(d.get("related") or [])
+        if items:
+            parts.append("你说过的：" + "；".join(_life_item(it) for it in items) + "。")
+        body = "".join(p for p in parts if p)
+    return f"{head}\n{body}" if body else ""
+
+
+def bubble_messages(v: dict, case: dict, length: str) -> tuple[list, int]:
+    """冒泡题（10/23）：和线上 proactive_group.bubble 一样：人设 + 最近几句 + 【你的近况】和冒泡提示"""
+    prompt = v["BUBBLE_PROMPT"].format(now="10 月 23 日（星期五）下午 3 点", gap="5 个小时")
+    tail = "\n\n".join(x for x in (life_block(v, case.get("life"), True), prompt + length) if x)
+    msgs = [{"role": "system", "content": v["system"]}]
+    msgs += [{"role": a, "content": b} for a, b in case.get("history", [])[-6:]]
+    msgs.append({"role": "system", "content": tail})
+    return msgs, 80
+
+
 def messages(v: dict, case: dict, rng: random.Random) -> tuple[list, int]:
     if case.get("mode") == "long":
         length, max_tokens = v["LENGTH_HINT"]["long"], 200
@@ -138,7 +193,9 @@ def messages(v: dict, case: dict, rng: random.Random) -> tuple[list, int]:
                 length = h
                 break
         max_tokens = 80
-    parts = []
+    if case.get("bubble"):
+        return bubble_messages(v, case, length)
+    parts = [life_block(v, case.get("life"), False)]
     if case.get("recall_chars"):
         body = "\n\n".join(x for x in (character_doc(n) for n in case["recall_chars"]) if x)
         if body:

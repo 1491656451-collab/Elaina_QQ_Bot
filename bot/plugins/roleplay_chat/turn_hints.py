@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from . import peak
 from .core import cfg
-from .prompts import LENGTH_HINT, SHORT_VARIANTS
+from .prompts import LENGTH_HINT, LIFE_CHAT_HEAD, LIFE_PROACTIVE_HEAD, SHORT_VARIANTS
 
 
 _LONG_HINTS = (
@@ -162,3 +162,49 @@ def gift_hint(kind: str, snippet: str, bread_first: bool, fam: str) -> str:
     if kind == "vague":
         return head + "对方没说给多少、给的是什么钱，可以先问清楚（“多少？什么钱？”），别先高兴起来。" + _MONEY_RULE
     return head + _MONEY_RULE
+
+
+# ---------------------------------------------------------------- 10/23【你的近况】
+_KIND_NOTE = {"野外": "（在野外赶路）", "小说地点": "（以前来过的地方）"}
+
+
+def _life_place(place: dict | None) -> str:
+    """status（记忆 agent 给的）：还没说过 → 不写；前几天说的 → 不一定还在；现在 → 待了几天"""
+    if not place or not place.get("name"):
+        return ""
+    where = f"{place['name']}{_KIND_NOTE.get(place.get('kind') or '', '')}"
+    if place.get("status") == "前几天说的":
+        return f"你{place.get('said') or '前几天'}说过自己在{where}，之后没再提过，现在不一定还在那里。"
+    n = int(place.get("days_here") or 1)
+    stay = f"，已经待了 {n} 天左右" if n >= 2 else ""
+    return f"你说过自己现在在{where}{stay}。"
+
+
+def _life_item(it: dict) -> str:
+    mood = f"（当时觉得{it['mood']}）" if it.get("mood") else ""
+    return f"{it.get('when') or '最近'}：{it.get('text', '')}{mood}"
+
+
+def life_hint(d: dict | None) -> str:
+    """每轮回消息带的【你的近况】：self_mem.life_for_chat 的结果拼成一段；什么都没有返回空"""
+    if not d:
+        return ""
+    parts = [_life_place(d.get("place"))]
+    items = list(d.get("today") or []) + list(d.get("related") or [])
+    if items:
+        parts.append("你说过的：" + "；".join(_life_item(it) for it in items) + "。")
+    body = "".join(p for p in parts if p)
+    return f"{LIFE_CHAT_HEAD}\n{body}" if body else ""
+
+
+def life_hint_proactive(d: dict | None) -> str:
+    """冒泡、写信、搭话带的【你的近况】：self_mem.life_for_proactive 的结果"""
+    if not d:
+        return ""
+    parts = [_life_place(d.get("place"))]
+    if d.get("fresh"):
+        parts.append("最近说过的：" + "；".join(_life_item(it) for it in d["fresh"]) + "。")
+    if d.get("told_here"):
+        parts.append("这里已经听你讲过（这次说点别的，别换个说法再讲同一件事）：" + "；".join(f"{it.get('text', '')}（{it.get('when') or '最近'}）" for it in d["told_here"]) + "。")
+    body = "\n".join(p for p in parts if p)
+    return f"{LIFE_PROACTIVE_HEAD}\n{body}" if body else ""

@@ -7,12 +7,13 @@ import re
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot
 
-from . import budget
+from . import budget, core
 from .oocheck import ooc_words
 from .core import _hands, alert_admins, cfg, classify_error, client, mark_sent, switch_pause
 from .history import _unrecord
 from .textout import CHAT_STOP, clean_reply, split_bubbles
 from .quota import bubble_gap, typing_delay
+from .turn_hints import life_hint_proactive
 
 
 async def ask(bot: Bot, messages: list[dict], kind: str, fail_log: str, *, user: int | None = None, group: int | None = None,
@@ -34,6 +35,24 @@ async def ask(bot: Bot, messages: list[dict], kind: str, fail_log: str, *, user:
         if kind_:
             await alert_admins(bot, kind_)
         return None
+
+
+def life_memo(key: str) -> str:
+    """冒泡、写信、搭话的提示里带的【你的近况】（10/23）。近况出错不影响说话"""
+    try:
+        return life_hint_proactive(core.self_mem.life_for_proactive(key))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"近况：取用出错，这次不带：{e}")
+        return ""
+
+
+def note_said(text: str, source: str, key: str, qq: int | None = None) -> None:
+    """冒泡、写信、冷场搭话真的发出去以后，把原话交给近况（10/23；插话不交）。
+    记忆那边在后台整理：讲的是她自己的经历、说了自己在哪，才记下来"""
+    try:
+        core.self_mem.add_said(text, source=source, key=key, qq=qq)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"近况：交给近况出错：{e}")
 
 
 def declined(reply: str, skip_re: "re.Pattern | None" = None) -> bool:

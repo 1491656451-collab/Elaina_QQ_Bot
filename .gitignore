@@ -13,6 +13,7 @@ novel/
 bot/knowledge/summaries/
 bot/knowledge/characters.md
 bot/personas/elaina.md
+bot/personas/events.md
 bot/qzone/images/
 
 # ---- 只给自己看的文档：含真实 QQ 号、群号、聊天内容或本机配置 ----
@@ -109,3 +110,6 @@ bot/tools/识图对照图/
 docs/交接-人设短版-*.md
 docs/人设减肥对比报告-*.md
 docs/提示词审计-*.md
+
+# 10/23：近况回放用的是线上真实会话（和记忆回放测试报告一样不上传；部署 agent 加）
+docs/近况回放报告-*.md

@@ -13,7 +13,7 @@ from nonebot.permission import SUPERUSER
 from nonebot.rule import to_me
 
 from . import peak, sleep
-from .core import BOT_DIR, cfg, ltm
+from .core import BOT_DIR, cfg, ltm, self_mem
 from .sleep import night_key
 
 
@@ -103,6 +103,32 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
 
 
 
+self_show = on_command("近况", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
+SELF_USAGE = "用法：/近况（看她说过自己在哪、记了哪些近况）；/近况 删 3；/近况 改 3 新内容（序号看 /近况）；/近况 在 某地（她说的地方记错了时改）"
+
+
+@self_show.handle()
+async def _(arg: Message = CommandArg()):
+    """她自己的近况（10/23）：/近况、/近况 删 N、/近况 改 N 新内容"""
+    t = arg.extract_plain_text().strip()
+    if not t:
+        await self_show.finish(self_mem.describe())
+    m = re.match(r"(删|删除)\s*第?\s*(\d{1,3})\s*条?$", t)
+    if m:
+        gone = self_mem.delete(int(m.group(2)))
+        await self_show.finish(f"（已删掉第 {m.group(2)} 条：{gone}）" if gone is not None else f"（没有第 {m.group(2)} 条，先用 /近况 看看）")
+    m = re.match(r"(改|修改)\s*第?\s*(\d{1,3})\s*条?\s*[:：]?\s*(.+)$", t, re.S)
+    if m:
+        done = self_mem.edit(int(m.group(2)), m.group(3).strip())
+        await self_show.finish(f"（第 {m.group(2)} 条：{done[0]} → {done[1]}）" if done else f"（没有第 {m.group(2)} 条，先用 /近况 看看）")
+    m = re.match(r"在\s*[:：]?\s*(.+)$", t)
+    if m:
+        p = self_mem.set_place_by_admin(m.group(1).strip())
+        await self_show.finish(f"（现在记成她在：{p.get('name')}）")
+    await self_show.finish(SELF_USAGE)
+
+
+
 _NIGHTLY_FILE = BOT_DIR / cfg.memory_dir / "nightly.json"     # 哪天晚上已经做过睡前整理（重启也不重做）
 
 
@@ -143,6 +169,7 @@ async def _memory_retry_loop() -> None:
                 if n:
                     logger.info(f"长期记忆：补做 {n} 个会话的整理")
             ltm.idle_sweep()
+            self_mem.retry()                       # 近况：主动说的话上次没整理成的，补做（10/23）
             night = _nightly_due()
             if night:
                 asyncio.create_task(_run_nightly(night))

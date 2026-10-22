@@ -28,7 +28,7 @@ CHAT_KINDS = {"chat", "judge", "verify", "vision", "interject", "bubble", "lette
 KIND_NAMES = {
     "chat": "回消息", "judge": "判断是不是在跟她说话", "verify": "核对讲的往事", "vision": "看图", "interject": "插话", "bubble": "冒泡",
     "letter": "写信", "nudge": "冷场搭话", "qzone_reply": "回空间评论", "qzone_friend": "评论好友说说", "voice_ja": "把语音译成日语",
-    "memory": "长期记忆整理", "memory_verify": "长期记忆核对", "memory_nightly": "睡前整理记忆", "qzone_post": "写说说", "gallery": "给说说配图写描述", "sticker": "给表情写描述",
+    "memory": "长期记忆整理", "memory_verify": "长期记忆核对", "memory_nightly": "睡前整理记忆", "memory_self": "整理她主动说的话", "qzone_post": "写说说", "gallery": "给说说配图写描述", "sticker": "给表情写描述",
 }
 
 # 除了 flash 以外的模型的价格（元 / 百万 token，空闲价；高峰时段一样按 peak_multiplier 倍）。

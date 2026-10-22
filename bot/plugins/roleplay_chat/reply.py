@@ -18,7 +18,7 @@ from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
 from .prompts import FAMILIARITY_HINT, LATE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
-from .turn_hints import BACK_HINT_HOURS, gift_hint, human_gap, length_hint_for, now_hint, reply_mode, time_hint, unprompted_hits
+from .turn_hints import BACK_HINT_HOURS, gift_hint, human_gap, length_hint_for, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
 from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
 from .textout import CHAT_STOP, clean_reply, cut_derailed, drop_ooc_sentences, is_fragment, speaker_names, split_bubbles, split_sticker
 from .quota import _active_chats, _count_sent, _crossed_mid_chat, _farewell_at, _global_window, _hour_window, _last_trigger, _refund, _wrapup, bubble_gap, in_wrapup, quota_left, rate_limited, say_farewells, say_tired, typing_delay, WRAPUP_EXTRA, WRAPUP_MINUTES
@@ -463,6 +463,11 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
         memo = story.recall(text, f"{prev_user[-60:]} {prev_bot[-120:]}", key) if cfg.knowledge_enabled and not busy else ""
     long_memo = ltm.context_for(event.user_id, name, event.group_id if is_group else None,
                                 text=text, recent=f"{prev_user[-60:]} {prev_bot[-120:]}")   # 按这句话挑几条；群里不带私聊知道的事
+    try:                                          # 10/23【你的近况】：她自己说过的经历、在哪（出错不影响回复）
+        life_memo = life_hint(core.self_mem.life_for_chat(key, text, f"{prev_user[-60:]} {prev_bot[-120:]}"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"近况：取用出错，这次不带：{e}")
+        life_memo = ""
     mode = "busy" if busy else reply_mode(text)
     fam = core.familiarity_of(event.user_id)
     length_hint = length_hint_for(mode, text, fam)
@@ -504,7 +509,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
             and not she_asked(history) and not gifts):
         skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                      "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
-    extra = "\n\n".join(x for x in (long_memo, memo, time_memo, gender_memo, diary_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo) if x)
+    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo) if x)
     recall_msg = [{"role": "system", "content": extra}]
 
     messages = api_messages(

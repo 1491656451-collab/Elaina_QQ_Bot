@@ -113,6 +113,9 @@ class Config(BaseModel):
     memory_verify: bool = True            # 整理完再核对一遍：新记的、改过的、她说过的，主语反了、原文没有、别人的事，这次不存
     memory_nightly: bool = True           # 睡前整理：她睡着后给当天聊过的人各理一遍档案
     memory_nightly_max: int = 30          # 每晚最多理多少人
+    memory_self_max_items: int = 30       # 她自己的近况最多记几条（10/23，见 self_memory.py）
+    memory_self_keep_days: int = 14       # 近况留几天
+    memory_self_place_stale_days: int = 5 # 她说在某处以后这么多天没再提：给她看“前几天说的，不一定还在”
     memory_pro_api_key: str = ""          # pro 模型单独用的 Key；不填就都用 DEEPSEEK_API_KEY 和 DEEPSEEK_MODEL
     memory_pro_model: str = "deepseek-v4-pro"
     memory_nightly_use_pro: bool = True   # 睡前整理用 pro（10/16 对比：合并稳、印象干净）

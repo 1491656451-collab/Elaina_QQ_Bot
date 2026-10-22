@@ -440,6 +440,14 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
    - mood：她的感受，一两个词（开心、得意、无语、烦、在意、好笑……）
    - keywords：2～4 个关键词，用来给日记挑配图（例如 面包、下雨、读书、猫）
 
+七、她自己最近的经历 self（存进她自己的“近况”，和上面每个人的 told 分开：told 记“对这个人讲过什么”，这里记“这件事本身”）：用户消息最后有“她之前说自己在哪”和“她最近说过的经历”（#编号）。只看“伊蕾娜（她自己）：”说的话：
+   - same：这段里她讲的就是“最近说过的经历”里的某一条（换了说法也算），写编号，不要再写进 new。
+   - new：她讲成自己最近真的经历过的事（到了哪里、遇到什么、接了什么委托、看到吃到什么；很小的事也算，比如被路人问了句什么），上面又没有的。每件一句，不超过 40 字，省略主语，只写发生了什么；mood 写她讲这件事时的心情，两三个字，看不出就空着。最多 3 件。
+   - 这些不算，不要写：被问起时讲的小说里以前的旅途往事（以前遇到的人、很久以前去过的国家，“讲讲你的旅行”时讲的那些故事）；玩笑、比喻、假设；只是回应对方、吐槽、拒绝的话；别人的事；以后打算做的事。分不清的不写。大多数时候都没有。
+   - place：只有她在这段里明说了自己现在在哪（“到了……”“在……落脚”“这几天都在……赶路”“又回到了……”）才写 {"name": "地名，没有名字就写“某片森林”这样的说法，不超过 15 字", "kind": "城镇、野外、小说地点 三选一，判断不出来就空着", "moved": 到了新地方、换了地方写 true，只是提到现在待的地方写 false}。只提到一家店、一间屋子（面包店、旅店），从她做的事、天气推出来的，以前往事里的地方，用户消息里给的“她之前说自己在哪”（这段里没再提），都不算。
+   - fits：new 里每件事和她现在在哪对不对得上（这段说了换地方的，按新的地方看）；没说换地方，人在野外却讲“刚在镇上的店里……”，写 false。
+   - 都没有就不写 self。
+
 只输出 JSON，格式（没有的项可以省略或留空）：
 {"people": [{"qq": 123456,
    "add": [{"text": "……", "kind": "喜好", "weight": 2, "tags": ["……", "……"]}],
@@ -447,7 +455,8 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
    "told": ["……"], "told_update": [{"old": "……", "text": "……"}], "impression": "……",
    "affection": 2, "affection_kind": "正常", "reason": "……", "gender_guess": "不确定", "gender_evidence": "", "gender_evidence_kind": ""}],
  "group_events": {"add": [{"text": "……", "who": [123456]}], "drop": []},
- "today_moments": [{"qq": 123456, "event": "……", "mood": "……", "keywords": ["……"]}]}"""
+ "today_moments": [{"qq": 123456, "event": "……", "mood": "……", "keywords": ["……"]}],
+ "self": {"same": [3], "new": [{"text": "……", "mood": "……", "fits": true}], "place": {"name": "……", "kind": "城镇", "moved": false}}}"""
 
 SUMMARIZE_INPUT = """今天是 {today}。这段聊天来自：{where}。
 
@@ -458,7 +467,10 @@ SUMMARIZE_INPUT = """今天是 {today}。这段聊天来自：{where}。
 {events}
 
 【聊天记录】
-{transcript}"""
+{transcript}
+
+【她自己（伊蕾娜）之前说过的】
+{self_block}"""
 
 
 VERIFY_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）的记忆核对员。用户消息里是一段聊天记录（“伊蕾娜（她自己）：”开头的是她自己说的，其余是别人说的），和根据这段记录整理出来、准备存进她记忆里的几条。
@@ -974,12 +986,19 @@ class LongTermMemory(AffectionMixin):
         where = f"群聊（群 {gid}）" if gid else ("QQ 空间评论（公开的）" if key.startswith("qzone_") else "私聊")
         place = "group" if gid else ("qzone" if key.startswith("qzone_") else "private")
         gens = {qq: profiles[qq].get("mem_gen", 0) for qq in people}   # 整理期间管理员 /忘记 过的，印象、说过的话不再写回去
+        self_block, self_nums = "（不用写 self）", {}
+        if self.self_mem is not None:                # 她自己的近况（10/23，self_memory.py）：给模型看她之前说过的，好认“同一件事”
+            try:
+                self_block, self_nums = self.self_mem.summary_block()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"近况：拼给整理看的那段出错，这次不收她讲的经历：{e}")
         user_msg = SUMMARIZE_INPUT.format(
             today=datetime.now().strftime("%Y-%m-%d（%Y年%m月%d日）"),
             where=where,
             profiles="\n".join(self._profile_block(qq, people[qq], profiles[qq], place, gid) for qq in people) or "（无）",
             events=self._events_block(gid, group),
             transcript=self._transcript(key, entries),
+            self_block=self_block,
         )
         if not budget.can_background():
             logger.info(f"长期记忆：今天的钱花完了，{key} 先不整理，留到明天（待整理的消息都留着）")
@@ -1071,6 +1090,13 @@ class LongTermMemory(AffectionMixin):
             logger.warning(f"长期记忆：{key} 整理结果合并出错，这次作废：{type(e).__name__}: {e}")
             self._failed(key)
             return
+        if self.self_mem is not None and self_nums is not None and isinstance(data.get("self"), dict):
+            # 她在这段聊天里讲的经历、说自己在哪，交给近况（10/23 C）。出错只记日志，不影响上面已经存好的档案
+            her = "\n".join(str(e.get("content") or "") for e in entries if e.get("role") == "assistant")
+            try:
+                self.self_mem.apply_from_chat(key, data["self"], self_nums, her)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"近况：收这段聊天里她讲的经历出错：{type(e).__name__}: {e}")
         # 只删掉这次整理过的那几条；整理期间新攒的留着下次用
         done = {e["_pid"] for e in entries if e.get("_pid") is not None}
         now_list = _read(path, [])
@@ -1104,6 +1130,12 @@ class LongTermMemory(AffectionMixin):
                     text = _item_text(x.get("text") if isinstance(x, dict) else x, 60)
                     if text:
                         items.append((p, field, i, text, f"关于「{who}」（QQ {qq}）｜{label}：{text}"))
+        sp = data.get("self")                        # 她自己最近的经历（10/23 C）：该是“伊蕾娜”的事，别人的、对方的不收
+        if isinstance(sp, dict) and isinstance(sp.get("new"), list):
+            for i, x in enumerate(sp["new"]):
+                text = _item_text(x.get("text") if isinstance(x, dict) else x, 60)
+                if text:
+                    items.append((sp, "new", i, text, f"伊蕾娜自己最近的经历：{text}"))
         if not items:
             return data
         user_msg = ("【聊天记录】\n" + self._transcript(key, entries) + "\n\n【要核对的】\n"
@@ -1124,7 +1156,7 @@ class LongTermMemory(AffectionMixin):
                 who = str(c.get("who", "")).strip() if isinstance(c, dict) else ""
                 if n is None or not 1 <= n <= len(items) or who not in ("对方", "伊蕾娜", "别人", "没有"):
                     continue
-                want = "伊蕾娜" if items[n - 1][1] == "told" else "对方"
+                want = "伊蕾娜" if items[n - 1][1] in ("told", "new") else "对方"
                 if who != want:
                     bad.append({"n": n, "why": {"别人": "别人的事", "没有": "记录里没有"}.get(who, f"其实是{who}的事")})
         except Exception as e:  # noqa: BLE001
@@ -1138,7 +1170,7 @@ class LongTermMemory(AffectionMixin):
             p, field, i, text, _ = items[n - 1]
             why = _clean_text(b.get("why"), 20) if isinstance(b, dict) else ""
             drop[(id(p), field)].add(i)
-            logger.info(f"长期记忆：核对挡下 {key} {p.get('qq')} 的“{text}”（{why or '有问题'}）")
+            logger.info(f"长期记忆：核对挡下 {key} {p.get('qq') or '她自己'} 的“{text}”（{why or '有问题'}）")
         for p, field, *_ in items:
             gone = drop.get((id(p), field))
             if gone and isinstance(p.get(field), list):
@@ -1615,6 +1647,7 @@ class LongTermMemory(AffectionMixin):
     # 好感（分数、档位、回落、性别、面包、雷点、/好感 的显示）挪到了 affection.py 的 AffectionMixin，这个类继承它，
     # ltm.xxx() 的用法不变（10/22 拆分第 3 步）。下面两行是整理记忆用的设置，原来就放在这里
     summary_max_tokens: int = 4000           # 整理时模型最多写多少（只写增改删，一般几百 token）
+    self_mem = None                          # 她自己的近况（self_memory.SelfMemory，core.py 里接上）：整理时顺带收她讲的经历
     summary_client = None                    # 整理专用的客户端（超时更长、不自动重试）；没设就用聊天那个
 
     def last_seen(self, qq: int) -> float | None:

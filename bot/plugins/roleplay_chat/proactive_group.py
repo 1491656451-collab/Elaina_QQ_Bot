@@ -291,7 +291,7 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
             messages = api_messages(
                 [{"role": "system", "content": system_prompt()}]
                 + history[-6:]
-                + [{"role": "system", "content": prompt + short_hint()}]
+                + [{"role": "system", "content": "\n\n".join(x for x in (proactive_common.life_memo(key), prompt + short_hint()) if x)}]
             )
             reply = await proactive_common.ask(bot, messages, "bubble", "冒泡：调用失败", group=gid)
             if reply is None:
@@ -306,6 +306,7 @@ async def bubble(bot: Bot, gid: int, force: bool = False) -> str | None:
             _away.pop(key, None)                      # 她已经自己开口了，下次聊天不用再说“刚回来”
         if not await proactive_common.send_to_group(bot, gid, reply, "冒泡"):
             return None
+        proactive_common.note_said(reply, "冒泡", key)
         now_m = time.monotonic()
         _last_bot_msg[gid] = (now_m, 0, reply)
         _last_smart[gid] = now_m
