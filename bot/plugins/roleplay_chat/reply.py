@@ -5,7 +5,7 @@ import asyncio
 import random
 import re
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from types import SimpleNamespace
 
 from nonebot import logger, on_message
@@ -91,6 +91,54 @@ _reply_started: dict[tuple[str, int], float] = {}  # (会话, QQ) -> 她开始�
 
 
 _reply_done: dict[tuple[str, int], float] = {}     # (会话, QQ) -> 她回完这个人的时间
+# 10/23 对方像机器人：每 (会话, QQ) 记她最后一条发出的时间、这一轮对方回了没有、最近几轮是不是“几秒内引用回”、不回到什么时候
+_botlike: dict[tuple[str, int], dict] = {}
+
+
+def note_round(ik: tuple[str, int], event: MessageEvent, self_id: int) -> None:
+    """对方来了一条：如果是她发完以后的第一条（新的一轮），记下这一轮是不是“几秒内引用她的话回”"""
+    st = _botlike.get(ik)
+    if not st or not st.get("open"):
+        return
+    st["open"] = False
+    rep = getattr(event, "reply", None)
+    quoted = bool(rep) and str(getattr(getattr(rep, "sender", None), "user_id", "")) == str(self_id)
+    gap = float(getattr(event, "time", 0) or time.time()) - st["last_out"]
+    now = time.time()
+    st["rounds"].append((now, quoted and gap <= cfg.botlike_seconds))
+    while st["rounds"] and now - st["rounds"][0][0] > cfg.botlike_window_minutes * 60:
+        st["rounds"].popleft()
+
+
+def botlike_state(ik: tuple[str, int]) -> str | None:
+    """"mute"：这段时间不回；"slow"：回之前多等一会儿；None：照常"""
+    if not cfg.botlike_enabled:
+        return None
+    st = _botlike.get(ik)
+    if not st:
+        return None
+    now = time.time()
+    if st.get("mute_until", 0) > now:
+        return "mute"
+    rounds = list(st["rounds"])
+    if sum(r for _, r in rounds) >= cfg.botlike_mute:
+        st["mute_until"] = now + cfg.botlike_mute_minutes * 60
+        st["rounds"].clear()
+        logger.warning(f"对方像是另一个机器人：{ik[0]} 最近 {cfg.botlike_window_minutes:g} 分钟里 {cfg.botlike_mute} 轮都在几秒内引用她的话回，"
+                       f"接下来 {cfg.botlike_mute_minutes:g} 分钟不回")
+        return "mute"
+    if sum(r for _, r in rounds[-cfg.botlike_rounds:]) >= cfg.botlike_slow:
+        return "slow"
+    return None
+
+
+def note_sent_round(ik: tuple[str, int]) -> None:
+    """她这一轮发完了：开始新的一轮"""
+    st = _botlike.setdefault(ik, {"rounds": deque(maxlen=64)})
+    st["last_out"], st["open"] = time.time(), True
+
+
+_reply_owner: dict[tuple[str, int], "asyncio.Task | None"] = {}   # (会话, QQ) -> 正在回这个人的那一轮（10/23）
 
 
 def is_sticker_only(event: MessageEvent) -> bool:
@@ -211,9 +259,14 @@ async def converse(bot: Bot, event: MessageEvent, catchup_age: float | None = No
     try:
         await _converse(bot, event, catchup_age)
     finally:
-        # 不管是回完了，还是中途不回（出错、她觉得没必要接话、已经告别……），都记下“这一轮结束了”
-        if _reply_started.get(ik, -1e9) > _reply_done.get(ik, -1e9):
-            _reply_done[ik] = time.monotonic()
+        # 不管是回完了，还是中途不回（出错、她觉得没必要接话、已经告别……），都记下“这一轮结束了”。
+        # 10/23：只有真正开始回的那一轮才记。以前被后来的消息合并掉、根本没开始回的那几条也会记“结束了”，
+        # 对方连着发的时候（10/23 晚某位新好友是个每条都回的机器人），她上一轮还在打字，下一轮就开始想了，
+        # 一轮接一轮排队，对方停了以后她还发了三分多钟
+        if _reply_owner.get(ik) is asyncio.current_task():
+            _reply_owner.pop(ik, None)
+            if _reply_started.get(ik, -1e9) > _reply_done.get(ik, -1e9):
+                _reply_done[ik] = time.monotonic()
 
 
 async def _converse(bot: Bot, event: MessageEvent, catchup_age: float | None = None) -> None:
@@ -257,6 +310,8 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
 
     # 连续发送：先把这条放进收件箱，等几秒；期间同一个人又发了，就交给最新那条一起回复
     ik = (key, event.user_id)
+    if catchup_age is None:
+        note_round(ik, event, int(bot.self_id))       # 10/23：对方是不是她一发完就引用着回（像机器人）
     # 消息发完接一个表情：她已经在回（或者刚回完）上一条了，这个表情算同一条，不单独回
     if (catchup_age is None and cfg.sticker_follow_seconds > 0 and is_sticker_only(event)
             and not _inbox.get(ik) and sticker_follows_reply(ik)):
@@ -291,6 +346,26 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
         _token_counter += 1
         token = _inbox_token[ik] = _token_counter
 
+    # 10/23 对方像另一个机器人（她每发一轮，对方都在几秒内引用回）：先放慢，还这样就一阵子不回
+    bl = botlike_state(ik) if catchup_age is None else None
+    if bl == "slow":
+        wait = random.uniform(*cfg.botlike_slow_delay)
+        logger.info(f"对方像是另一个机器人，放慢：{key} 等 {wait:.0f} 秒再回")
+        await asyncio.sleep(wait)
+        if _inbox_token.get(ik) != token:
+            return None
+        bl = botlike_state(ik)
+    if bl == "mute":
+        texts = _take_inbox(ik)
+        if texts:
+            async with _locks[key]:
+                history = get_history(key)
+                joined = clip_input("\n".join(texts))
+                history.append({"role": "user", "content": speaker_head(event) + clean_body(joined) if is_group else joined,
+                                "uid": event.user_id, "name": sender_label(event), "ts": time.time()})
+                save_history(key)
+        logger.info(f"对方像是另一个机器人，这阵子不回 {key} user={event.user_id}")
+        return None
     # 她刚说过“我要去赶路了”：这段时间真的不在，对方的话记下来，回来以后再说
     target = _target_of(event)
     if catchup_age is None and away_left(target) > 0:
@@ -414,6 +489,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     if not texts:                     # 已经被前一条合并回复过了
         return False
     _reply_started[ik] = time.monotonic()
+    _reply_owner[ik] = asyncio.current_task()      # 谁开始回的，谁回完了才记“结束了”（见 converse）
     text = clip_input("\n".join(texts))
     # 这条消息到的时候的计数（之后有人插话、或者她先说了别的，就引用原句）
     seq_at_trigger = _arrival_seq.pop((_target_of(event), int(event.message_id)), _chat_seq[_target_of(event)])
@@ -480,7 +556,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     if back and time.time() - back["said"] < BACK_HINT_HOURS * 3600:   # 隔太久了就不提“刚回来”
         time_memo = "\n".join(x for x in (time_memo, f"【刚回来】你 {human_gap(time.time() - back['said'])}前说了要走（“{back['line'][:20]}”），现在才回来。"
                                                         "可以自然地带一句刚回来，不要装作没说过要走；这段时间对方发的话在上面。") if x)
-    gender_memo = "" if commands.in_test_mode(event.user_id) else gender_step(event.user_id, text)   # 测试模式：不记性别说法（10/23）
+    gender_memo = "" if commands.in_test_mode(event.user_id) else await gender_step(event.user_id, text, prev_bot)   # 测试模式：不记性别说法；10/23 起由模型判断，要带上她上一句
     gifts = detect_gifts(text)
     bread_first = any(k == "bread" for k, _ in gifts) and not ltm.bread_given_today(event.user_id)
     gift_memo = "\n".join(gift_hint(k, snip[:20], bread_first, fam) for k, snip in gifts)
@@ -830,6 +906,9 @@ async def _send(bot: Bot, turn: SimpleNamespace) -> None:
                 ltm.add_pending(key, others)
             logger.info(f"测试模式：{event.user_id} 这一轮不交给长期记忆")
         mark_sent(target)
+        note_sent_round(ik)
+        # 她这一轮说了要走：先记下“不在了”，再记“这一轮结束了”，排在后面等着的那条就不会再回（10/23）
+        leaving = note_leaving(target, out_text)
         _reply_done[ik] = time.monotonic()
         _active_chats[target] = {"at": time.monotonic(), "group_id": event.group_id if is_group else None,
                                  "user_id": event.user_id}
@@ -853,7 +932,7 @@ async def _send(bot: Bot, turn: SimpleNamespace) -> None:
         mark_sent(target)
     if out_text and cfg.knowledge_enabled:
         note_topic(key, out_text)                    # 她讲了哪段经历：对方接着追问时还记得
-    if note_leaving(target, out_text):   # 她自己说了要走：接下来一阵子真的不在
+    if leaving:                          # 她自己说了要走：接下来一阵子真的不在
         _nudge_due.pop(event.user_id, None)
     elif not is_group:
         arm_nudge(event.user_id, text)            # 私聊：对方一阵子没回的话，她可能自己再说一句

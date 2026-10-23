@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import deque
 import re
 import shutil
 import time
@@ -19,6 +20,7 @@ MEM_REPLY = {"people": [], "group_events": []}
 JUDGE = {"answer": "否", "calls": 0}
 VISION = {"answer": "一只橘猫趴在键盘上", "calls": 0}
 VERIFY = {"answer": '{"ok": true}', "calls": 0}   # 核对讲的往事
+GENDER = {"answer": "无", "calls": 0}   # 10/23 起：对方是不是在说自己的性别，问模型（好感 agent 加）
 
 
 def mem_prompt(kw) -> str:
@@ -46,6 +48,9 @@ def fake_create(reply, finish="stop"):
             if isinstance(VERIFY["answer"], Exception):
                 raise VERIFY["answer"]
             return resp(VERIFY["answer"])
+        if kw.get("max_tokens") == 4 and "是不是在说**自己**的性别" in str(kw["messages"][0]["content"]):   # 性别判断
+            GENDER["calls"] += 1
+            return resp(GENDER["answer"])
         if "response_format" in kw:          # 长期记忆整理
             MEM_CALLS.append(kw)
             return resp(json.dumps(MEM_REPLY, ensure_ascii=False))
@@ -86,6 +91,8 @@ def clean_state():
         p._speakers.clear(); p._replied_at.clear()
     if hasattr(p, "_reply_started"):
         p._reply_started.clear(); p._reply_done.clear()
+        getattr(p.reply, "_reply_owner", {}).clear()
+        getattr(p.reply, "_botlike", {}).clear()
     if hasattr(p, "_recent_chat"):
         p._recent_chat.clear(); p._interject_skip_until.clear(); p._interject_busy.clear()
         p.INTERJECT_FILE.unlink(missing_ok=True)
@@ -1082,9 +1089,24 @@ def test_gender_claim_parse():
         assert p.gender_claim(t) is None, t
 
 
+GENDER_VERDICTS = {"我是女生哦": "female", "真的啦，骗你干嘛": "female", "我是女生": "female", "其实我是男的": "male",
+                   "开玩笑的": "deny"}
+
+
+def fake_judge(verdicts, seen=None):
+    """10/23 起性别说法由模型判断：测试里按表直接给结论，记下问了哪些话"""
+    async def judge(qq, text, prev=""):
+        if seen is not None:
+            seen.append((text, prev))
+        return verdicts.get(text)
+    return judge
+
+
 @pytest.mark.asyncio
-async def test_gender_doubt_then_confirm(app: App):
+async def test_gender_doubt_then_confirm(app: App, monkeypatch):
     import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import affection_turn
+    monkeypatch.setattr(affection_turn, "judge_gender", fake_judge(GENDER_VERDICTS))
     p.client.chat.completions.create = fake_create("真的假的？")
 
     async def say(text, mid, uid=7901):
@@ -1120,6 +1142,64 @@ async def test_gender_doubt_then_confirm(app: App):
     prof = p.ltm.get_user(7902); prof["gender_pending"]["ts"] -= 3600; p.ltm.save_user(prof)
     hint = await say("嗯", 3007, uid=7902)
     assert p.ltm.get_user(7902).get("gender") is None
+
+
+@pytest.mark.asyncio
+async def test_gender_judged_by_model(app: App, monkeypatch):
+    """10/23（《问题排查记录-性别误判-1023》）：问句、“我可没说我是男生”不算自称；判断交给模型，要带上她上一句"""
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import affection_turn
+    seen = []
+    verdicts = {"你觉得我是男孩子还是女孩子呢": None, "我可没说我是男生，你记错了吧": "deny", "现在相信我是女生了吧": "female",
+                "是的": "female", "我是男生": "male"}
+    monkeypatch.setattr(affection_turn, "judge_gender", fake_judge(verdicts, seen))
+    p.client.chat.completions.create = fake_create("嗯？")
+
+    async def say(text, mid, uid=7950):
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = pev(text, uid=uid, mid=mid)
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "嗯？", result=None, bot=bot)
+        return CALLS[-1]["messages"][-2]["content"]
+
+    hint = await say("今天吃了面包", 3400)                          # 不沾性别、也没在等确认：不问模型
+    assert "【性别】" not in hint and seen == []
+    hint = await say("你觉得我是男孩子还是女孩子呢", 3401)            # 问句：模型说“无”
+    assert "【性别】" not in hint and not p.ltm.get_user(7950).get("gender_pending")
+    assert seen[-1] == ("你觉得我是男孩子还是女孩子呢", "嗯？")        # 带上了她上一句
+    hint = await say("我可没说我是男生，你记错了吧", 3402)            # 否认：没有待确认的，什么都不做
+    assert "【性别】" not in hint and not p.ltm.get_user(7950).get("gender_log")
+    hint = await say("现在相信我是女生了吧", 3403)
+    assert "对方说自己是女生" in hint and "以前明明" not in hint
+    hint = await say("是的", 3404)                                  # 等确认时，不带性别字的也问模型
+    assert "姑且信了" in hint and p.ltm.last_claim(p.ltm.get_user(7950)) == "female"
+    # 等确认时对方否认：作罢，不记
+    await say("我是男生", 3410, uid=7951)
+    assert p.ltm.get_user(7951)["gender_pending"]["value"] == "male"
+    hint = await say("我可没说我是男生，你记错了吧", 3411, uid=7951)
+    assert "别再提" in hint and not p.ltm.get_user(7951).get("gender_pending") and not p.ltm.get_user(7951).get("gender_log")
+
+
+@pytest.mark.asyncio
+async def test_gender_judge_parse_and_error(monkeypatch):
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import affection_turn as a
+    assert [a.parse_gender_judge(x) for x in ("女", "男。", "否认", "无", "「女」", "", "不知道")] == \
+        ["female", "male", "deny", None, "female", None, None]
+
+    p.client.chat.completions.create = fake_create("嗯")
+    GENDER["answer"] = "女"
+    try:
+        assert await a.judge_gender(1, "人家可是女孩子", "你是男是女？") == "female"
+    finally:
+        GENDER["answer"] = "无"
+
+    async def boom(*args, **kwargs):
+        raise TimeoutError("慢")
+    monkeypatch.setattr(p.client.chat.completions, "create", boom)
+    assert await a.judge_gender(1, "我是女生", "嗯") is None          # 出错：这轮不管性别，不影响回复
+
 
 
 @pytest.mark.asyncio
@@ -5993,3 +6073,139 @@ async def test_letter_goes_to_life_1023(monkeypatch):
     assert await p.write_letter(_PBot(), 9984, manual=True) == letter
     assert said == [(letter, {"source": "写信", "key": "private_9984", "qq": 9984})]
     assert "雨伞之城" in CALLS[-1]["messages"][-1]["content"]
+
+
+
+# ---------------------------------------------------------------- 10/23 对方连着发：上一轮没发完，下一轮不开始想
+@pytest.mark.asyncio
+async def test_superseded_message_not_mark_done_1023(monkeypatch):
+    """10/23 晚某位新好友（一个每条都回的机器人）：她上一轮还在打字，对方又来两条，
+    第一条被第二条合并掉、没开始回，以前也会记“这一轮结束了”，第二条就不等了、马上开始想，
+    一轮接一轮排队，对方停了以后她还发了三分多钟。现在等她上一轮发完才开始下一轮"""
+    import plugins.roleplay_chat as p
+    for k in ("merge_wait", "merge_wait_complete", "merge_wait_incomplete"):
+        monkeypatch.setattr(p.cfg, k, 0.3)
+    monkeypatch.setattr(p.reply, "typing_delay", lambda s: 2.0)
+    log = []
+    base = fake_create("好的。")
+
+    async def create(**kw):
+        if kw.get("max_tokens") != 2 and "response_format" not in kw:
+            log.append(("想", time.monotonic() - t0))
+        return await base(**kw)
+    p.client.chat.completions.create = create
+
+    class B(_PBot):
+        async def send(self, event, msg):
+            log.append(("发", time.monotonic() - t0))
+    bot = B()
+    t0 = time.monotonic()
+    first = asyncio.create_task(p.converse(bot, pev("第一句", uid=7771, mid=8101)))
+    await asyncio.sleep(1.0)                      # 她已经想好了，正在打字
+    second = asyncio.create_task(p.converse(bot, pev("第二句", uid=7771, mid=8102)))
+    await asyncio.sleep(0.1)
+    third = asyncio.create_task(p.converse(bot, pev("第三句", uid=7771, mid=8103)))   # 第二句被合并进来
+    await asyncio.gather(first, second, third)
+    kinds = [k for k, _ in log]
+    assert kinds == ["想", "发", "想", "发"], log  # 第二轮在第一轮发完以后才开始想，两句合成一轮回
+    assert log[2][1] > log[1][1]
+    assert "第二句" in str(CALLS[-1]["messages"]) and "第三句" in str(CALLS[-1]["messages"])
+
+
+
+# ---------------------------------------------------------------- 10/23 对方像另一个机器人：放慢，还这样就一阵子不回
+def _bot_round_1023(p, ik, quoted=True, gap=3.0, self_id=123):
+    """她发完一轮，对方 gap 秒后来一条（quoted：引用了她的话）"""
+    p.reply.note_sent_round(ik)
+    st = p.reply._botlike[ik]
+    st["last_out"] -= 100                              # 往前挪，好用对方消息的时间算间隔
+    rep = SimpleNamespace(sender=SimpleNamespace(user_id=self_id)) if quoted else None
+    ev = SimpleNamespace(reply=rep, time=st["last_out"] + gap)
+    p.reply.note_round(ik, ev, self_id)
+
+
+def test_botlike_rounds_1023():
+    import plugins.roleplay_chat as p
+    r = p.reply
+    ik = ("private_7781", 7781)
+    for _ in range(5):
+        _bot_round_1023(p, ik)
+    assert r.botlike_state(ik) is None                 # 5 轮：还照常
+    _bot_round_1023(p, ik)
+    assert r.botlike_state(ik) == "slow"               # 最近 8 轮里 6 轮几秒内引用回：放慢
+    for _ in range(3):
+        _bot_round_1023(p, ik, quoted=False)           # 没引用 / 隔了很久才回的轮不算
+    _bot_round_1023(p, ik, gap=30)
+    assert r.botlike_state(ik) is None
+    # 同一轮里对方的第二条不再算
+    r.note_sent_round(ik)
+    ev = SimpleNamespace(reply=SimpleNamespace(sender=SimpleNamespace(user_id=123)), time=time.time())
+    n = len(r._botlike[ik]["rounds"])
+    r.note_round(ik, ev, 123); r.note_round(ik, ev, 123)
+    assert len(r._botlike[ik]["rounds"]) == n + 1
+    # 30 分钟里 14 轮：一阵子不回
+    ik2 = ("private_7782", 7782)
+    for _ in range(14):
+        _bot_round_1023(p, ik2)
+    assert r.botlike_state(ik2) == "mute" and r.botlike_state(ik2) == "mute"
+    assert r._botlike[ik2]["mute_until"] - time.time() > 50 * 60
+    # 关掉就不管
+    p.cfg.botlike_enabled = False
+    try:
+        assert r.botlike_state(ik2) is None
+    finally:
+        p.cfg.botlike_enabled = True
+
+
+@pytest.mark.asyncio
+async def test_botlike_mute_and_slow_in_converse_1023(monkeypatch):
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("嗯。")
+    ik = ("private_7783", 7783)
+    p.reply._botlike[ik] = {"rounds": deque(), "mute_until": time.time() + 600, "open": False, "last_out": 0}
+    bot = _PBot()
+    await p.converse(bot, pev("在吗", uid=7783, mid=8201))
+    assert bot.sent == []                              # 不回
+    assert p.get_history("private_7783")[-1]["content"] == "在吗"   # 对方的话照常记下
+    # 放慢：回之前多等一会儿
+    waits = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(s, *a, **k):
+        if s >= 50:
+            waits.append(s)
+            return
+        await real_sleep(min(s, 0.01))
+    monkeypatch.setattr(p.reply.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(p.reply, "botlike_state", lambda ik: "slow")
+    bot = _PBot()
+    await p.converse(bot, pev("在吗", uid=7784, mid=8202))
+    assert bot.sent and waits and 60 <= waits[0] <= 120
+
+
+@pytest.mark.asyncio
+async def test_leave_blocks_queued_turn_1023(monkeypatch):
+    """她这一轮说了“我要去睡了”：排在后面等着的那条不再回（先记“不在了”，再记“这一轮结束了”）"""
+    import plugins.roleplay_chat as p
+    for k in ("merge_wait", "merge_wait_complete", "merge_wait_incomplete"):
+        monkeypatch.setattr(p.cfg, k, 0.3)
+    monkeypatch.setattr(p.reply, "typing_delay", lambda s: 1.5)
+    p.client.chat.completions.create = fake_create("好了，我要去睡了。")
+    bot = _PBot()
+    first = asyncio.create_task(p.converse(bot, pev("还不睡吗", uid=7785, mid=8301)))
+    await asyncio.sleep(0.8)                           # 她在打字
+    second = asyncio.create_task(p.converse(bot, pev("晚安喵", uid=7785, mid=8302)))
+    await asyncio.gather(first, second)
+    assert bot.sent == ["好了，我要去睡了。"]
+    assert p.away_left("private_7785") > 0
+
+
+def test_budget_kind_gender_1023(tmp_path):
+    """10/23 好感 agent 新加的 gender（判断性别说法）：显示成“判断性别说法”，和 judge 一样算聊天类、算到这个人头上"""
+    from plugins.roleplay_chat import budget as B
+    b = B.Budget(tmp_path, peak_multiplier=1.0)
+    r = SimpleNamespace(usage=SimpleNamespace(prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=300, completion_tokens=1))
+    b.track(r, "gender", user=9901)
+    d = b.today()
+    assert "gender" in B.CHAT_KINDS and d["chat"] == pytest.approx(d["total"]) and d["users"]["9901"] == pytest.approx(d["total"])
+    assert "判断性别说法：" in b.report()

@@ -979,9 +979,28 @@ def friend_candidates(me: int, items: list[dict]) -> list[dict]:
     return out
 
 
-def _friend_skip_reason(me: int, d: dict, created_fallback: int) -> str:
+def _rt_fields(d: dict) -> dict:
+    return {k: v for k, v in d.items() if str(k).startswith("rt_")}
+
+
+def _is_forward(d: dict, owner: int) -> bool:
+    """是不是转发别人的说说。10/23：原来只要详情里有 rt_ 开头的字段就算转发，
+    结果你大号自己写的说说（文案 + 图）两次都被当成转发（原创说说里也带着这几项，只是是空的）。
+    现在要真有被转发的那条：rt_tid 不空、rt_uin 是别人"""
+    rt_tid = str(d.get("rt_tid") or "").strip()
+    try:
+        rt_uin = int(d.get("rt_uin") or 0)
+    except (TypeError, ValueError):
+        rt_uin = 0
+    return bool(rt_tid) and rt_uin not in (0, owner)
+
+
+def _friend_skip_reason(me: int, d: dict, created_fallback: int, owner: int = 0) -> str:
     """读到详情后，还有哪些情况不评"""
-    if d.get("rt_tid") or d.get("rt_con") or d.get("rt_uin"):
+    rt = _rt_fields(d)
+    if rt:       # 先把原样记下来，判断再出错时有据可查
+        qz._log("好友说说·转发字段", "-", 0, json.dumps(rt, ensure_ascii=False)[:300])
+    if _is_forward(d, owner):
         return "是转发"
     created = int(d.get("created_time") or created_fallback)
     if time.time() - created > cfg.qzone_friend_post_max_age_hours * 3600:
@@ -1056,7 +1075,7 @@ async def poll_friends() -> str:
         reads += 1
         d.setdefault("tid", it["tid"])
         nick = str(d.get("name") or it["nick"] or it["owner"])
-        skip = _friend_skip_reason(me, d, it["abstime"])
+        skip = _friend_skip_reason(me, d, it["abstime"], it["owner"])
         if skip:
             _mark_seen([k])
             notes.append(f"{nick}：{skip}")
@@ -1297,6 +1316,7 @@ _last_draft: dict | None = None
 USAGE = ("/说说 预览：生成一条给你看，不发\n/说说 发预览：把刚才预览的那条发出去\n/说说 立即发：马上生成并发出（离它不到 12 小时的定时说说会跳过）\n"
          "/说说 删除最新：删掉最近一条\n/说说 今日：今天的见闻和发布安排\n/说说 图库：图库情况\n/说说 查评论：马上查一轮评论（自己说说下的、别人空间里 @ 她的）并回复，顺便刷好友动态\n"
          "/说说 好友动态：只看不评，列出最近好友发的说说和她评论的几率\n"
+         "/说说 详情 QQ号 说说编号：只读那一条说说，看转发相关的字段和程序会判成转发还是原创\n"
          "/说说 日结：马上把今天的聊天整理成见闻\n/说说 暂停 / 恢复：停掉或恢复自动发说说和回评论（恢复也会解除风控熔断）")
 
 diary_cmd = on_command("说说", rule=to_me(), permission=SUPERUSER, priority=5, block=True)
@@ -1315,10 +1335,13 @@ def _draft_msg(d: dict, head: str) -> Message:
 async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
     global _last_draft
     cmd = arg.extract_plain_text().strip()
+    detail_args = cmd.split()[1:] if cmd.split()[:1] == ["详情"] else None
+    if detail_args is not None:
+        cmd = "详情"
     blocked = risk_block()
-    if blocked and cmd in ("发预览", "立即发", "删除最新", "查评论", "好友动态"):
+    if blocked and cmd in ("发预览", "立即发", "删除最新", "查评论", "好友动态", "详情"):
         await diary_cmd.finish(f"（空间功能{blocked}。这时候再动空间容易让设备被下线；确定要恢复就先发 /说说 恢复）")
-    if cmd in ("查评论", "好友动态") and read_block():
+    if cmd in ("查评论", "好友动态", "详情") and read_block():
         await diary_cmd.finish(f"（先不查：{read_block()}）")
     if cmd == "删除最新" and write_block():
         await _warm_cookie()
@@ -1377,6 +1400,21 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             await diary_cmd.finish((f"（刚处理了 {n} 张新图）\n" if n else "") + gallery.stats(cfg.qzone_image_reuse_days))
         elif cmd == "查评论":
             await diary_cmd.finish("（" + await poll_all() + "）")
+        elif cmd == "详情":
+            # 10/23：只读一条说说，核对“是不是转发”的判断（只发一次读请求，不写）
+            if len(detail_args) != 2 or not detail_args[0].isdigit():
+                await diary_cmd.finish("（用法：/说说 详情 QQ号 说说编号。编号在 qzone.log 或已看过记录里，比如 fa1743cebf7cd96a56280500）")
+            owner, tid = int(detail_args[0]), detail_args[1]
+            d = await qz.detail(tid, owner)
+            rt = _rt_fields(d)
+            created = int(d.get("created_time") or 0)
+            when = datetime.fromtimestamp(created, BJ).strftime("%m-%d %H:%M") if created else "?"
+            text = plain_text(str(d.get("content") or "")).strip()
+            lines = [f"（{d.get('name') or owner}｜{when}｜配图 {len(post_pics(d))} 张｜评论 {len(parse_comments(d.get('commentlist')))} 条）",
+                     f"正文：{text[:80] or '（没字）'}",
+                     "转发相关字段：" + (json.dumps(rt, ensure_ascii=False)[:500] if rt else "没有"),
+                     f"程序判成：{'转发（不评）' if _is_forward(d, owner) else '原创'}"]
+            await diary_cmd.finish("\n".join(lines))
         elif cmd == "好友动态":
             me = (await qz.ctx()).uin
             items = await qz.friend_feeds(20)

@@ -350,3 +350,11 @@ def test_place_word_without_move_logged(tmp_path, caplog):
         logger.remove(hid)
     hits = [x for x in lines if "提到地点词但没换地方" in x]
     assert len(hits) == 1 and "集市" in hits[0]
+
+
+def test_summary_her_claims_and_stories_1023():
+    """10/23：她对他的说法（“你之前说自己是男生”）、她讲的小说人物的事，都不算他的；核对也这么判"""
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT, VERIFY_PROMPT
+    assert "伊蕾娜对他的说法" in SUMMARIZE_PROMPT and "她自己答应过、讲过的照常写进 told" in SUMMARIZE_PROMPT and "小说里的人（美奈、沙耶、芙兰……）的事" in SUMMARIZE_PROMPT
+    assert "伊蕾娜讲的故事、小说里的人（美奈、沙耶……）的事" in VERIFY_PROMPT
+    assert "只是伊蕾娜这么说、对方自己没说过的" in VERIFY_PROMPT

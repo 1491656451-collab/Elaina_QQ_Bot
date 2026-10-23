@@ -1,8 +1,11 @@
 """每轮聊天里属于好感的判断（10/22 从 __init__.py 拆出来，代码原样搬过来，没改）：
 对方说自己的性别（识别、质疑、确认）、送面包和给钱的识别、/好感、/性别。
-分数怎么存、怎么算在 affection.py；送礼时给她的提示文字（gift_hint）归聊天，在 turn_hints.py"""
+分数怎么存、怎么算在 affection.py；送礼时给她的提示文字（gift_hint）归聊天，在 turn_hints.py
+10/23：对方是不是在说自己的性别，改由模型判断（judge_gender），不再靠 gender_claim 的关键词（问句、“没说过”认错过，见《问题排查记录-性别误判-1023.md》）"""
 import re
 import time
+
+from . import budget
 
 from nonebot import logger, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent
@@ -33,7 +36,8 @@ _NO_RE = re.compile(r"骗你的|开玩笑|开个玩笑|假的|逗你的|逗你�
 
 
 def gender_claim(text: str) -> str | None:
-    """对方说“我是女生 / 本人男”之类的，返回 female / male；没说返回 None"""
+    """对方说“我是女生 / 本人男”之类的，返回 female / male；没说返回 None。
+    10/23 起线上不再用它判断（改成 judge_gender 问模型），留着只为兼容旧的导入"""
     for m in _CLAIM_RE.finditer(text):
         w = m.group("w") or m.group("c")
         start = m.start()
@@ -45,31 +49,94 @@ def gender_claim(text: str) -> str | None:
     return None
 
 
-def gender_step(qq: int, text: str) -> str:
-    """处理对方关于自己性别的说法，返回给模型的提示（没有就返回空）"""
+# 10/23：先粗筛（这句话里有没有和性别沾边的字），沾边了才问模型；正在等对方确认时每句都问（“是的”“真的啦”不带性别字）
+_GENDER_HINT_RE = re.compile(rf"男|女|{_F_WORDS}|{_M_WORDS}|性别|汉子|爷们|妹子|妹纸|姑娘|少年|小哥哥|小姐姐")
+
+GENDER_JUDGE_PROMPT = """下面是 QQ 聊天里的两句话。判断「对方」最后这一句，是不是在说**自己**的性别。
+
+伊蕾娜刚才说：{prev}
+对方说：{text}
+
+只回一个词：
+女 —— 对方在说自己是女生。包括被问“真的假的”以后确认（“是的”“真的啦”“骗你干嘛”），也包括没带主语的（“人家可是女孩子”“就是女孩子啦”）
+男 —— 对方在说自己是男生（同上）
+否认 —— 对方在否认：说自己不是某个性别，说自己没说过是男生 / 女生，或者说刚才那句是开玩笑的
+无 —— 都不是：在提问、让她猜（“你觉得我是男是女”“我是男生吗”），在说别人，假设（“如果我是女生”），反问，或者和性别无关
+
+只认对方**直接说出来**的自己的性别，不要从别的话往回推：
+- “我不是女生”“我又不是男生”只说了不是什么，答“否认”，不要推成另一个性别（除非同一句里又直接说了“我是男生 / 女生”）；
+- “我要是男生就好了”“下辈子想当女孩子”都推不出对方是什么性别，答“无”；
+- 提到自己的男朋友、女朋友、老公、老婆、对象（“我男朋友今天来接我”“我和我女朋友去看电影了”），也答“无”：对方没说自己是男是女，不要按“有女朋友就是男生”去猜。
+
+拿不准就回“无”。只回这一个词。"""
+
+
+def parse_gender_judge(reply: str) -> str | None:
+    """模型的回答 → female / male / deny / None（无、看不懂）"""
+    r = (reply or "").strip().strip("。.！!「」“”\"'*` ")
+    if r.startswith("否认"):
+        return "deny"
+    if r.startswith("女"):
+        return "female"
+    if r.startswith("男"):
+        return "male"
+    return None
+
+
+async def judge_gender(qq: int, text: str, prev: str = "") -> str | None:
+    """问模型：对方这句话是不是在说自己的性别。返回 female / male / deny / None；出错按 None（这轮不管性别）"""
+    try:
+        r = await core.client.chat.completions.create(
+            model=cfg.deepseek_model,
+            messages=[{"role": "user", "content": GENDER_JUDGE_PROMPT.format(prev=(prev or "（没说话）")[-120:], text=text[:200])}],
+            temperature=0,
+            max_tokens=4,
+            extra_body={"thinking": {"type": "disabled"}},
+            timeout=15,                   # 慢了就这轮不管性别，别拖住回复
+        )
+        budget.track(r, "gender", user=qq)
+        verdict = parse_gender_judge(r.choices[0].message.content or "")
+    except Exception as e:  # noqa: BLE001   判断出错不影响回复
+        logger.warning(f"性别：判断出错，这轮不管：{e}")
+        return None
+    if verdict:
+        logger.info(f"性别：模型判断 {qq} 这句是“{verdict}”：{text[:30]}")
+    return verdict
+
+
+async def gender_step(qq: int, text: str, prev: str = "") -> str:
+    """处理对方关于自己性别的说法，返回给模型的提示（没有就返回空）。prev：她上一句说的话（判断“是的”“真的啦”要用）"""
     prof = ltm.get_user(qq)
-    claim = gender_claim(text)
     pending = prof.get("gender_pending")
     if pending and time.time() - pending.get("ts", 0) > cfg.gender_confirm_window:
         prof.pop("gender_pending", None)
         pending = None
+    if not pending and not _GENDER_HINT_RE.search(text):
+        return ""                         # 和性别不沾边，也没在等确认：不问模型
+    claim = await judge_gender(qq, text, prev)
     word = {"female": "女生", "male": "男生"}
     if pending:
         value = pending["value"]
-        if _NO_RE.search(text) or (claim and claim != value):
+        if claim == "deny" or (claim in word and claim != value):
             prof.pop("gender_pending", None)
             ltm.save_user(prof)
-            if claim:                     # 改口了：按新的说法重新质疑
-                return gender_step(qq, text)
-            return "【性别】对方承认刚才说自己是" + word[value] + "是开玩笑的。你就当没听过。"
-        if claim == value or _YES_RE.search(text.strip()):
+            if claim in word:             # 改口了：按新的说法重新质疑
+                return _new_claim(qq, ltm.get_user(qq), claim)
+            return "【性别】对方说刚才那句不是在说自己是" + word[value] + "（或者是开玩笑的）。你就当没听过，别再提。"
+        if claim == value:
             ltm.claim_gender(qq, value)             # 9/30 起只算一次“自称”，要有别的证据印证才算数（对方可能在骗她）
             logger.info(f"性别：{qq} 自称{word[value]}（质疑后又确认）")
             return (f"【性别】对方又确认了一次，说自己确实是{word[value]}。你姑且信了（可以嘴上说一句“好吧，姑且信你”之类），"
                     "这一轮别再追问；心里留个问号就行。")
         return ""                         # 聊别的去了：先不管，等窗口过期
-    if not claim or claim == prof.get("gender") or claim == ltm.last_claim(prof):   # 已经说过、质疑过的，不再每次都质疑
+    if claim not in word or claim == prof.get("gender") or claim == ltm.last_claim(prof):   # 已经说过、质疑过的，不再每次都质疑
         return ""
+    return _new_claim(qq, prof, claim)
+
+
+def _new_claim(qq: int, prof: dict, claim: str) -> str:
+    """对方说了自己的性别（第一次说，或者改口）：记下“待确认”，让她质疑一句"""
+    word = {"female": "女生", "male": "男生"}
     prof["gender_pending"] = {"value": claim, "ts": time.time()}
     ltm.save_user(prof)
     extra = ""

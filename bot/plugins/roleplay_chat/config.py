@@ -281,6 +281,17 @@ class Config(BaseModel):
     interject_retry_minutes: float = 30.0 # 她看了觉得没什么想说的，这个群多久以后再看
 
     # ---- 冒泡：白名单群里很久没人说话时，她偶尔自己说一句 ----
+    # 对方像是另一个机器人（10/23，聊天 agent；《问题排查记录-对方停了还在发-1023》）：她每发一轮，对方都在几秒内引用她的话回。
+    # “一轮”= 她发完以后对方的第一条。最近 BOTLIKE_ROUNDS 轮里有 BOTLIKE_SLOW 轮是“几秒内引用回”，就放慢（每次回之前多等一会儿）；
+    # BOTLIKE_WINDOW_MINUTES 分钟内这样的轮数到 BOTLIKE_MUTE 轮，就 BOTLIKE_MUTE_MINUTES 分钟不回这个人（对方的话照常记进聊天记录）
+    botlike_enabled: bool = True
+    botlike_seconds: float = 8.0          # 她发完以后多少秒以内就引用回，算“几秒内”
+    botlike_rounds: int = 8
+    botlike_slow: int = 6
+    botlike_slow_delay: tuple[float, float] = (60.0, 120.0)   # 放慢时每次回之前多等几秒（在这两个数之间随机）
+    botlike_window_minutes: float = 30.0
+    botlike_mute: int = 14
+    botlike_mute_minutes: float = 60.0
     bubble_enabled: bool = True
     bubble_quiet_hours: float = 4.0       # 群里这么多小时没人说话，才可能冒泡
     bubble_daily_max: int = 0             # 每个群每天最多冒泡几次；0 = 不限（10/19 从 1 改）
