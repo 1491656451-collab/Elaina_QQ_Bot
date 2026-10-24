@@ -6232,8 +6232,12 @@ async def test_sleep_messages_seen_after_wake_1024(monkeypatch, tmp_path):
     state = _wake_env_1024(monkeypatch, tmp_path, p)
     p.client.chat.completions.create = fake_create("早。刚起来才看到。")
     bot = _PBot()
-    await p.converse(bot, pev("伊蕾娜小姐，我看到你的日记了哦", uid=7790, mid=8401))
-    await p.converse(bot, pev("说错了，是可以跟着你到处旅行了", uid=7790, mid=8402))
+    e1 = pev("伊蕾娜小姐，我看到你的日记了哦", uid=7790, mid=8401)
+    e2 = pev("说错了，是可以跟着你到处旅行了", uid=7790, mid=8402)
+    t1, t2 = int(time.time()) - 5 * 3600, int(time.time()) - 5 * 3600 + 300     # 5 小时前、隔 5 分钟
+    e1.time, e2.time = t1, t2
+    await p.converse(bot, e1)
+    await p.converse(bot, e2)
     assert bot.sent == []                                          # 睡着了：不回
     p.wake._box = None                                             # 夜里重启过：从文件读回来
     assert p.wake.pending() == [("private_7790", 7790)]
@@ -6246,8 +6250,13 @@ async def test_sleep_messages_seen_after_wake_1024(monkeypatch, tmp_path):
     call = str(CALLS[-1]["messages"])
     assert len(CALLS) > n0 and "【刚睡醒】" in call and "我看到你的日记了哦" in call and "跟着你到处旅行了" in call
     assert p.wake.pending() == []
+    # 每段带上对方发的时间，记进聊天记录也用那个时间
+    lab = lambda t: p.turn_hints.clock_text(datetime.fromtimestamp(t, p.peak.BEIJING))
+    assert f"（{lab(t1)}）伊蕾娜小姐，我看到你的日记了哦" in call and f"（{lab(t2)}）说错了" in call
     h = p.get_history("private_7790")
-    assert any("我看到你的日记了哦" in x["content"] for x in h if x["role"] == "user")
+    users = [x for x in h if x["role"] == "user"]
+    assert [round(x["ts"]) for x in users[-2:]] == [t1, t2]
+    assert users[-2]["content"].endswith("伊蕾娜小姐，我看到你的日记了哦")
 
 
 @pytest.mark.asyncio
@@ -6263,6 +6272,9 @@ async def test_sleep_messages_merged_when_user_talks_first_1024(monkeypatch, tmp
     await p.converse(bot, gev("早上好", True, uid=7791, mid=8412, gid=556))
     call = str(CALLS[-1]["messages"])
     assert "【刚睡醒】" in call and "你可以干嘛" in call and "早上好" in call
+    users = [x for x in p.get_history("group_556") if x["role"] == "user"]
+    assert "你可以干嘛" in users[-2]["content"] and "）" in users[-2]["content"] and "早上好" in users[-1]["content"]
+    assert users[-2]["ts"] < users[-1]["ts"]
     assert p.wake.pending() == []
     assert await p.wake.wake_up(bot) == 0                          # 已经看过了
 
@@ -6281,4 +6293,4 @@ async def test_wake_follows_normal_rules_1024(monkeypatch, tmp_path):
     await p.wake.wake_up(bot)
     assert bot.sent == []
     assert "【可以不回】" in str(CALLS[-1]["messages"])
-    assert any(x["content"] == "晚安" for x in p.get_history("private_7792") if x["role"] == "user")
+    assert any(x["content"].endswith("）晚安") for x in p.get_history("private_7792") if x["role"] == "user")

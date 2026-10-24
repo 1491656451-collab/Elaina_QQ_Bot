@@ -62,15 +62,16 @@ def note(ik: tuple[str, int], event: MessageEvent, text: str) -> None:
     if not cfg.wake_catchup or not text:
         return
     e = _load().setdefault(_k(ik), {"first": time.time(), "items": []})
-    e["items"].append({"text": text, "kind": "group" if isinstance(event, GroupMessageEvent) else "private",
+    e["items"].append({"text": text, "at": float(getattr(event, "time", 0) or time.time()),
+                       "kind": "group" if isinstance(event, GroupMessageEvent) else "private",
                        "event": event.model_dump(mode="json")})
     e["items"] = e["items"][-MAX_PER_CHAT:]
     _save()
     logger.info(f"睡着时收到：{ik[0]} user={ik[1]}，醒了再看（这个会话记了 {len(e['items'])} 段）")
 
 
-def take(ik: tuple[str, int]) -> tuple[list[str], float] | None:
-    """拿走这个会话睡着时收到的话：(几段原话, 第一段的时间)；没有、或者太久以前的返回 None"""
+def take(ik: tuple[str, int]) -> tuple[list[tuple[str, float]], float] | None:
+    """拿走这个会话睡着时收到的话：([(原话, 收到的时间)...], 第一段的时间)；没有、或者太久以前的返回 None"""
     e = _load().pop(_k(ik), None)
     if not e:
         return None
@@ -78,7 +79,7 @@ def take(ik: tuple[str, int]) -> tuple[list[str], float] | None:
     if time.time() - float(e.get("first") or 0) > cfg.wake_catchup_max_hours * 3600:
         logger.info(f"睡着时收到的话太久了，不看了：{ik[0]} user={ik[1]}")
         return None
-    return [i["text"] for i in e["items"]], float(e["first"])
+    return [(i["text"], float(i.get("at") or e["first"])) for i in e["items"]], float(e["first"])
 
 
 def pending() -> list[tuple[str, int]]:
@@ -113,12 +114,12 @@ async def wake_up(bot: Bot) -> int:
         got = take(ik)
         if not got:
             continue
-        texts, first = got
+        items, first = got
         if done:
             await asyncio.sleep(random.uniform(cfg.catchup_gap_min, cfg.catchup_gap_max))
-        _inbox[ik].extend(texts[:-1])               # 最后一段由回消息主流程自己放进去
-        _woke[ik] = first
-        logger.info(f"睡醒了看到 {ik[0]} user={ik[1]} 睡着时说的 {len(texts)} 段，照平常的规则看要不要回")
+        _inbox[ik].extend(t for t, _ in items[:-1])  # 最后一段由回消息主流程自己放进去
+        _woke[ik] = items
+        logger.info(f"睡醒了看到 {ik[0]} user={ik[1]} 睡着时说的 {len(items)} 段，照平常的规则看要不要回")
         try:
             await converse(bot, ev, catchup_age=time.time() - first)
         except Exception as ex:  # noqa: BLE001

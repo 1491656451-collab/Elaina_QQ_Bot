@@ -5,6 +5,7 @@ import asyncio
 import random
 import re
 import time
+from datetime import datetime
 from collections import defaultdict, deque
 from types import SimpleNamespace
 
@@ -18,7 +19,7 @@ from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
 from .prompts import FAMILIARITY_HINT, LATE_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
-from .turn_hints import BACK_HINT_HOURS, gift_hint, human_gap, length_hint_for, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
+from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
 from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
 from .textout import CHAT_STOP, clean_reply, cut_derailed, drop_ooc_sentences, is_fragment, speaker_names, split_bubbles, split_sticker
 from .quota import _active_chats, _count_sent, _crossed_mid_chat, _farewell_at, _global_window, _hour_window, _last_trigger, _refund, _wrapup, bubble_gap, in_wrapup, quota_left, rate_limited, say_farewells, say_tired, typing_delay, WRAPUP_EXTRA, WRAPUP_MINUTES
@@ -138,7 +139,7 @@ def note_sent_round(ik: tuple[str, int]) -> None:
     st["last_out"], st["open"] = time.time(), True
 
 
-_woke: dict[tuple[str, int], float] = {}   # (会话, QQ) -> 这一轮里有她睡着时收到的话，第一段的时间（10/24，见 wake.py）
+_woke: dict[tuple[str, int], list] = {}    # (会话, QQ) -> 这一轮收件箱最前面几段是她睡着时收到的：[(原话, 收到的时间)]（10/24，见 wake.py）
 _reply_owner: dict[tuple[str, int], "asyncio.Task | None"] = {}   # (会话, QQ) -> 正在回这个人的那一轮（10/23）
 
 
@@ -341,12 +342,12 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
         # 10/24 她睡着时这个人说过的话（醒来以后还没看）：并进这一轮一起看，不再单独补
         earlier = wake.take(ik) if not sleep.asleep() else None
         if earlier:
-            texts_before, first = earlier
-            _inbox[ik][:0] = texts_before
+            items, _first = earlier
+            _inbox[ik][:0] = [t for t, _ in items]
             if _look_later.get(ik):
-                _look_later[ik] = [(i + len(texts_before), ev) for i, ev in _look_later[ik]]
-            _woke[ik] = first
-            logger.info(f"睡着时 {event.user_id} 说的 {len(texts_before)} 段，并进这一轮一起看")
+                _look_later[ik] = [(i + len(items), ev) for i, ev in _look_later[ik]]
+            _woke[ik] = items
+            logger.info(f"睡着时 {event.user_id} 说的 {len(items)} 段，并进这一轮一起看")
     else:                                 # 补回未读：几条已经合在一起了，不用再等
         if not _inbox[ik]:
             _look_later.pop(ik, None)
@@ -501,6 +502,8 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     texts = _take_inbox(ik)
     if not texts:                     # 已经被前一条合并回复过了
         return False
+    woke_items = _woke.pop(ik, None)              # 10/24 收件箱最前面几段是她睡着时收到的（带着收到的时间）
+    woke = woke_items[0][1] if woke_items else None
     _reply_started[ik] = time.monotonic()
     _reply_owner[ik] = asyncio.current_task()      # 谁开始回的，谁回完了才记“结束了”（见 converse）
     text = clip_input("\n".join(texts))
@@ -530,9 +533,24 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
 
     user_content = speaker_head(event) + clean_body(text) if is_group else text
     new_entries.append({"role": "user", "content": user_content, "uid": event.user_id, "name": name, "ts": time.time()})
+    if woke_items and not lead:
+        # 10/24 睡着时收到的那几段：每段单独一条，带上对方发的时间（“（凌晨 4:43）……”），记进聊天记录也用那个时间
+        def _sleep_entry(t: str, at: float) -> dict:
+            lab = f"（{clock_text(datetime.fromtimestamp(at, peak.BEIJING))}）{t}"
+            return {"role": "user", "content": speaker_head(event) + clean_body(lab) if is_group else lab,
+                    "uid": event.user_id, "name": name, "ts": at}
+        sleep_entries = [_sleep_entry(t, at) for t, at in woke_items]
+        cur = new_entries.pop()
+        rest = texts[len(woke_items):]
+        if rest:                                  # 醒来以后对方又说的：照常一条，时间是现在
+            body = clip_input("\n".join(rest))
+            cur["content"] = speaker_head(event) + clean_body(body) if is_group else body
+            new_entries = sleep_entries + new_entries + [cur]
+        else:
+            new_entries = sleep_entries[:-1] + new_entries + sleep_entries[-1:]
     # 离上一段聊天隔得久：在这一轮前面标一行“（过了 X）”
     prev_ts = next((h["ts"] for h in reversed(history) if h.get("ts")), None)
-    g = gap_line(prev_ts, time.time())
+    g = gap_line(prev_ts, new_entries[0]["ts"] if woke_items else time.time())
     if g:
         new_entries[0]["content"] = g + new_entries[0]["content"]
 
@@ -574,9 +592,8 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     bread_first = any(k == "bread" for k, _ in gifts) and not ltm.bread_given_today(event.user_id)
     gift_memo = "\n".join(gift_hint(k, snip[:20], bread_first, fam) for k, snip in gifts)
     late_memo = ""
-    woke = _woke.pop(ik, None)                     # 10/24 里面有她睡着时收到的话
-    if woke is not None:
-        late_memo = WAKE_HINT.format(gap=human_gap(time.time() - woke)) + LATE_HINT
+    if woke is not None:                           # 10/24 里面有她睡着时收到的话
+        late_memo = WAKE_HINT.format(gap=human_gap(time.time() - woke))   # 不接 LATE_HINT：那里让她自己找理由，这里理由就是睡着了
     elif catchup_age is not None:
         late_memo = f"【刚看到】对方这几条消息是你不在的时候发的，最早一条已经是 {human_gap(catchup_age)}前了，你现在才看到。" + LATE_HINT
     # 对方在反问她上一句里、对方自己没提过的词（“诶？蘑菇？哪有蘑菇”）：告诉她这个词是她先说的
