@@ -34,6 +34,9 @@ URL_LIST = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion
 URL_DETAIL = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6"
 URL_FEEDS = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
 URL_REPLY = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
+# 10/24 加点赞：网页版点赞 / 查谁赞过。参数是照网页版的请求格式写的，还没在小号上实测过，先用 /说说 点赞 手动试
+URL_LIKE = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
+URL_LIKE_LIST = "https://user.qzone.qq.com/proxy/domain/users.qzone.qq.com/cgi-bin/likes/get_like_list_app"
 
 # 说说可见范围（ugc_right）
 RIGHT_PUBLIC = 1        # 所有人可见
@@ -560,6 +563,37 @@ class Qzone:
             return False
         ok = any(r.uin == c.uin and (r.time == 0 or r.time >= start) for r in parse_comments(d.get("commentlist")))
         self._log("发评论·回查", URL_DETAIL, 200, "找到了自己的评论" if ok else "没找到自己的评论")
+        return ok
+
+    @staticmethod
+    def _like_key(owner: int, tid: str) -> str:
+        return f"http://user.qzone.qq.com/{owner}/mood/{tid}"
+
+    async def liked_by_me(self, tid: str, owner: int) -> bool:
+        """这条说说她赞过没有（读“谁赞过”列表，看里面有没有她）"""
+        c = await self.ctx()
+        text = await self._req("查点赞", "GET", URL_LIKE_LIST, raw=True, params={
+            "uin": c.uin, "unikey": self._like_key(owner, tid), "begin_uin": 0, "query_count": 60,
+            "if_first_page": 1, "g_tk": c.gtk,
+        })
+        self._log("查点赞·原样", URL_LIKE_LIST, 200, _snip(text, 300))      # 接口格式没实测过：先把原样记下来
+        return bool(re.search(rf"\b{c.uin}\b", text))
+
+    async def like(self, tid: str, owner: int, abstime: int = 0) -> bool:
+        """给一条说说点赞（只给说说本身，不给评论）；点完回查“谁赞过”，找到自己才算成功"""
+        c = await self.ctx()
+        key = self._like_key(owner, tid)
+        await self._req("点赞", "POST", URL_LIKE, params={"g_tk": c.gtk}, page_ok=True, data={
+            "qzreferrer": f"https://user.qzone.qq.com/{owner}", "opuin": c.uin, "unikey": key, "curkey": key,
+            "from": 1, "appid": 311, "typeid": 0, "abstime": int(abstime or 0), "fid": tid, "active": 0, "fupdate": 1,
+        })
+        await asyncio.sleep(2)
+        try:
+            ok = await self.liked_by_me(tid, owner)
+        except Exception as e:  # noqa: BLE001
+            self._log("点赞·回查", URL_LIKE_LIST, 0, f"回查出错（{e}），按没确认处理")
+            return False
+        self._log("点赞·回查", URL_LIKE_LIST, 200, "赞上了" if ok else "没找到自己的赞")
         return ok
 
     async def about_me(self, count: int = 20) -> list[dict]:

@@ -219,6 +219,8 @@ class Config(BaseModel):
     # ---- 刷好友动态：看到好友发的说说，有几率评论一句（查评论时顺便刷一次；去别人空间写评论是风险最高的写操作，所以量压得很低）----
     qzone_friend_comment: bool = True     # 总开关
     # 10/24 起评不评由她自己看了再决定，不再按关系抽签（原来的 QZONE_FRIEND_COMMENT_PROB 去掉了）
+    qzone_friend_like: bool = False       # 给好友的说说点赞（她看完自己决定点不点；只赞说说本身）。10/24 加，接口还没实测：先用 /说说 点赞 手动试一次，没问题再改成 true
+    qzone_friend_like_daily_max: int = 10 # 每天最多点几个赞
     qzone_friend_comment_daily_max: int = 5    # 每天最多评论几条好友的说说（单独算，不占上面回评论的条数；9/29 从 2 调到 5）
     qzone_friend_post_max_age_hours: float = 6.0   # 只评论这么多小时内发的说说（翻出几天前的去评论很怪）
 
