@@ -5962,6 +5962,8 @@ def _self_mem_isolated_1023(tmp_path, monkeypatch):
     monkeypatch.setattr(p.core.self_mem, "path", tmp_path / "self.json")
     monkeypatch.setattr(p.core.self_mem, "_data", None)
     monkeypatch.setattr(p.core.self_mem, "kick", lambda: None)
+    monkeypatch.setattr(p.wake, "BOX_FILE", tmp_path / "sleep_inbox.json")   # 10/24 睡着时收到的话也每个测试一份
+    monkeypatch.setattr(p.wake, "_box", None)
     yield
 
 
@@ -6209,3 +6211,74 @@ def test_budget_kind_gender_1023(tmp_path):
     d = b.today()
     assert "gender" in B.CHAT_KINDS and d["chat"] == pytest.approx(d["total"]) and d["users"]["9901"] == pytest.approx(d["total"])
     assert "判断性别说法：" in b.report()
+
+
+# ---------------------------------------------------------------- 10/24 睡着时收到的话，醒了照平常的规则看
+def _wake_env_1024(monkeypatch, tmp_path, p):
+    monkeypatch.setattr(p.wake, "BOX_FILE", tmp_path / "sleep_inbox.json")
+    monkeypatch.setattr(p.wake, "_box", None)
+    monkeypatch.setattr(p.wake, "_task", None)
+    monkeypatch.setattr(p.cfg, "wake_catchup_delay_minutes", (0.0, 0.0))
+    monkeypatch.setattr(p.cfg, "catchup_gap_min", 0)
+    monkeypatch.setattr(p.cfg, "catchup_gap_max", 0)
+    state = {"asleep": True}
+    monkeypatch.setattr(p.sleep, "asleep", lambda now=None: state["asleep"])
+    return state
+
+
+@pytest.mark.asyncio
+async def test_sleep_messages_seen_after_wake_1024(monkeypatch, tmp_path):
+    import plugins.roleplay_chat as p
+    state = _wake_env_1024(monkeypatch, tmp_path, p)
+    p.client.chat.completions.create = fake_create("早。刚起来才看到。")
+    bot = _PBot()
+    await p.converse(bot, pev("伊蕾娜小姐，我看到你的日记了哦", uid=7790, mid=8401))
+    await p.converse(bot, pev("说错了，是可以跟着你到处旅行了", uid=7790, mid=8402))
+    assert bot.sent == []                                          # 睡着了：不回
+    p.wake._box = None                                             # 夜里重启过：从文件读回来
+    assert p.wake.pending() == [("private_7790", 7790)]
+    p.wake.maybe_start(bot)
+    assert p.wake._task is None                                    # 还在睡：不看
+    state["asleep"] = False
+    n0 = len(CALLS)
+    assert await p.wake.wake_up(bot) == 1
+    assert bot.sent
+    call = str(CALLS[-1]["messages"])
+    assert len(CALLS) > n0 and "【刚睡醒】" in call and "我看到你的日记了哦" in call and "跟着你到处旅行了" in call
+    assert p.wake.pending() == []
+    h = p.get_history("private_7790")
+    assert any("我看到你的日记了哦" in x["content"] for x in h if x["role"] == "user")
+
+
+@pytest.mark.asyncio
+async def test_sleep_messages_merged_when_user_talks_first_1024(monkeypatch, tmp_path):
+    """醒来以后对方先来说话：睡着时那几条并进这一轮，不再单独补"""
+    import plugins.roleplay_chat as p
+    state = _wake_env_1024(monkeypatch, tmp_path, p)
+    p.client.chat.completions.create = fake_create("嗯，早。")
+    bot = _PBot()
+    await p.converse(bot, gev("[at:qq=123] 你可以干嘛", True, uid=7791, mid=8411, gid=556))
+    assert bot.sent == [] and len(p.wake.pending()) == 1
+    state["asleep"] = False
+    await p.converse(bot, gev("早上好", True, uid=7791, mid=8412, gid=556))
+    call = str(CALLS[-1]["messages"])
+    assert "【刚睡醒】" in call and "你可以干嘛" in call and "早上好" in call
+    assert p.wake.pending() == []
+    assert await p.wake.wake_up(bot) == 0                          # 已经看过了
+
+
+@pytest.mark.asyncio
+async def test_wake_follows_normal_rules_1024(monkeypatch, tmp_path):
+    """醒了不是一定要回：她觉得没必要接话可以不回（【可以不回】照常给），但话照常记进聊天记录"""
+    import plugins.roleplay_chat as p
+    state = _wake_env_1024(monkeypatch, tmp_path, p)
+    monkeypatch.setattr(p.cfg, "skip_by_model", True)
+    monkeypatch.setattr(p.cfg, "skip_filler", False)
+    p.client.chat.completions.create = fake_create("[不回]")
+    bot = _PBot()
+    await p.converse(bot, pev("晚安", uid=7792, mid=8421))
+    state["asleep"] = False
+    await p.wake.wake_up(bot)
+    assert bot.sent == []
+    assert "【可以不回】" in str(CALLS[-1]["messages"])
+    assert any(x["content"] == "晚安" for x in p.get_history("private_7792") if x["role"] == "user")

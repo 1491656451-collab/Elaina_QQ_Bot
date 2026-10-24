@@ -292,6 +292,10 @@ class Config(BaseModel):
     botlike_window_minutes: float = 30.0
     botlike_mute: int = 14
     botlike_mute_minutes: float = 60.0
+    # 睡醒以后看到睡着时收到的话（10/24，聊天 agent，见 wake.py）：休息时间里来找她的话记下来，起床后过一会儿照平常的规则看要不要回
+    wake_catchup: bool = True
+    wake_catchup_delay_minutes: tuple[float, float] = (5.0, 30.0)   # 起床后过几分钟再看（在这两个数之间随机）
+    wake_catchup_max_hours: float = 12.0                            # 比这更早的不看了
     bubble_enabled: bool = True
     bubble_quiet_hours: float = 4.0       # 群里这么多小时没人说话，才可能冒泡
     bubble_daily_max: int = 0             # 每个群每天最多冒泡几次；0 = 不限（10/19 从 1 改）

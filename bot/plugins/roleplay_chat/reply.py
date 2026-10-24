@@ -12,11 +12,11 @@ from nonebot import logger, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment, PrivateMessageEvent
 from nonebot.rule import Rule
 
-from . import budget, commands, core, peak, quota, sleep, stickers, story, voice, voice_chat
+from . import budget, commands, core, peak, quota, sleep, stickers, story, voice, voice_chat, wake
 from .oocheck import ooc_words
 from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
-from .prompts import FAMILIARITY_HINT, LATE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
+from .prompts import FAMILIARITY_HINT, LATE_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
 from .turn_hints import BACK_HINT_HOURS, gift_hint, human_gap, length_hint_for, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
 from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
@@ -138,6 +138,7 @@ def note_sent_round(ik: tuple[str, int]) -> None:
     st["last_out"], st["open"] = time.time(), True
 
 
+_woke: dict[tuple[str, int], float] = {}   # (会话, QQ) -> 这一轮里有她睡着时收到的话，第一段的时间（10/24，见 wake.py）
 _reply_owner: dict[tuple[str, int], "asyncio.Task | None"] = {}   # (会话, QQ) -> 正在回这个人的那一轮（10/23）
 
 
@@ -337,6 +338,15 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
             _take_inbox(ik)
             logger.info(f"加好友的验证消息，不回 user={event.user_id}：{text[:30]}")
             return None
+        # 10/24 她睡着时这个人说过的话（醒来以后还没看）：并进这一轮一起看，不再单独补
+        earlier = wake.take(ik) if not sleep.asleep() else None
+        if earlier:
+            texts_before, first = earlier
+            _inbox[ik][:0] = texts_before
+            if _look_later.get(ik):
+                _look_later[ik] = [(i + len(texts_before), ev) for i, ev in _look_later[ik]]
+            _woke[ik] = first
+            logger.info(f"睡着时 {event.user_id} 说的 {len(texts_before)} 段，并进这一轮一起看")
     else:                                 # 补回未读：几条已经合在一起了，不用再等
         if not _inbox[ik]:
             _look_later.pop(ik, None)
@@ -467,7 +477,10 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
             return None
     if limited:
         logger.info(f"限流跳过 user={event.user_id} reason={limited}")
-        _take_inbox(ik)
+        texts = _take_inbox(ik)
+        _woke.pop(ik, None)
+        if limited == "sleep" and catchup_age is None:
+            wake.note(ik, event, "\n".join(texts))   # 10/24 睡着时来找她的：记下来，醒了照平常的规则看要不要回
         if limited.startswith("budget") and not is_group:
             await say_tired(bot, event)
         return None
@@ -561,7 +574,10 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     bread_first = any(k == "bread" for k, _ in gifts) and not ltm.bread_given_today(event.user_id)
     gift_memo = "\n".join(gift_hint(k, snip[:20], bread_first, fam) for k, snip in gifts)
     late_memo = ""
-    if catchup_age is not None:
+    woke = _woke.pop(ik, None)                     # 10/24 里面有她睡着时收到的话
+    if woke is not None:
+        late_memo = WAKE_HINT.format(gap=human_gap(time.time() - woke)) + LATE_HINT
+    elif catchup_age is not None:
         late_memo = f"【刚看到】对方这几条消息是你不在的时候发的，最早一条已经是 {human_gap(catchup_age)}前了，你现在才看到。" + LATE_HINT
     # 对方在反问她上一句里、对方自己没提过的词（“诶？蘑菇？哪有蘑菇”）：告诉她这个词是她先说的
     echo_memo = ""
@@ -581,7 +597,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     # 语音：抽签 / 对方要她发语音时告诉她可以用传声魔法（电脑上的语音服务连着才有）
     voice_auto, voice_memo = voice_roll(fam, is_group, text)
     skip_memo = ""
-    if (cfg.skip_by_model and catchup_age is None and len(text) <= 12 and not _looks_like_question(text)
+    if (cfg.skip_by_model and (catchup_age is None or woke is not None) and len(text) <= 12 and not _looks_like_question(text)
             and not she_asked(history) and not gifts):
         skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                      "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")

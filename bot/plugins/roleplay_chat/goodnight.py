@@ -5,7 +5,7 @@ import time
 
 from nonebot import get_bots, logger
 
-from . import sleep
+from . import sleep, wake
 from .core import _hands, cfg
 from .history import _inbox, get_history
 from .sleep import _goodnight, night_key, sleep_window
@@ -56,5 +56,8 @@ async def _sleep_loop() -> None:
             if sleep.asleep() and done_night != night:
                 done_night = night
                 await goodnight_now()
+            bots = list(get_bots().values())
+            if bots:
+                wake.maybe_start(bots[0])        # 10/24 醒着、又有睡着时收到的话：过一会儿照平常的规则看要不要回
         except Exception as e:  # noqa: BLE001
             logger.warning(f"道晚安出错：{e}")
