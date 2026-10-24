@@ -218,7 +218,7 @@ class Config(BaseModel):
     qzone_mention_reply: bool = True      # 别人在自己的说说里 @ 她、在别人说说下 @ 她或回她：也按聊天规则回（查评论时顺便读“与我相关”）
     # ---- 刷好友动态：看到好友发的说说，有几率评论一句（查评论时顺便刷一次；去别人空间写评论是风险最高的写操作，所以量压得很低）----
     qzone_friend_comment: bool = True     # 总开关
-    qzone_friend_comment_prob: dict[str, float] = {"disliked": 0.0, "stranger": 0.15, "friend": 0.3, "acquaintance": 0.5, "close": 0.7}   # 每条说说被评论的概率，关系越好越高（10/23 从 0/3%/8%/20%/45% 调高：22 天一条都没评过）
+    # 10/24 起评不评由她自己看了再决定，不再按关系抽签（原来的 QZONE_FRIEND_COMMENT_PROB 去掉了）
     qzone_friend_comment_daily_max: int = 5    # 每天最多评论几条好友的说说（单独算，不占上面回评论的条数；9/29 从 2 调到 5）
     qzone_friend_post_max_age_hours: float = 6.0   # 只评论这么多小时内发的说说（翻出几天前的去评论很怪）
 

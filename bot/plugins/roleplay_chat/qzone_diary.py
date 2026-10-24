@@ -7,7 +7,7 @@
 - 评论：每 30 分钟查一次最近 7 天的说说，只回直接对她说的评论，按聊天规则回（好感、雷点、出戏检查、限额）。
 - 别人空间里的 @：查评论时顺便读“与我相关”（NapCat 不推送空间提醒，只能定时读），别人在说说里 @ 她就去评论一句，
   在评论里 @ 她、回她的话就回复那一条；别人之间聊天不插嘴。和自己说说下的评论共用每天的回复上限。
-- 刷好友动态：查评论时顺便刷一次好友动态，好友几小时内发的原创说说按好感抽几率评论一句（每天单独限几条，每轮最多 1 条）。
+- 刷好友动态：查评论时顺便刷一次好友动态，好友几小时内发的原创说说都给她看，评不评、评什么她自己决定（每天单独限几条，每轮最多评 1 条）。
 - 管理员指令：/说说 预览｜发预览｜立即发｜删除最新｜今日｜图库｜查评论｜好友动态｜日结｜暂停｜恢复
 
 这个模块在 roleplay_chat/__init__.py 的最后导入，直接用聊天插件里的人设、记忆、好感、限流这些东西。
@@ -540,8 +540,18 @@ ELSEWHERE_COMMENT_PROMPT = """【这是「{owner}」的 QQ 空间说说下的评
 ELSEWHERE_POST_PROMPT = """【「{nick}」在自己的 QQ 空间说说里提到了你】他写的是：「{post}」{pic}
 你在这条说说下面评论一句：一两句话，不要换行。"""
 
-FRIEND_POST_PROMPT = """【你在刷 QQ 空间，刷到了「{nick}」刚发的说说】他写的是：「{post}」{pic}
-这不是在跟你说话，是你自己看到的。你顺手在下面评论一句：一两句话，不要换行，不要 @ 人，别像在回复谁找你；不想说的话不用硬凑。"""
+FRIEND_POST_PROMPT = """【你在刷 QQ 空间，刷到了「{nick}」{when}发的说说】他写的是：「{post}」{pic}
+这不是在跟你说话，是你自己刷到的。评不评论由你自己决定，不用每条都评：
+- 想说点什么（感兴趣、有话可接、跟你有关、想跟对方打个招呼），就在下面评论一句：一两句话，不要换行，不要 @ 人，别像在回复谁找你。
+- 没兴趣、没什么好说的，就只回两个字：不评"""
+
+SKIP_WORD = "不评"
+
+
+def _declined(reply: str) -> bool:
+    """她决定不评：回的就是“不评”（可能带标点、括号）"""
+    core = re.sub(r"[\s。，、！？!?.…~（）()「」“”\"'—-]", "", reply or "")
+    return SKIP_WORD in core and len(core) <= len(SKIP_WORD) + 3      # “不评”“不评了”“嗯，不评”；长句里带“不评价”的不算
 
 
 def _ago(ts: float, now: float | None = None) -> str:
@@ -1015,18 +1025,21 @@ def _friend_skip_reason(me: int, d: dict, created_fallback: int, owner: int = 0)
 
 
 async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic: str) -> str:
-    """在好友的说说下主动评论一句；返回 replied / skipped / retry / unconfirmed"""
+    """给她看一条好友的说说，她自己决定评不评；返回 replied / declined / skipped / retry / unconfirmed"""
     why = write_block()
     if why:
         raise QzoneError("hold", why)
     text = clip_input(plain_text(str(d.get("content") or ""))) or "（只发了图）"
-    scene = FRIEND_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic)
+    scene = FRIEND_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic, when=_ago(int(d.get("created_time") or 0)))
     async with _locks[f"qzone_{owner}"]:
         reply = await _respond(owner, owner_nick, text, scene)
         if reply is None:
             return "retry"
         if not reply:
             return "skipped"
+        if _declined(reply):
+            logger.info(f"空间：刷到 {owner_nick}（{owner}）的说说，她决定不评")
+            return "declined"
         ok = await qz.comment(str(d.get("tid")), owner, reply)
         if not ok:
             logger.warning(f"空间：在 {owner_nick} 的说说下评论没能确认发出，不记进记忆，也不再重试：{reply}")
@@ -1037,7 +1050,8 @@ async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic
 
 
 async def poll_friends() -> str:
-    """刷一次好友动态：每条新说说按好感抽一次签，抽中的去评论一句；每轮最多评 1 条"""
+    """刷一次好友动态：好友新发的原创说说都给她看，评不评她自己决定；每轮最多评 1 条。
+    10/24 起不再按关系抽签（用户：“只要是原创非转发的都能看到，让她自己决定要不要评论”）"""
     if _friend_quota_left() <= 0:
         return f"好友动态：今天已评 {cfg.qzone_friend_comment_daily_max} 条，不刷了"
     if _round_full():
@@ -1046,24 +1060,15 @@ async def poll_friends() -> str:
     cands = friend_candidates(me, await qz.friend_feeds(20))
     seen = _seen()
     done_today = set(state().get("friend_uins", []))
-    picked, fresh = [], 0
-    for it in cands:
-        k = _friend_key(it["owner"], it["tid"])
-        if k in seen:
-            continue
-        fresh += 1
-        prob = tier_value(cfg.qzone_friend_comment_prob, familiarity_of(it["owner"]), 0.0)
-        if it["owner"] in done_today or random.random() >= prob:
-            seen[k] = int(time.time())                 # 没抽中：这条就当看过了，下次不再抽
-        else:
-            picked.append(it)
-    _save_seen(seen)
-    commented = reads = 0
+    fresh = [it for it in cands if _friend_key(it["owner"], it["tid"]) not in seen]
+    shown = commented = reads = 0
     notes = []
-    for it in picked:
+    for it in fresh:
         k = _friend_key(it["owner"], it["tid"])
-        if commented or reads >= 3 or _round_full() or _friend_quota_left() <= 0:
-            _mark_seen([k])                            # 抽中了但这轮轮不上：也不留到下一轮（免得多抽几次签）
+        if commented or reads >= 5 or _round_full() or _friend_quota_left() <= 0:
+            break                                      # 这一轮够了：剩下的留到下一轮再看（6 小时内的都还算新）
+        if it["owner"] in done_today:
+            _mark_seen([k])                            # 今天已经评过这个人一条了
             continue
         try:
             d = await qz.detail(it["tid"], it["owner"])
@@ -1082,15 +1087,18 @@ async def poll_friends() -> str:
             await asyncio.sleep(random.uniform(1.5, 4))
             continue
         await _gap_between_replies(0)
+        shown += 1
         res = await comment_friend_post(me, it["owner"], nick, d, await _pic_hint(post_pics(d)))
         if res == "retry":
             continue                                   # 限流、模型出错：留到下一轮
         _mark_seen([k])
-        if res in ("replied", "unconfirmed"):          # 没确认的也算今天的一条（万一其实发出去了）
+        if res == "declined":
+            notes.append(f"{nick}：她不想评")
+        elif res in ("replied", "unconfirmed"):        # 没确认的也算今天的一条（万一其实发出去了）
             commented += res == "replied"
             _round["n"] += 1
             _count_friend(it["owner"])
-    out = f"好友动态：新说说 {fresh} 条，抽中 {len(picked)} 条，评论了 {commented} 条"
+    out = f"好友动态：新说说 {len(fresh)} 条，给她看了 {shown} 条，评论了 {commented} 条"
     return out + (f"（{'；'.join(notes)}）" if notes else "")
 
 
@@ -1315,7 +1323,7 @@ _last_draft: dict | None = None
 
 USAGE = ("/说说 预览：生成一条给你看，不发\n/说说 发预览：把刚才预览的那条发出去\n/说说 立即发：马上生成并发出（离它不到 12 小时的定时说说会跳过）\n"
          "/说说 删除最新：删掉最近一条\n/说说 今日：今天的见闻和发布安排\n/说说 图库：图库情况\n/说说 查评论：马上查一轮评论（自己说说下的、别人空间里 @ 她的）并回复，顺便刷好友动态\n"
-         "/说说 好友动态：只看不评，列出最近好友发的说说和她评论的几率\n"
+         "/说说 好友动态：只看不评，列出最近好友发的说说和她看过没有\n"
          "/说说 详情 QQ号 说说编号：只读那一条说说，看转发相关的字段和程序会判成转发还是原创\n"
          "/说说 日结：马上把今天的聊天整理成见闻\n/说说 暂停 / 恢复：停掉或恢复自动发说说和回评论（恢复也会解除风控熔断）")
 
@@ -1426,9 +1434,8 @@ async def _(bot: Bot, event: MessageEvent, arg: Message = CommandArg()):
             for it in cands[:10]:
                 fam = familiarity_of(it["owner"])
                 when = datetime.fromtimestamp(it["abstime"], BJ).strftime("%H:%M")
-                mark = "已看过" if _friend_key(it["owner"], it["tid"]) in seen else "还没抽"
-                lines.append(f"· {when} {it['nick'] or it['owner']}（{ltm.TIER_NAMES.get(fam, fam)}，"
-                             f"几率 {tier_value(cfg.qzone_friend_comment_prob, fam, 0.0):.0%}，{mark}）")
+                mark = "已看过" if _friend_key(it["owner"], it["tid"]) in seen else "还没看"
+                lines.append(f"· {when} {it['nick'] or it['owner']}（{ltm.TIER_NAMES.get(fam, fam)}，{mark}）")
             await diary_cmd.finish("\n".join(lines))
         elif cmd == "日结":
             n = await daily_summary()
