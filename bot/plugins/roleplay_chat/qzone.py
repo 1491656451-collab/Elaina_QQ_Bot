@@ -576,8 +576,13 @@ class Qzone:
             "uin": c.uin, "unikey": self._like_key(owner, tid), "begin_uin": 0, "query_count": 60,
             "if_first_page": 1, "g_tk": c.gtk,
         })
-        self._log("查点赞·原样", URL_LIKE_LIST, 200, _snip(text, 300))      # 接口格式没实测过：先把原样记下来
-        return bool(re.search(rf"\b{c.uin}\b", text))
+        # 10/24 实测：返回里 "is_dolike" 就是“我赞过没有”（点之前 0、点之后 1）；
+        # 赞过的人列表里反而没有她自己，原来按列表找 QQ 号，赞上了也回“没找到”
+        m = re.search(r'"is_dolike"\s*:\s*(\d+)', text)
+        if m:
+            return m.group(1) != "0"
+        self._log("查点赞·原样", URL_LIKE_LIST, 200, _snip(text, 300))      # 没有这个字段：格式变了，记下来
+        return bool(re.search(rf'"fuin"\s*:\s*{c.uin}\b', text))
 
     async def like(self, tid: str, owner: int, abstime: int = 0) -> bool:
         """给一条说说点赞（只给说说本身，不给评论）；点完回查“谁赞过”，找到自己才算成功"""

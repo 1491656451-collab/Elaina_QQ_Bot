@@ -39,21 +39,30 @@ DESCRIBE_PROMPT = (
     "用简短的中文描述这张图片，不超过 50 字。"
     "写出主要内容；图里有文字就写出关键文字；如果是表情包，说明它表达的情绪或意思。"
     "画出来的人物写成“画中的少女”“画中人”之类，不要用“动漫”“动画”“二次元”“番剧”“角色”这些词。"
+    "如果拍的是实物（手办、人偶、玩偶、立牌、雕像之类），开头写明，比如“一尊人偶：……”“一个玩偶：……”，"
+    "里面的人物写成“人偶”，不要写成“画中的少女”。"
     "只输出描述本身，不要加“图片中”“这是一张”之类的开头。"
 )
 SELF_HINT = (
     "\n已确认：画中人物是伊蕾娜（灰色长发、黑色三角帽和长袍的旅行魔女）。"
     "描述请以“伊蕾娜本人的画像”开头，再写她在画里的样子、动作、表情，有配字就写出配字。"
     "例如：伊蕾娜本人的画像，戴着魔女帽一脸嫌弃，配字“嫌弃”。"
+    "如果拍的是实物，开头还是写“伊蕾娜本人的画像”，后面写明，例如：伊蕾娜本人的画像，是一尊人偶，穿白裙举着手。"
 )
 MAYBE_HINT = (
     "\n画中人物有可能是伊蕾娜（灰色长发、琉璃色眼睛；平时戴黑色三角帽、穿黑色长袍，"
     "但画里也可能穿便服、不戴帽子）。请仔细看：发色、眼睛和整体样子都和她一致，描述就以“伊蕾娜本人的画像”开头；"
     "不像的话就正常描述，不要提伊蕾娜。"
+    "拍的是实物（人偶等）时也一样，像她就写“伊蕾娜本人的画像，是一尊人偶，……”。"
 )
 NOT_SELF_NOTE = "（画的不是你）"
+# 10/25：伊蕾娜分数在这条线以上、又没认成她时，算“拿不准”：不说“画的不是你”，也不把别的角色名告诉看图模型。
+# 起因是一尊伊蕾娜手办的实拍照只有 0.17，还被认成了别的角色，她就说“这也能叫伊蕾娜小姐”。
+# 线上“不是她”的图分数都在 0.05 以下（《识图抽查-1022》），所以这条线基本只影响拿不准的图
+UNSURE_MIN = 0.1
+UNSURE_NOTE = "（看不太出是不是你）"
 # 描述里有这些词，说明画里有人。本机识别认过、结论是“不是伊蕾娜”时，给她补一句，免得她把随便一个画中少女认成自己
-_PERSON_RE = re.compile(r"画中|少女|少年|女孩|男孩|女生|男生|人物|女子|男子|姑娘")
+_PERSON_RE = re.compile(r"画中|少女|少年|女孩|男孩|女生|男生|人物|女子|男子|姑娘|人偶|玩偶|雕像|立牌")
 OTHER_HINT = "\n画中人物是{names}。描述里不要写出这个名字，只写外貌、动作和表情。"
 
 # 模型偶尔还是会写出这些词，统一换成伊蕾娜能理解的说法
@@ -62,6 +71,10 @@ _REWRITE = [
     (re.compile(r"(动漫|动画|二次元|番剧)(风格|风|画风)"), "插画风格"),
     (re.compile(r"(动漫|动画|二次元|番剧)"), "插画"),
     (re.compile(r"角色"), "人物"),
+    # 实物周边：她的世界里没有“手办”，换成人偶、玩偶（10/25 用户定的）
+    (re.compile(r"粘土人"), "小人偶"),
+    (re.compile(r"手办"), "人偶"),
+    (re.compile(r"公仔"), "玩偶"),
 ]
 
 # 交给模型前先在本机缩小：DeepSeek 看图时本来也会缩小，原图几 MB 传上去只是更慢、更容易超时
@@ -194,6 +207,16 @@ class Vision:
             return bool(entry["o"])
         return SELF_TAG in entry.get("c", []) or bool(entry.get("m"))
 
+    @staticmethod
+    def _is_unsure(entry: dict | None) -> bool:
+        """有点像伊蕾娜、但没认成她（管理员没指定过）：分数 ≥ UNSURE_MIN"""
+        return bool(entry) and "o" not in entry and not Vision.is_self(entry) and entry.get("s", 0) >= UNSURE_MIN
+
+    def _stale(self, entry: dict) -> bool:
+        """10/25 以前看的“拿不准”的图，描述是带着别的角色名写的（比如那尊伊蕾娜手办被写成了别人）：重新看一次。
+        看过就记 u=1，不会反复看"""
+        return self._is_unsure(entry) and not entry.get("u") and any(t not in KNOWN for t in entry.get("c", []))
+
     def _is_maybe(self, entry: dict | None) -> bool:
         return bool(entry) and "o" not in entry and not self.is_self(entry) and entry.get("s", 0) >= self.maybe
 
@@ -269,7 +292,7 @@ class Vision:
             entry["c"], entry["t"], entry["x"] = [], 1, 1
             return tags
         if SELF_TAG not in tags and self_score >= 0.1:
-            how = "交给看图模型再确认" if self_score >= self.maybe else "当作不是"
+            how = "交给看图模型再确认" if self_score >= self.maybe else "当作拿不准（不说“画的不是你”）"
             logger.info(f"角色识别：像伊蕾娜但没过门槛（{self_score:.2f}，门槛 {self.tagger.threshold}），{how}")
         if key:
             entry = self._cache.setdefault(key, {})
@@ -297,7 +320,8 @@ class Vision:
     # ------------------------------------------------------------ 描述
     async def describe(self, data: dict) -> str | None:
         """data 是 OneBot image 段的 data（含 url / file）。返回一句描述；失败返回 None。
-        本机认过、确定画的不是伊蕾娜、画里又有人时，末尾加「（画的不是你）」"""
+        本机认过、确定画的不是伊蕾娜、画里又有人时，末尾加「（画的不是你）」；
+        伊蕾娜分数 ≥ UNSURE_MIN、拿不准时改加「（看不太出是不是你）」"""
         desc = await self._describe(data)
         if not desc or SELF_NAME in desc:
             return desc
@@ -305,7 +329,7 @@ class Vision:
         entry = self._cache.get(key) if key else None
         judged = bool(entry) and ("o" in entry or (entry.get("t") and not entry.get("x")))
         if judged and not self.is_self(entry) and _PERSON_RE.search(desc):
-            return desc + NOT_SELF_NOTE
+            return desc + (UNSURE_NOTE if self._is_unsure(entry) else NOT_SELF_NOTE)
         return desc
 
     async def _describe(self, data: dict) -> str | None:
@@ -313,7 +337,7 @@ class Vision:
         self._touch(key)
         entry = self._cache.get(key) if key else None
         # 缓存里有描述，并且（已经认过人，或者现在也没法认人）就直接用
-        if entry and entry.get("d") and (entry.get("t") or not self.tagging):
+        if entry and entry.get("d") and (entry.get("t") or not self.tagging) and not self._stale(entry):
             return entry["d"]
         raw = await self._get_raw(data, key)
         if not raw:
@@ -335,6 +359,9 @@ class Vision:
         elif maybe:
             prompt += MAYBE_HINT
         others = [_readable(t) for t in (tags or []) if t not in KNOWN]
+        if others and not sure and self._is_unsure(entry):
+            logger.info(f"识图：有点像伊蕾娜（{entry.get('s', 0):.2f}），不把别的角色名（{'、'.join(others)}）告诉看图模型")
+            others = []
         if others:
             prompt += OTHER_HINT.format(names="、".join(others))
 
@@ -373,6 +400,8 @@ class Vision:
                     entry["c"], entry["t"] = tags, 1
                 if maybe:
                     entry["m"] = confirmed
+                if self._is_unsure(entry):
+                    entry["u"] = 1
                 self._save()
             logger.info(f"识图：{desc}" + ("（看图模型确认是伊蕾娜）" if confirmed else ""))
         return desc or None
