@@ -248,6 +248,7 @@ class Config(BaseModel):
     smart_min_interval: float = 60.0      # 同一个群“没 @ 也回复”的最短间隔（秒），防止刷屏；她刚回过的人接着跟她说话不受这个限制
     smart_judge: bool = True              # 让模型先判断一下是不是在跟她说话（每次判断约 200 token）；关掉则提到名字就回
     followup_window: int = 60             # 她回完某人之后（从她最后一条发出算起），这么多秒内这个人接着说的话直接算在跟她说（不用判断）
+    followup_judge_window: int = 300      # 过了上面的时间、还在这么多秒内，这个人接着说而且这期间群里没别人说话：交给判断要不要回（10/27；0 = 不用）
     # 分条发送：收到消息先等一等，同一个人接着发的合成一条再回；每来一条新的重新计时
     merge_wait: float = 4.0               # 看不出话说完没说完时，等几秒
     merge_wait_complete: float = 3.0      # 看起来话说完了（问号结尾、完整的一句），等几秒

@@ -6294,3 +6294,74 @@ async def test_wake_follows_normal_rules_1024(monkeypatch, tmp_path):
     assert bot.sent == []
     assert "【可以不回】" in str(CALLS[-1]["messages"])
     assert any(x["content"].endswith("）晚安") for x in p.get_history("private_7792") if x["role"] == "user")
+
+
+@pytest.mark.asyncio
+async def test_slow_followup_goes_to_judge_1027(app: App, monkeypatch):
+    """10/27：10/26 14:16 她回完对方 100 秒后，对方接着说“这时候就不想着省钱嘛”（没 @、没“你”、不是问句），
+    这期间群里没别人说话。以前直接当成不是跟她说的，现在交给判断"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("躲太阳也是要花钱的")
+    monkeypatch.setattr(p.cfg, "smart_min_interval", 120)
+    now = time.monotonic()
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = now - 100
+    p._last_bot_msg[555] = (now - 100, 1491, "这算什么享受，不过是躲太阳罢了")
+    p._last_smart[555] = now - 30                    # 离上次“没 @ 也回复”才 30 秒：正在聊的人不受限制
+    JUDGE["answer"] = "是"; JUDGE["calls"] = 0
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = gev("这时候就不想着省钱嘛", False, uid=1491, mid=9601, card="群鲨鱼")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "躲太阳也是要花钱的", result=None, bot=bot)
+    assert JUDGE["calls"] == 1
+    # 判断说“否”：不回
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = time.monotonic() - 100
+    JUDGE["answer"] = "否"; JUDGE["calls"] = 0; CALLS.clear()
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("这时候就不想着省钱嘛", False, uid=1491, mid=9602, card="群鲨鱼"))
+    assert JUDGE["calls"] == 1 and CALLS == []
+
+
+@pytest.mark.asyncio
+async def test_slow_followup_not_judged_when_others_spoke_1027(app: App, monkeypatch):
+    """同样隔了 100 秒，但这期间别人说过话（可能在跟别人聊）、或者已经过了 5 分钟、或者关掉了：照旧不判断、不回"""
+    import plugins.roleplay_chat as p
+    p.client.chat.completions.create = fake_create("不该回")
+    JUDGE["answer"] = "是"
+    now = time.monotonic()
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = now - 100
+    p._speakers[555].append((now - 50, 1810))        # 这期间别人说了话
+    JUDGE["calls"] = 0
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("这时候就不想着省钱嘛", False, uid=1491, mid=9611, card="群鲨鱼"))
+    assert JUDGE["calls"] == 0 and CALLS == []
+    # 没别人说话，但已经过了 5 分钟
+    p._speakers.clear()
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = time.monotonic() - 320
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("这时候就不想着省钱嘛", False, uid=1491, mid=9612, card="群鲨鱼"))
+    assert JUDGE["calls"] == 0 and CALLS == []
+    # 设成 0：关掉
+    monkeypatch.setattr(p.cfg, "followup_judge_window", 0)
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = time.monotonic() - 100
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("这时候就不想着省钱嘛", False, uid=1491, mid=9613, card="群鲨鱼"))
+    assert JUDGE["calls"] == 0 and CALLS == []
+    # 她没回过这个人（只是别人接着她的冒泡说话）：不算
+    monkeypatch.setattr(p.cfg, "followup_judge_window", 300)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("这时候就不想着省钱嘛", False, uid=2697, mid=9614, card="Zidane"))
+    assert JUDGE["calls"] == 0 and CALLS == []
+
+
+def test_short_min_hint_wording_1027():
+    """10/27：最短那档不再举“蛤？”的例子，并提醒先想想对方指的是哪件事（《最短档对比报告-1027_1818》）"""
+    import plugins.roleplay_chat as p
+    first = p.SHORT_VARIANTS[0][1]
+    assert "几个字就好" in first and "蛤？" not in first and "先想想他指的是哪件事" in first
+    assert "一句话" in p.SHORT_VARIANTS[1][1] and "多说两句" in p.SHORT_VARIANTS[2][1]     # 顺序不变（回放工具按位置取）

@@ -84,9 +84,13 @@ def _relax(text: str, hits: dict) -> str:
 
 VARIANTS = {"A": "现在的样子", "B": "加“说人话”", "C": "放松“换着说”和挖苦", "D": "温度 1.0", "E": "B + C", "F": "B + 温度 1.0",
             "L": "长短固定为“可以多说两句”（现在那档）", "M": "长短固定为新写法“多说一两句，说完就停”", "H": "长短固定为“一句话”",
-            "P": "主模型换成 pro", "O": "改前（备份的人设、聊天规则、关系提示）"}
+            "P": "主模型换成 pro", "O": "改前（备份的人设、聊天规则、关系提示）",
+            "S": "长短固定为最短那档“几个字就好”（现在的说法）", "T": "长短固定为最短那档，改过的说法（去掉“蛤？”，加“先想想他指的是哪件事”）"}
 
 # 10/18 第三轮：怪的常是第二条（“半个月。/ 算了，你说的戏码我就当看戏”），怀疑是“可以多说两句”这档让她硬凑一句
+# 10/27（《接话回放报告-1027_1808》）：最短那档的新说法。对方那句费解时，“比如‘嗯。’‘蛤？’”会把她往“嗯？听不懂”上推
+SHORT_MIN_NEW = ("（这轮随意点回：几个字就好，比如“嗯。”“不要。”。对方要是在接你刚说的话，先想想他指的是哪件事再回；"
+                 "对方问了需要回答的问题就照常答清楚。）")
 LEN_MORE_NEW = "（这轮可以多说一两句，用换行分开，像连着发了几条消息，总共不超过 40 字；不过意思一句就说完了的话就停，别为了凑够几句硬补一句。）"
 
 
@@ -118,8 +122,9 @@ def apply_variant(p, v: str, base: dict) -> dict:
     p.cfg.deepseek_model = PRO_MODEL if v == "P" else base["model"]
     p.SHORT_VARIANTS[:] = base["short"]
     hits: dict = {}
-    if v in ("L", "M", "H"):                     # 只管日常闲聊那几档长短（讲故事、倾诉等不变）
-        pick = {"L": base["short"][2][1], "M": LEN_MORE_NEW, "H": base["short"][1][1]}[v]
+    if v in ("L", "M", "H", "S", "T"):           # 只管日常闲聊那几档长短（讲故事、倾诉等不变）
+        pick = {"L": base["short"][2][1], "M": LEN_MORE_NEW, "H": base["short"][1][1],
+                "S": base["short"][0][1], "T": SHORT_MIN_NEW}[v]
         p.SHORT_VARIANTS[:] = [(1.0, pick), (1.0, pick)]    # 对方写了 30 字以上时 short_hint 会跳过第一档，所以放两份
         hits["长短"] = pick[:12]
     if v in ("B", "E", "F"):
@@ -318,7 +323,7 @@ async def test_phrasing(app: App, monkeypatch):
     pr = getattr(p, "prompts", p)
     base = {"persona": pr._persona, "rules": pr.CHAT_RULES, "fam": dict(p.FAMILIARITY_HINT), "temp": p.cfg.llm_temperature,
             "short": list(p.SHORT_VARIANTS), "model": p.cfg.deepseek_model}
-    assert "多说两句" in base["short"][2][1] and "一句话" in base["short"][1][1], "SHORT_VARIANTS 的顺序变了，L/H 要跟着改"
+    assert "多说两句" in base["short"][2][1] and "一句话" in base["short"][1][1] and "几个字" in base["short"][0][1], "SHORT_VARIANTS 的顺序变了，L/H/S 要跟着改"
     real_time_mod, real_dt, real_fam = p.time, p.datetime, p.familiarity_of
     cases, samples, variants = _cases()
     events_cache, private_cache, results, hits_all = {}, {}, [], {}
@@ -357,6 +362,10 @@ async def test_phrasing(app: App, monkeypatch):
                         r = await replay_private(p, case, private_cache[(case["log"], case["user"])], real)
                     row = {"id": case["id"], "variant": v, "sample": k, "reply": r["reply"], "model": p.cfg.deepseek_model,
                            "secs": round(sum(timing), 2), "calls": len(timing)}
+                    # 10/27：每次都记下这轮抽到的回复长短提示（“这轮随意点回：几个字就好”这类），看接不接得上和它有没有关系
+                    sys_tail = " ".join(str(m["content"]) for m in (r["prompt"] or [])[-3:] if m.get("role") == "system")
+                    mlen = re.search(r"（这轮[^）]*）", sys_tail)
+                    row["length_hint"] = mlen.group(0)[:40] if mlen else ""
                     if v == variants[0] and k == 0:         # 每题留一份提示（最后几条），查回放对不对
                         row["prompt_tail"] = [{"role": m["role"], "content": str(m["content"])[:1500]} for m in (r["prompt"] or [])[-5:]]
                     results.append(row)
@@ -373,7 +382,7 @@ async def test_phrasing(app: App, monkeypatch):
     (OUT_DIR / f"措辞对比_{stamp}.json").write_text(json.dumps({"meta": meta, "results": results}, ensure_ascii=False, indent=1), encoding="utf-8")
     # 盲评：每题的回复打乱，只标编号
     rnd = random.Random(stamp)
-    if "P" in variants or "O" in variants:    # 比模型 / 比改前改后（10/22）：和回归测试的盲评稿用同一套打分
+    if "P" in variants or "O" in variants or "S" in variants:    # 比模型 / 比改前改后（10/22）：和回归测试的盲评稿用同一套打分
         key, md = {}, [f"# 措辞对比 {stamp}：盲评稿", "",
                        "每题先看上下文，再看下面打乱顺序的回复，给每条打两个分（0、1、2），写进打分表：",
                        "- **顺**：2 = 像真人随口说的、一读就懂、接得上对方的话；1 = 能懂但有点别扭；0 = 读不通、硬凹、答非所问",

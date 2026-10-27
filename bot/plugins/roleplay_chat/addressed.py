@@ -180,11 +180,18 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
             return True
     if len(text) < 2 or core.in_peak():       # 高峰时段她很忙，不主动接话（也省掉判断的 token）
         return False
+    # 10/27：她回完这个人以后，群里没别人说话，这个人隔一两分钟才接着说（打字慢）：不直接放过，交给判断。
+    # 10/26 14:16 “这时候就不想着省钱嘛”隔了 100 秒，没“你”、不是问句，以前在下面直接当成不是跟她说的
+    quiet_followup = False
+    if not in_followup and cfg.followup_judge_window > 0:
+        replied = _replied_at.get((gid, event.user_id))
+        if replied is not None and now - replied <= cfg.followup_judge_window and not others_spoke_since(gid, event.user_id, replied):
+            quiet_followup = True
     last = _last_bot_msg.get(gid)
     recent_talk = bool(last) and now - last[0] <= cfg.smart_window
-    continuing = in_followup or (recent_talk and (event.user_id == last[1] or "你" in plain or _looks_like_question(plain)))
+    continuing = in_followup or quiet_followup or (recent_talk and (event.user_id == last[1] or "你" in plain or _looks_like_question(plain)))
     # 正在跟她聊的人（她刚回过的人，或者接着用“你”跟她说话）：不受“没 @ 也回复”间隔的限制
-    in_conversation = in_followup or (recent_talk and (event.user_id == last[1] or "你" in plain))
+    in_conversation = in_followup or quiet_followup or (recent_talk and (event.user_id == last[1] or "你" in plain))
     if not in_conversation and now - _last_smart.get(gid, -1e9) < cfg.smart_min_interval:
         if mentioned or continuing:
             logger.info(f"没 @ 的消息，离上次插话不到 {cfg.smart_min_interval:g} 秒，先不接：群{gid} {sender_name(event)}：{text[:30]}")
@@ -196,6 +203,8 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
         _sleep_wrapup(f"group_{gid}", event.user_id)     # 刚到休息时间、正在跟她聊的人接着说：先收个尾
     if cfg.smart_judge and quota_left(gid, event.user_id) <= 0 and not in_wrapup(f"group_{gid}", event.user_id):
         return False                     # 今天的钱花完了（或这个群、这个人的份额用完了）：反正不会回，也不用判断
+    if quiet_followup and not (mentioned or recent_talk):
+        logger.info(f"刚回过这个人、期间没别人说话，隔了 {now - _replied_at[(gid, event.user_id)]:.0f} 秒接着说，交给判断：群{gid} {sender_name(event)}：{text[:30]}")
     ok = await _judge(event, line) if cfg.smart_judge else mentioned
     if ok:
         _last_smart[gid] = now
