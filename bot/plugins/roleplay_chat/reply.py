@@ -575,6 +575,12 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"近况：取用出错，这次不带：{e}")
         life_memo = ""
+    space_memo = ""
+    if not is_group:                              # 10/27 空间 agent 交接：私聊时带上最近在 QQ 空间的往来（两个人之间的事，群里不提）
+        try:
+            space_memo = qzone_diary.space_memo(event.user_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"空间往来：取用出错，这次不带：{e}")
     mode = "busy" if busy else reply_mode(text)
     fam = core.familiarity_of(event.user_id)
     length_hint = length_hint_for(mode, text, fam)
@@ -618,7 +624,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
             and not she_asked(history) and not gifts):
         skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                      "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
-    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo) if x)
+    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, space_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo) if x)
     recall_msg = [{"role": "system", "content": extra}]
 
     messages = api_messages(

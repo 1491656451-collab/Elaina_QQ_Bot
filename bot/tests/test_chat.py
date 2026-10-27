@@ -6365,3 +6365,59 @@ def test_short_min_hint_wording_1027():
     first = p.SHORT_VARIANTS[0][1]
     assert "几个字就好" in first and "蛤？" not in first and "先想想他指的是哪件事" in first
     assert "一句话" in p.SHORT_VARIANTS[1][1] and "多说两句" in p.SHORT_VARIANTS[2][1]     # 顺序不变（回放工具按位置取）
+
+
+@pytest.mark.asyncio
+async def test_space_memo_private_only_1027(app: App, monkeypatch):
+    """10/27 空间 agent 交接：私聊时提示里带上最近在 QQ 空间的往来；群聊不带；出错照常回"""
+    import plugins.roleplay_chat as p
+    asked = []
+
+    def fake_memo(uin, now=None):
+        asked.append(uin)
+        return p.prompts.SPACE_MEMO_HEAD + "\n- 昨天晚上：对方发了条说说，你刷到了，点了个赞，没留言：「海边好冷」\n" + p.prompts.SPACE_MEMO_TAIL
+    monkeypatch.setattr(p.qzone_diary, "space_memo", fake_memo)
+    p.client.chat.completions.create = fake_create("嗯，在。")
+    await p.converse(_PBot(), pev("在吗", uid=9991, mid=7901))
+    sys_text = "".join(str(m["content"]) for m in CALLS[-1]["messages"] if m["role"] == "system")
+    assert asked == [9991] and "【你们最近在 QQ 空间里的往来】" in sys_text and "海边好冷" in sys_text
+    assert "对方没提就别主动说" in sys_text
+    # 群聊：不取、不带
+    asked.clear()
+    p.client.chat.completions.create = fake_create("什么事")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = gev("伊蕾娜在吗", True, uid=9991, mid=7902, card="小丁")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "什么事", result=None, bot=bot)
+    assert asked == []
+    assert not any("QQ 空间里的往来" in str(m["content"]) for m in CALLS[-1]["messages"])
+    # 出错：照常回，只是不带
+    def boom(*a, **k): raise RuntimeError("坏了")
+    monkeypatch.setattr(p.qzone_diary, "space_memo", boom)
+    bot = _PBot()
+    p.client.chat.completions.create = fake_create("嗯。")
+    await p.converse(bot, pev("还在吗", uid=9992, mid=7903))
+    assert bot.sent
+
+
+def test_space_memo_wording_1027(monkeypatch):
+    """她自己去评论别人的说说写成“你评论的是”；对方评论她的日记、她回的，还是“你回的是”；标题和提醒来自 prompts.py"""
+    import time as _t
+    import plugins.roleplay_chat as p
+    qd = p.qzone_diary
+    monkeypatch.setattr(qd.cfg, "qzone_space_memo_hours", 48.0)
+    h = qd.get_history("qzone_70011")
+    h.clear()
+    now = _t.time()
+    h.extend([
+        {"role": "user", "content": "【小戊】（发了条说说，你刷到后在下面评论了一句）海边好冷", "ts": now - 7200},
+        {"role": "assistant", "content": "多穿点", "ts": now - 7200},
+        {"role": "user", "content": "【小戊】（在你的日记下评论）好看", "ts": now - 3600},
+        {"role": "assistant", "content": "那是当然", "ts": now - 3600},
+    ])
+    m = qd.space_memo(70011)
+    assert m.startswith(p.prompts.SPACE_MEMO_HEAD) and m.endswith(p.prompts.SPACE_MEMO_TAIL)
+    assert "你刷到了，在下面评论了一句：「海边好冷」；你评论的是「多穿点」" in m
+    assert "在你的日记下评论：「好看」；你回的是「那是当然」" in m
+    h.clear()

@@ -34,6 +34,7 @@ from . import (
     short_hint, system_prompt, tagger, vision, _hour_window, _locks,
 )
 from .gallery import Gallery
+from .prompts import SPACE_MEMO_HEAD, SPACE_MEMO_TAIL
 from .qzone import (
     RIGHT_PUBLIC, Comment, Qzone, QzoneError, addressed_to_me, mention_targets, mentions_in, parse_comments, plain_text,
     post_pics,
@@ -44,6 +45,7 @@ DAILY_DIR = DATA / "daily"
 POSTS_FILE = DATA / "posts.json"
 STATE_FILE = DATA / "state.json"
 SEEN_FILE = DATA / "comments_seen.json"
+SELF_LIKE_FILE = DATA / "self_like.json"      # 10/27：发完说说过几分钟给自己点赞，待点的那条记在这里（重启不丢）
 BJ = peak.BEIJING
 WEEKDAYS = "一二三四五六日"
 
@@ -444,7 +446,56 @@ async def publish(draft: dict) -> str:
                   "desc": draft["desc"], "moments": draft.get("moments", [])})
     _write(POSTS_FILE, posts[-60:])
     logger.info(f"说说已发出 tid={tid}：{draft['text'][:40]}")
+    if cfg.qzone_self_like:
+        _write(SELF_LIKE_FILE, {"tid": tid, "ts": int(time.time()), "at": time.time() + random.uniform(3 * 60, 10 * 60)})
     return tid
+
+
+async def _self_like_due() -> None:
+    """发完说说 3～10 分钟后给自己点个赞（不和发说说挤在一起）；只试一次，点没点上都不再点"""
+    job = _read(SELF_LIKE_FILE, {})
+    if not job or time.time() < job.get("at", 0) or write_block():
+        return
+    SELF_LIKE_FILE.unlink(missing_ok=True)
+    if time.time() - job.get("ts", 0) > 6 * 3600:
+        return                                     # 太久了（中途一直掉线）：算了
+    me = (await qz.ctx()).uin
+    try:
+        ok = await qz.like(str(job["tid"]), me, int(job.get("ts") or 0))
+    except QzoneError as e:
+        if e.kind == "hold":
+            _write(SELF_LIKE_FILE, job)            # 刚好被闸门挡住：留着下次再点
+            return
+        raise
+    logger.info("QQ 空间：给自己刚发的说说点了赞" if ok else "QQ 空间：给自己的说说点赞，没确认上")
+
+
+def space_memo(uin: int, now: float | None = None) -> str:
+    """私聊时告诉她：最近和这个人在 QQ 空间里的往来（她评论 / 点赞他的说说、他评论她的日记、她回过的话）。
+    10/27 加，给聊天主流程用；文字归聊天 agent 润色。没有就返回空"""
+    hours = cfg.qzone_space_memo_hours
+    if not hours:
+        return ""
+    now = now or time.time()
+    items = [h for h in get_history(f"qzone_{uin}") if h.get("ts") and now - h["ts"] <= hours * 3600]
+    if not items:
+        return ""
+    lines = []
+    for i, h in enumerate(items):
+        if h["role"] != "user":
+            continue
+        m = re.match(r"^【[^】]*】（([^）]*)）(.*)$", h["content"], re.S)
+        where, said = (m.group(1), m.group(2)) if m else ("在空间里", h["content"])
+        nxt = items[i + 1] if i + 1 < len(items) and items[i + 1]["role"] == "assistant" else None
+        line = f"- {_ago(h['ts'], now)}：对方{where}：「{plain_text(said)[:40]}」"
+        if nxt:
+            # 10/27 聊天 agent：她刷到对方的说说、自己去评论的，不是在“回”对方，写成“你评论的是”
+            verb = "你评论的是" if "你刷到后" in where else "你回的是"
+            line += f"；{verb}「{nxt['content'][:40]}」"
+        lines.append(line.replace("你刷到后", "你刷到了，"))
+    if not lines:
+        return ""
+    return SPACE_MEMO_HEAD + "\n" + "\n".join(lines[-4:]) + "\n" + SPACE_MEMO_TAIL     # 标题和提醒的文字归聊天，在 prompts.py
 
 
 DIARY_WORDS = ("说说", "空间", "日记", "动态", "配图", "那张图", "你发的")
@@ -646,6 +697,15 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
         return None
     reply = re.sub(r"([，。！？!?…~、,])\s*\n+\s*", r"\1", reply)    # 评论不分条：几行合成一行
     return re.sub(r"\s*\n+\s*", "，", reply).strip()[:150]
+
+
+def _remember_action(uin: int, nick: str, said: str, where: str) -> None:
+    """她在空间里做了件事但没说话（比如只点了个赞）：只记一行“对方 + 她做了什么”，不编她说的话"""
+    key = f"qzone_{uin}"
+    line = f"【{nick}】（{where}）{said}"
+    get_history(key).append({"role": "user", "content": line, "uid": uin, "name": nick, "ts": time.time()})
+    save_history(key)
+    ltm.add_pending(key, [{"role": "user", "content": line, "uid": uin, "name": nick}])
 
 
 def _remember(uin: int, nick: str, said: str, reply: str, where: str, taboo: bool = True) -> None:
@@ -1069,7 +1129,7 @@ async def decide_friend_post(owner: int, nick: str, text: str, pic: str, when: s
     return {"like": bool(d.get("like")), "comment": bool(d.get("comment"))}
 
 
-async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic: str) -> str:
+async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic: str, liked: bool = False) -> str:
     """给她看一条好友的说说，她自己决定评不评；返回 replied / declined / skipped / retry / unconfirmed"""
     why = write_block()
     if why:
@@ -1089,7 +1149,8 @@ async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic
         if not ok:
             logger.warning(f"空间：在 {owner_nick} 的说说下评论没能确认发出，不记进记忆，也不再重试：{reply}")
             return "unconfirmed"
-        _remember(owner, owner_nick, text, reply, "发了条说说，你刷到后在下面评论了一句", taboo=False)
+        _remember(owner, owner_nick, text, reply,
+                  "发了条说说，你刷到后点了赞，还在下面评论了一句" if liked else "发了条说说，你刷到后在下面评论了一句", taboo=False)
     logger.info(f"空间：刷到 {owner_nick}（{owner}）的说说，评论：{reply}")
     return "replied"
 
@@ -1153,6 +1214,7 @@ async def poll_friends() -> str:
             notes.append(f"{nick}：{what}")
             continue
         lk = f"flike|{it['owner']}|{it['tid']}"
+        like_ok = False
         if want_like and lk not in _seen():
             why = write_block()
             if why:
@@ -1162,15 +1224,21 @@ async def poll_friends() -> str:
             _mark_seen([lk])                           # 点过（或不确定点没点上）就不再点，免得重复
             _count_like()
             _round["n"] += 1
+            like_ok = ok
             if ok:
                 liked += 1
                 logger.info(f"空间：给 {nick}（{it['owner']}）的说说点了赞")
             else:
                 notes.append(f"{nick}：点赞没确认上")
+        liked_now = like_ok
+        commented_now = False
         if want_comment and not _round_full():
             await _gap_between_replies(0)
-            res = await comment_friend_post(me, it["owner"], nick, d, pic)
+            res = await comment_friend_post(me, it["owner"], nick, d, pic, liked=liked_now)
+            commented_now = res in ("replied", "unconfirmed")
             if res == "retry":
+                if liked_now:
+                    _remember_action(it["owner"], nick, text, "发了条说说，你刷到后点了个赞")
                 continue                               # 限流、模型出错：留到下一轮（已点过的赞不会重点）
             if res == "declined":
                 notes.append(f"{nick}：想了想还是没评")
@@ -1178,6 +1246,8 @@ async def poll_friends() -> str:
                 commented += res == "replied"
                 _round["n"] += 1
                 _count_friend(it["owner"])
+        if liked_now and not commented_now:            # 只点了赞：也记下来，以后问起她知道（10/27）
+            _remember_action(it["owner"], nick, text, "发了条说说，你刷到后点了个赞，没留言")
         _mark_seen([k])
     out = f"好友动态：新说说 {len(fresh)} 条，给她看了 {shown} 条，点赞 {liked} 个，评论了 {commented} 条"
     return out + (f"（{'；'.join(notes)}）" if notes else "")
@@ -1269,6 +1339,10 @@ async def tick() -> None:
     st = state()
     if st.get("paused") or read_block():
         return                       # 下线、熔断、刚上线（30～60 分钟内读也不读）：空间一概不碰
+    try:
+        await _self_like_due()
+    except QzoneError as e:
+        logger.warning(f"QQ 空间：给自己的说说点赞失败：{e}")
     now = _now()
     minute = now.hour * 60 + now.minute
     window = peak.parse_ranges(cfg.qzone_post_window)
