@@ -108,14 +108,14 @@ async def _judge(event: GroupMessageEvent, line: str) -> bool:
     recent = "\n".join(x[:120] for x in lines[-6:]) or "（无）"
     prompt = JUDGE_PROMPT.format(last=last[2][:100] if last else "（最近没说话）", recent=recent, line=line[:220])
     try:
-        r = await client.chat.completions.create(
-            model=cfg.deepseek_model,
+        r = await core.judge_client.chat.completions.create(       # 10/28 起默认用 pro（core.pick_judge）
+            model=core.judge_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=2,
             extra_body={"thinking": {"type": "disabled"}},
         )
-        budget.track(r, "judge", user=event.user_id, group=event.group_id)
+        budget.track(r, "judge", user=event.user_id, group=event.group_id, model=core.judge_model)
         ok = (r.choices[0].message.content or "").strip().startswith("是")
         if not ok:
             logger.info(f"判断：不是在跟她说话 群{event.group_id} {line[:40]}")

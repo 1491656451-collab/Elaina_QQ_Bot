@@ -118,6 +118,7 @@ class Config(BaseModel):
     memory_self_place_stale_days: int = 5 # 她说在某处以后这么多天没再提：给她看“前几天说的，不一定还在”
     memory_pro_api_key: str = ""          # pro 模型单独用的 Key；不填就都用 DEEPSEEK_API_KEY 和 DEEPSEEK_MODEL
     memory_pro_model: str = "deepseek-v4-pro"
+    judge_use_pro: bool = True            # 群里没 @ 她时“是不是在跟她说话”的判断用 pro（10/28《判断回放报告-1028_1813》：认出 32/39，flash 22/39）；没填 MEMORY_PRO_API_KEY 时照旧用 flash
     memory_nightly_use_pro: bool = True   # 睡前整理用 pro（10/16 对比：合并稳、印象干净）
     memory_verify_use_pro: bool = False   # 核对用 pro（还没比过，先用 flash）
 

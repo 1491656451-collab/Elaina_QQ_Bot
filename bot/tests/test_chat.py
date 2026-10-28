@@ -6421,3 +6421,63 @@ def test_space_memo_wording_1027(monkeypatch):
     assert "你刷到了，在下面评论了一句：「海边好冷」；你评论的是「多穿点」" in m
     assert "在你的日记下评论：「好看」；你回的是「那是当然」" in m
     h.clear()
+
+
+def test_split_bubbles_keeps_ellipsis_1028(monkeypatch):
+    """10/28：“……”不会再被拆成单独一条“…”（10/27 15:22“是喔。/ … / …你那语气”，10/28 16:29“嗯… / …”）"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "multi_message", True)
+    monkeypatch.setattr(p.cfg, "split_prob", 1.0)
+    monkeypatch.setattr(p.cfg, "drop_period_prob", 0.0)
+    monkeypatch.setattr(p.cfg, "max_bubbles", 3)
+    assert p.split_bubbles("是喔。……你那语气听着像在敷衍我") == ["是喔。", "……你那语气听着像在敷衍我"]
+    assert p.split_bubbles("是喔……不过你这敷衍的语气，我听得出来") == ["是喔……", "不过你这敷衍的语气，我听得出来"]
+    assert p.split_bubbles("嗯……这我倒没想过。") == ["嗯……", "这我倒没想过。"]
+    assert p.split_bubbles("…………") == ["…………"]
+    assert p.split_bubbles("相似的人……") == ["相似的人……"]
+    assert p.split_bubbles("好吧。……") == ["好吧。……"]
+    assert p.split_bubbles("……\n……\n这几个我不太乐意接受") == ["…………这几个我不太乐意接受"]   # 她自己换行写的
+    assert p.split_bubbles("……\n这样啊") == ["……这样啊"]
+    for out in (p.split_bubbles(t) for t in ("是喔。……你那语气", "……嗯。……", "哎呀……真伤脑筋……算了。")):
+        assert not any(re.fullmatch(r"[…。！？!?~，,\s]+", x) for x in out), out
+
+
+def test_judge_uses_pro_1028(monkeypatch):
+    """10/28：群里判断“是不是在跟她说话”默认用 pro（填了 MEMORY_PRO_API_KEY 时）；关掉开关或没填 Key 就用聊天的 flash"""
+    import types as _t
+    import plugins.roleplay_chat as p
+    c = _t.SimpleNamespace(judge_use_pro=True, deepseek_base_url="https://api.deepseek.com", memory_pro_model="deepseek-v4-pro",
+                           deepseek_model="deepseek-flash")
+    main = object()
+    cl, model = p.core.pick_judge(c, main, "sk-pro")
+    assert model == "deepseek-v4-pro" and cl is not main
+    assert p.core.pick_judge(c, main, "") == (main, "deepseek-flash")          # 没填 pro 的 Key
+    c.judge_use_pro = False
+    assert p.core.pick_judge(c, main, "sk-pro") == (main, "deepseek-flash")    # 开关关了
+    # 判断提示：加了两条，“拿不准就答否”还在
+    jp = p.prompts.JUDGE_PROMPT
+    assert "接着她刚才的话往下说的" in jp and "提到别的群友" in jp and "拿不准的时候也回答“否”" in jp
+
+
+@pytest.mark.asyncio
+async def test_judge_call_goes_to_judge_client_1028(app: App, monkeypatch):
+    """判断的那次调用走 core.judge_client、用 core.judge_model"""
+    import types as _t
+    import plugins.roleplay_chat as p
+    seen = {}
+
+    async def fake_judge(**kw):
+        seen.update(kw)
+        return _t.SimpleNamespace(choices=[_t.SimpleNamespace(message=_t.SimpleNamespace(content="否"), finish_reason="stop")],
+                                  usage=None, model=kw.get("model"))
+    fake_client = _t.SimpleNamespace(chat=_t.SimpleNamespace(completions=_t.SimpleNamespace(create=fake_judge)))
+    monkeypatch.setattr(p.core, "judge_client", fake_client)
+    monkeypatch.setattr(p.core, "judge_model", "deepseek-v4-pro")
+    p.client.chat.completions.create = fake_create("不该回")
+    p._last_bot_msg[555] = (time.monotonic() - 10, 2697, "那种酒我劝您别喝")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("你有脚气吗", False, uid=2824, mid=9701, card="小庚"))
+    assert seen.get("model") == "deepseek-v4-pro" and seen.get("max_tokens") == 2
+    assert "接着她刚才的话往下说的" in seen["messages"][0]["content"] and "你有脚气吗" in seen["messages"][0]["content"]
+    assert CALLS == []                                   # 判断说“否”：不回

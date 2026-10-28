@@ -103,6 +103,17 @@ if cfg.memory_pro_api_key:                       # pro 单独一个 Key（10/16�
     if cfg.memory_verify_use_pro:
         ltm.verify_client, ltm.verify_model = _pro_client, cfg.memory_pro_model
 
+
+def pick_judge(c, main_client, pro_key: str):
+    """群里“是不是在跟她说话”的判断用哪个模型（10/28 聊天 agent）：开了 JUDGE_USE_PRO、又填了 pro 的 Key 就用 pro，否则照旧用聊天的 flash。
+    pro 单独开一个连接：超时短、不重试（判断慢了宁可按“否”，别让群消息卡住）"""
+    if c.judge_use_pro and pro_key:
+        return AsyncOpenAI(api_key=pro_key, base_url=c.deepseek_base_url, timeout=15, max_retries=0), c.memory_pro_model
+    return main_client, c.deepseek_model
+
+
+judge_client, judge_model = pick_judge(cfg, client, cfg.memory_pro_api_key)
+
 # 她自己的近况（10/23，长期记忆 agent 加）：她说过自己在哪、最近说过经历了什么（只记她自己说过的）
 from .self_memory import SelfMemory  # noqa: E402
 self_mem = SelfMemory(BOT_DIR / cfg.memory_dir / "self.json", ltm.summary_client, cfg.deepseek_model,

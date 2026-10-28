@@ -114,16 +114,36 @@ def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) 
     return text
 
 
+_PUNCT_ONLY_RE = re.compile(r"[…。！？!?~，,\s]+")
+
+
+def _merge_punct(parts: list[str]) -> list[str]:
+    """只剩标点的一截（“是喔。……你那语气”拆出来的“……”）并到下一截开头；最后一截只剩标点就并到上一截（10/28）"""
+    out: list[str] = []
+    for x in parts:
+        if out and _PUNCT_ONLY_RE.fullmatch(out[-1]):
+            out[-1] += x
+        else:
+            out.append(x)
+    if len(out) > 1 and _PUNCT_ONLY_RE.fullmatch(out[-1]):
+        tail = out.pop()
+        out[-1] += tail
+    return out
+
+
 def split_bubbles(reply: str) -> list[str]:
     """把一次回复拆成几条消息：优先按换行；没换行时按句子随机拆；最多 max_bubbles 条"""
     if not cfg.multi_message:
         return [reply]
     parts = [p.strip() for p in reply.split("\n") if p.strip()]
     if len(parts) == 1 and random.random() < cfg.split_prob:
-        sents = [s.strip() for s in re.split(r"(?<=[。！？!?…~])", reply) if s.strip()]
+        # 10/28：省略号“……”是两个“…”，以前在两个“…”中间也会断开，多出一条只有“…”的消息（10/27、10/28 线上都有）；
+        # 连着的“…”算一个整体，只在最后一个后面断
+        sents = _merge_punct([s.strip() for s in re.split(r"(?<=[。！？!?~])|(?<=…)(?!…)", reply) if s.strip()])
         # 太短的碎句（比如“嗯。”后面紧跟正文）有一半概率单独成条，其余合并
         if 1 < len(sents) <= 6:
             parts = sents
+    parts = _merge_punct(parts)                # 她自己换行写的“……”单独一行也并到下一行（10/28 16:17 连着两条“…”）
     if len(parts) > cfg.max_bubbles:           # 太多就把后面的合并
         parts = parts[: cfg.max_bubbles - 1] + ["".join(parts[cfg.max_bubbles - 1 :])]
     out = []

@@ -13,7 +13,6 @@ novel/
 bot/knowledge/summaries/
 bot/knowledge/characters.md
 bot/personas/elaina.md
-bot/personas/events.md
 bot/qzone/images/
 
 # ---- 只给自己看的文档：含真实 QQ 号、群号、聊天内容或本机配置 ----
@@ -48,7 +47,6 @@ docs/人设回归测试报告.md
 docs/人设打磨-原文台词对照报告.md
 docs/人设整理报告.md
 docs/人设复测报告-*.md
-docs/人设短版改动记录-*.md
 docs/问题排查记录-今天的日记乱编.md
 docs/问题排查记录-追问往事记混.md
 docs/整理草稿/
@@ -95,41 +93,3 @@ voice_service/service.pid
 
 # 括号里的话排查记录：引了 10/20 私聊原话和对方档案（10/20 部署 agent 加）
 docs/问题排查记录-括号里的话-*.md
-
-# 代码拆分前的备份（10/22，部署 agent 加）
-docs/拆分前备份/
-
-# 10/22 第一批报告：引了线上聊天原话、QQ 号、图库截图（部署 agent 加）
-docs/发前清理清单.md
-docs/测试指令会不会留下错误记忆.md
-docs/*抽查-*.md
-docs/*抽查-*/
-
-# 10/23：别人画的图（识图对照），和含人设原文 / 群号的人设减肥文档（部署 agent 加）
-bot/tools/识图对照图/
-docs/交接-人设短版-*.md
-docs/人设减肥对比报告-*.md
-docs/提示词审计-*.md
-
-# 10/23：近况回放用的是线上真实会话（和记忆回放测试报告一样不上传；部署 agent 加）
-docs/近况回放报告-*.md
-
-# 10/23 晚：排查记录和对比报告引了线上原话、QQ 号；交接里有带 QQ 号的修档案脚本（部署 agent 加）
-docs/问题排查记录-*-1023.md
-docs/记忆改前改后对比报告-*.md
-docs/交接-性别判断改模型-*.md
-
-# 10/24 起：带日期的排查记录都引了线上原话或 QQ 号，统一不上传（部署 agent 加）
-docs/问题排查记录-*-1[0-2][0-3][0-9].md
-
-# 10/25：识图实物照片测试用的照片（只留说明），以及逐张的原始结果（部署 agent 加）
-bot/tools/识图实物照片/*
-!bot/tools/识图实物照片/说明.txt
-docs/识图实物照片测试/实物照片_*.md
-
-# 10/27：接话、最短档回放用的是线上群聊原话（和措辞对比报告一样不上传；部署 agent 加）
-docs/接话回放报告-*.md
-docs/最短档对比报告-*.md
-
-# 10/27：Claude 桌面端放输出的文件夹，不进仓库（部署 agent 加）
-Claude outputs/
