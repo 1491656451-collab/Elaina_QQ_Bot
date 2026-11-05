@@ -2457,12 +2457,42 @@ def test_short_hint_not_tiny_for_long_message(monkeypatch):
     assert tiny in {p.short_hint("好累") for _ in range(300)}
 
 
+def test_length_ignores_image_desc_1105(monkeypatch):
+    """11/05（识图那边描述放宽到 100 字）：回长回短只看对方自己打的字；发了图就不挑“几个字就好”那档"""
+    import plugins.roleplay_chat as p
+    th = p.turn_hints
+    shot = "[图片：聊天截图，A 说“今天考试又挂了，好难过”，B 回“讲讲怎么回事”，A 又发了好几句抱怨老师出题太偏、复习方向全错了，最后说不想学了。]"
+    assert len(shot) > 60
+    assert th.own_text(shot) == "" and th.own_text("看这个" + shot + "笑死") == "看这个笑死"
+    assert p.reply_mode(shot) == "short"                         # 只发截图：不当成写了一大段
+    assert p.reply_mode("你看" + shot) == "short"                # 描述里的“讲讲”“难过”不算
+    assert p.reply_mode("讲讲这张图" + shot) == "long"           # 对方自己说的“讲讲”照算
+    assert p.reply_mode("好" * 60 + shot) == "long"
+    assert p.reply_mode("嗯（引用了图片：" + "一" * 80 + "）") == "short"
+    # 描述里自己带括号：按配对去掉（11/05 识图 agent 提的：引用两张图时第二张描述整段留下）
+    two = ("这俩（引用了图片：两只猫趴在窗台上（一只黑、一只粉），旁边写着“摸鱼中”；"
+           "灰发少女戴黑帽骑扫帚，配字“出发”" + "，背景是长长的海岸线和一排小房子" * 3 + "（画的不是你））")
+    assert th.own_text(two) == "这俩" and p.reply_mode(two) == "short"
+    assert th.own_text("[图片：配字“[狗头]”的表情包]哈哈[图片：一只猫（橘色）]好") == "哈哈好"
+    assert th.own_text("嗯（引用了图片：没收尾的（描述") == "嗯"
+    assert th.own_text("（笑）你好（真的）") == "（笑）你好（真的）"         # 普通括号不动
+    vent = "今天好累好难过" + "啊" * 60
+    assert p.length_hint_for("long", vent + shot, "stranger") == p.LENGTH_HINT["vent_stranger"]
+    assert p.length_hint_for("long", "给我说说" + "这" * 60 + shot, "stranger") == p.LENGTH_HINT["long"]   # 描述里的“难过”不算倾诉
+    tiny = p.SHORT_VARIANTS[0][1]
+    for img in ("[图片：一只猫]", "[图片]", "嗯（引用了图片：一只猫）"):
+        assert tiny not in {p.short_hint(img) for _ in range(300)}, img       # 发了图：不只回几个字
+    assert tiny in {p.short_hint("好累") for _ in range(300)}
+
+
 def test_stranger_tone_softer():
     import plugins.roleplay_chat as p
     h = p.FAMILIARITY_HINT["stranger"]
     # 11/05 人设交接第 41 节：第一句去掉“客气”“用敬语、礼貌”，改成“口气淡、有分寸”
     assert "有分寸" in h and "不要凶" in h and "毫不客气地怼回去" not in h
     assert "敬语" not in h
+    # 11/05 人设交接第 43 节：被夸从“不好意思”改成“从容收下”；“我知道”三个字不再出现（写成“不要”也会被照用）
+    assert "从容地收下" in h and "别冷冰冰地把人噎回去" in h and "不好意思" not in h and "我知道" not in h
     persona = Path("personas/elaina.md").read_text(encoding="utf-8")
     assert "……你谁啊？" not in persona and "蛤？你脑子没问题吧？" not in persona
 

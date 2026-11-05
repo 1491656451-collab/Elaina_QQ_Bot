@@ -34,10 +34,18 @@ SELF_TAG = "elaina_(majo_no_tabitabi)"
 SELF_NAME = "伊蕾娜"
 # 认得出、并且她认识的人（Tagger v3 的词表里，《魔女之旅》只有伊蕾娜一个人）
 KNOWN = {SELF_TAG: SELF_NAME}
+# 11/05 描述只写看到的，不替发图的人猜用意（“在调侃对方”这类判断留给聊天模型结合上下文去做）。
+# 11/05 复杂的图放宽：一般 50 字以内，文字多的图（聊天截图、多格漫画……）可以写到 100 字。
+# 这里是硬上限：模型偶尔写超了，就在这个长度以内最后一个句读处截断
+DESC_MAX = 130
 
 DESCRIBE_PROMPT = (
-    "用简短的中文描述这张图片，不超过 50 字。"
-    "写出主要内容；图里有文字就写出关键文字；如果是表情包，说明它表达的情绪或意思。"
+    "用简短的中文描述这张图片，一般不超过 50 字。"
+    "写出主要内容；图里有文字就写出关键文字；如果是表情包，写出画面上的表情、动作和配字，"
+    "画里人物的情绪（开心、无语、嫌弃之类）和梗本身的意思可以写，但别替发图的人猜用意（比如“在调侃对方”“在敷衍”“想求安慰”），"
+    "这要看的人结合聊天自己判断。"
+    "图里文字多、内容复杂（聊天截图、长段配文、多格漫画、通知公告、表格清单）时可以写到 100 字，"
+    "把关键的话写全，聊天截图写清谁说了什么。"
     "画出来的人物写成“画中的少女”“画中人”之类，不要用“动漫”“动画”“二次元”“番剧”“角色”这些词。"
     "如果拍的是实物（手办、人偶、玩偶、立牌、雕像之类），开头写明，比如“一尊人偶：……”“一个玩偶：……”，"
     "里面的人物写成“人偶”，不要写成“画中的少女”。"
@@ -75,6 +83,9 @@ _REWRITE = [
     (re.compile(r"粘土人"), "小人偶"),
     (re.compile(r"手办"), "人偶"),
     (re.compile(r"公仔"), "玩偶"),
+    # 11/05：描述会包在「[图片：……]」里，聊天那边按方括号认出描述、算字数时去掉；描述里自己带方括号（截图里的用户名之类）会打乱，换成【】
+    (re.compile(r"\["), "【"),
+    (re.compile(r"\]"), "】"),
 ]
 
 # 交给模型前先在本机缩小：DeepSeek 看图时本来也会缩小，原图几 MB 传上去只是更慢、更容易超时
@@ -136,6 +147,15 @@ def _readable(tag: str) -> str:
     return f"{name}（{series.replace('_', ' ')}）" if series else name
 
 
+def _clip_desc(desc: str) -> str:
+    """超过 DESC_MAX 时在上限以内最后一个句读处截断，免得半个词或半句引号留在里面"""
+    if len(desc) <= DESC_MAX:
+        return desc
+    head = desc[:DESC_MAX]
+    cut = max(head.rfind(c) for c in "。！？；，")
+    return (head[:cut] if cut >= DESC_MAX // 2 else head) + "……"
+
+
 def sanitize(desc: str) -> str:
     for pat, rep in _REWRITE:
         desc = pat.sub(rep, desc)
@@ -144,7 +164,7 @@ def sanitize(desc: str) -> str:
 
 class Vision:
     def __init__(self, client, model: str, cache_file: Path, *, tagger=None, maybe: float = 0.35,
-                 max_bytes: int = 20 * 1024 * 1024, max_tokens: int = 120, timeout: float = 30.0):
+                 max_bytes: int = 20 * 1024 * 1024, max_tokens: int = 220, timeout: float = 30.0):
         self.client = client
         self.maybe = maybe          # 伊蕾娜置信度在 maybe～门槛之间：让 deepseek-flash 再确认一次
         self.model = model
@@ -381,7 +401,7 @@ class Vision:
                 extra_body={"thinking": {"type": "disabled"}},
             )
             budget.track(resp, "vision")                 # 算到正在回的这个人 / 这个群头上
-            desc = (resp.choices[0].message.content or "").strip().replace("\n", " ")[:70]
+            desc = _clip_desc((resp.choices[0].message.content or "").strip().replace("\n", " "))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"识图：调用模型失败：{e}")
             return entry.get("d") if entry else None

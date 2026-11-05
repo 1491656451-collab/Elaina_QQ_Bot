@@ -18,16 +18,51 @@ _LONG_HINTS = (
 )
 
 
+# 11/05（识图 agent《交接-图片描述变长-聊天-1105》）：图片描述放宽到 100 字以后，只发一张聊天截图也会被当成“写了一大段”。
+# 算这轮回长还是回短时，只看对方自己打的字：[图片：……]、（引用了图片：……）不算字数，也不拿来找“讲讲”“难过”这类词；
+# 发了图就不挑“几个字就好”那档（以前靠描述本身 30 字以上碰巧做到，现在写明）
+_IMG_OPEN_RE = re.compile(r"\[图片[：:]|（引用了图片：")
+_HAS_IMG_RE = re.compile(r"\[图片[\]：:]|（引用了图片：")
+_PAIRS = {"[": "]", "（": "）"}
+
+
+def own_text(text: str) -> str:
+    """对方自己打的字：去掉图片描述。
+    按括号配对找描述的结尾（11/05 识图 agent 提的）：描述里自己带括号（“（画的不是你）”“（一只黑、一只粉）”）时，
+    不能遇到第一个“）”“]”就停，不然引用两张图时第二张的描述会整段留下来，被当成对方写了一大段。没配上的就去到最后"""
+    text = text or ""
+    out, i = [], 0
+    while True:
+        m = _IMG_OPEN_RE.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        opener = text[m.start()]
+        closer = _PAIRS[opener]
+        depth, j = 1, m.end()
+        while j < len(text) and depth:
+            if text[j] == opener:
+                depth += 1
+            elif text[j] == closer:
+                depth -= 1
+            j += 1
+        i = j
+    return "".join(out).strip()
+
+
 def reply_mode(text: str) -> str:
     """long：讲故事/讲经历/解释/倾诉，或者对方自己写了一大段；其余都是日常闲聊 short"""
-    if len(text) >= 60 or any(k in text for k in _LONG_HINTS):
+    own = own_text(text)
+    if len(own) >= 60 or any(k in own for k in _LONG_HINTS):
         return "long"
     return "short"
 
 
 def short_hint(user_text: str = "") -> str:
-    """随机挑这轮回复的长短；对方认真写了一大段（30 字以上）时，不挑“几个字就好”那档，免得显得敷衍"""
-    variants = SHORT_VARIANTS[1:] if len(user_text) >= 30 else SHORT_VARIANTS
+    """随机挑这轮回复的长短；对方认真写了一大段（30 字以上）或者发了图时，不挑“几个字就好”那档，免得显得敷衍"""
+    serious = len(own_text(user_text)) >= 30 or bool(_HAS_IMG_RE.search(user_text or ""))
+    variants = SHORT_VARIANTS[1:] if serious else SHORT_VARIANTS
     total = sum(w for w, _ in variants)
     r, acc = random.random() * total, 0.0
     for w, h in variants:
@@ -48,6 +83,7 @@ _STORY_HINTS = ("讲讲", "讲个", "讲一下", "说说", "聊聊", "故事", "
 def length_hint_for(mode: str, text: str, fam: str) -> str:
     if mode == "short":
         return short_hint(text)
+    text = own_text(text)                     # 11/05：倾诉、要听故事只看对方自己打的字，不看图片描述
     if (mode == "long" and fam in ("stranger", "disliked") and any(k in text for k in _VENT_HINTS)
             and not any(k in text for k in _STORY_HINTS)):
         return LENGTH_HINT["vent_disliked" if fam == "disliked" else "vent_stranger"]   # 10/22：讨厌的人单给一句
