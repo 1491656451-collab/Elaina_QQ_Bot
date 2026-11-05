@@ -290,6 +290,10 @@ class Config(BaseModel):
     # 对方像是另一个机器人（10/23，聊天 agent；《问题排查记录-对方停了还在发-1023》）：她每发一轮，对方都在几秒内引用她的话回。
     # “一轮”= 她发完以后对方的第一条。最近 BOTLIKE_ROUNDS 轮里有 BOTLIKE_SLOW 轮是“几秒内引用回”，就放慢（每次回之前多等一会儿）；
     # BOTLIKE_WINDOW_MINUTES 分钟内这样的轮数到 BOTLIKE_MUTE 轮，就 BOTLIKE_MUTE_MINUTES 分钟不回这个人（对方的话照常记进聊天记录）
+    flood_rounds: int = 8                 # 群里同一个人 flood_minutes 分钟里找她超过这么多轮，后面的按关系概率不理（11/05；0 = 不管）
+    flood_minutes: float = 20.0           # 按 9/29～11/05 的日志算：20 分钟超 8 轮的只有 10/28 那一位（74 次里有 41 次超），别人一次都没有
+    flood_ignore_prob: dict[str, float] = {"disliked": 0.8, "stranger": 0.6, "friend": 0.5, "acquaintance": 0.35, "close": 0.2}
+    wake_catchup_group_hours: float = 2.0  # 睡醒补看时，群里只看这么多小时以内的（11/05：早上 7 点回了凌晨 2 点的群消息）；私聊照 wake_catchup_max_hours
     botlike_enabled: bool = True
     botlike_seconds: float = 8.0          # 她发完以后多少秒以内就引用回，算“几秒内”
     botlike_rounds: int = 8

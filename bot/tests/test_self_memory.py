@@ -96,10 +96,10 @@ def test_dedupe_and_topic_cap(tmp_path):
 def test_related_and_her_topics(tmp_path):
     """按这句话挑相关的；面包这类对方没提就合起来最多 1 条；不和今天的重复"""
     sm = _sm(tmp_path)
-    _put(sm, "在集市上被一只会学人说话的猫跟了半条街", _at(9, 3))
-    _put(sm, "面包店老板多送了一个面包", _at(9, 2))
-    _put(sm, "买到刚出炉的可颂", _at(8))
-    _put(sm, "在河边帮人找回了丢的渔网", _at(9))
+    _put(sm, "在集市上被一只会学人说话的猫跟了半条街", _at(9, 3), source="聊天")   # 聊天里被问起讲的：不算“最近主动讲过”
+    _put(sm, "面包店老板多送了一个面包", _at(9, 2), source="聊天")
+    _put(sm, "买到刚出炉的可颂", _at(8), source="聊天")
+    _put(sm, "在河边帮人找回了丢的渔网", _at(9), source="聊天")
     out = sm.life_for_chat("private_1", "你上次说的猫呢", now=_at(12))
     assert any("猫" in x["text"] for x in out["related"])
     texts = [x["text"] for x in out["today"] + out["related"]]
@@ -147,7 +147,8 @@ async def test_said_same_and_new(tmp_path):
     pro = sm.life_for_proactive("group_5", now=time.time())
     assert pro["fresh"] == [] and len(pro["told_here"]) == 2, "这个群都听过了"
     other = sm.life_for_proactive("group_6", now=time.time())
-    assert len(other["fresh"]) == 2 and other["told_here"] == []
+    assert other["fresh"] == [] and other["told_here"] == [], "11/05：刚在 group_5 冒泡讲过，别的群也先别讲"
+    assert [x["text"] for x in other["told_elsewhere"]] == ["在林子里迷路绕了半天", "在溪边钓到一条小鱼"]
 
 
 @pytest.mark.asyncio
@@ -358,3 +359,87 @@ def test_summary_her_claims_and_stories_1023():
     assert "伊蕾娜对他的说法" in SUMMARIZE_PROMPT and "她自己答应过、讲过的照常写进 told" in SUMMARIZE_PROMPT and "小说里的人（美奈、沙耶、芙兰……）的事" in SUMMARIZE_PROMPT
     assert "伊蕾娜讲的故事、小说里的人（美奈、沙耶……）的事" in VERIFY_PROMPT
     assert "只是伊蕾娜这么说、对方自己没说过的" in VERIFY_PROMPT
+
+
+# ---------------------------------------------------------------- 11/05《交接-近况少提-记忆-1105》
+def _noon(days: int = 0) -> float:
+    """北京时间今天中午 + days 天（和机器时区、现在几点都无关）"""
+    from plugins.roleplay_chat.peak import BEIJING
+    return (datetime.now(BEIJING).replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=days)).timestamp()
+
+
+def _bjday(days: int = 0) -> str:
+    from plugins.roleplay_chat.peak import BEIJING
+    return datetime.fromtimestamp(_noon(days), BEIJING).date().isoformat()
+
+
+def _said(sm, key, at, source="冒泡", **got):
+    sm._apply_said({"text": got.pop("text", "随便说说"), "source": source, "key": key, "at": at}, {"_nums": {}, **got})
+    sm._save()
+
+
+def test_told_today_here_not_again(tmp_path):
+    """1. 今天已经在这个会话讲过的，每轮回消息不再带（对方正问到它的除外）；别的会话、第二天照常"""
+    sm = _sm(tmp_path)
+    hat = _put(sm, "海风把帽子吹跑了，追了半条街", _noon() - 3600, source="聊天")
+    _said(sm, "group_1", _noon() - 1800, same=[1], _nums={1: hat}, text="今天海风好大，帽子都被吹跑了")
+    assert hat["told_on"] == {"group_1": _bjday()} and "pro_on" in hat, "记下哪天在哪讲过；冒泡讲的再记一个“主动讲过”"
+    texts = lambda out: [x["text"] for x in out["today"] + out["related"]]
+    assert hat["text"] not in texts(sm.life_for_chat("group_1", "你在干嘛", now=_noon())), "今天这里讲过了"
+    assert hat["text"] in texts(sm.life_for_chat("group_2", "你在干嘛", now=_noon())), "别的群还没听过"
+    assert hat["text"] in texts(sm.life_for_chat("group_1", "帽子追回来了吗", now=_noon())), "对方正问到它：要带"
+    assert hat["text"] in texts(sm.life_for_chat("group_1", "帽子追回来了吗", now=_noon(1))), "第二天：照常"
+    # 11/05 以前的数据没有 told_on：记下它的那个会话按记下那天算
+    old = _put(sm, "在码头看人卸了一下午的货", _noon() - 600, source="聊天", told_in=["private_7"])
+    old.pop("told_on", None)
+    assert old["text"] not in texts(sm.life_for_chat("private_7", "你在干嘛", now=_noon()))
+    assert old["text"] in texts(sm.life_for_chat("private_8", "你在干嘛", now=_noon()))
+
+
+def test_proactive_not_same_thing_everywhere(tmp_path):
+    """2. 主动说话：最近 3 天在任何地方主动讲过的（和意思差不多的）不算“还没讲过的”，另给“这几天在别处讲过的”"""
+    sm = _sm(tmp_path)
+    hat = _put(sm, "海风把帽子吹跑了，追了半条街", _noon(-1), source="冒泡", told_in=["group_1"])
+    same_kind = _put(sm, "帽子又被海风吹跑，挂到了船桅上", _noon(-1) + 60, source="聊天")
+    cat = _put(sm, "在集市上被一只会学人说话的猫跟了半条街", _noon(-1) + 120, source="聊天")
+    pro = sm.life_for_proactive("group_2", n=5, now=_noon())
+    assert [x["text"] for x in pro["fresh"]] == [cat["text"], same_kind["text"]], "帽子那件昨天在 group_1 冒泡讲过（同一类的交给提示）"
+    assert [x["text"] for x in pro["told_elsewhere"]] == [hat["text"]] and pro["told_here"] == []
+    assert sm.life_for_proactive("group_1", now=_noon())["told_elsewhere"] == [], "在这里讲的，算 told_here 不算别处"
+    later = sm.life_for_proactive("group_2", n=5, now=_noon(2))
+    assert hat["text"] in [x["text"] for x in later["fresh"]] and later["told_elsewhere"] == [], "过了 3 天：可以再讲"
+    # 被问起才讲的（聊天）不算“主动讲过”；刚冒泡、还没整理完的原话也算别处讲过
+    sm._load()["said"].append({"text": "集市上那只学人说话的猫今天又跟着我", "source": "冒泡", "key": "group_3", "at": _noon()})
+    pro = sm.life_for_proactive("group_2", n=5, now=_noon())
+    assert pro["told_elsewhere"][-1]["when"] == "刚才" and pro["told_elsewhere"][-1]["text"].startswith("集市上那只")
+
+
+def test_plans_due_and_done(tmp_path):
+    """3. 她说过哪天动身：单独记；到日子、过了日子还没动给出来；换了地方、过期就去掉"""
+    from plugins.roleplay_chat.memory import SUMMARIZE_PROMPT
+    from plugins.roleplay_chat.self_memory import SAID_PROMPT
+    assert '"plans"' in SAID_PROMPT and '"plans"' in SUMMARIZE_PROMPT
+    sm = _sm(tmp_path)
+    sm._move_to("海边的小镇", "城镇")
+    _said(sm, "group_1", _noon(), plans=[{"text": "没说哪天", "when": "以后"}])
+    assert sm._load()["plans"] == [], "没说哪天的不记"
+    _said(sm, "group_1", _noon(), text="待了两天，差不多该走了", plans=[{"text": "动身离开", "when": "过两天"}])
+    assert sm._load()["plans"] == [], "11/05 回放：原话里没有“过两天”，是模型编的日子，不记"
+    _said(sm, "group_1", _noon(), text="后天就动身，换个海岸看看", plans=[{"text": "动身去别的海岸", "when": "后天", "to": ""}])
+    assert sm._load()["items"] == [], "打算不当成经历"
+    st = lambda now: [(p["status"], p["due"], p["said"]) for p in sm.life_for_chat("group_2", "嗯", now=now)["plans"]]
+    assert st(_noon()) == [("还没到日子", "后天", "今天")]
+    assert st(_noon(1)) == [("还没到日子", "明天", "昨天")]
+    assert st(_noon(2)) == [("到日子了", "今天", "2 天前")]
+    assert st(_noon(4)) == [("过了日子还没动", "2 天前", "4 天前")]
+    assert st(_noon(5)) == [], "过了日子 3 天：不提了"
+    assert sm.life_for_proactive("group_3", now=_noon(2))["plans"][0]["text"] == "动身去别的海岸"
+    assert "打算：" in sm.describe()
+    # 新说的顶掉旧的；她说到了新地方：打算算兑现，去掉
+    _said(sm, "group_1", _noon(), text="明天往北边的山走", plans=[{"text": "往北走", "when": "明天", "to": "北边的山"}])
+    assert [(p["text"], p["to"]) for p in sm._load()["plans"]] == [("往北走", "北边的山")]
+    _said(sm, "group_1", _noon(1), text="到了北边的山脚下", place={"name": "北边的山脚", "kind": "野外", "moved": True})
+    assert sm.get_place()["name"] == "北边的山脚" and sm._load()["plans"] == []
+    # 整理聊天时给的也收
+    sm.apply_from_chat("private_5", {"plans": [{"text": "去下一个国家", "when": "过两天"}]}, {}, "过两天我就去下一个国家", at=_noon())
+    assert sm._load()["plans"][0]["due"] == _bjday(2) and sm._load()["plans"][0]["key"] == "private_5"

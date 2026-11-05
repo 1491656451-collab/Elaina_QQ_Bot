@@ -85,6 +85,7 @@ def _relax(text: str, hits: dict) -> str:
 VARIANTS = {"A": "现在的样子", "B": "加“说人话”", "C": "放松“换着说”和挖苦", "D": "温度 1.0", "E": "B + C", "F": "B + 温度 1.0",
             "L": "长短固定为“可以多说两句”（现在那档）", "M": "长短固定为新写法“多说一两句，说完就停”", "H": "长短固定为“一句话”",
             "P": "主模型换成 pro", "O": "改前（备份的人设、聊天规则、关系提示）",
+            "Q": "11/05 以前：【你的近况】每轮都整段带、聊天规则里没有“玩笑别当真”（11/05 第一批改动之前）",
             "S": "长短固定为最短那档“几个字就好”（现在的说法）", "T": "长短固定为最短那档，改过的说法（去掉“蛤？”，加“先想想他指的是哪件事”）"}
 
 # 10/18 第三轮：怪的常是第二条（“半个月。/ 算了，你说的戏码我就当看戏”），怀疑是“可以多说两句”这档让她硬凑一句
@@ -122,6 +123,12 @@ def apply_variant(p, v: str, base: dict) -> dict:
     p.cfg.deepseek_model = PRO_MODEL if v == "P" else base["model"]
     p.SHORT_VARIANTS[:] = base["short"]
     hits: dict = {}
+    if "life_focus" in base:                     # 11/05：Q 用改之前的做法（近况每轮整段带、没有“玩笑别当真”）
+        p.reply.life_focus = base["life_focus"] if v != "Q" else (lambda d, text, recent="": d)
+    if v == "Q":
+        lines = pr.CHAT_RULES.split("\n")
+        pr.CHAT_RULES = "\n".join(x for x in lines if "别当真" not in x)
+        hits["改前"] = f"去掉 {len(lines) - len(pr.CHAT_RULES.splitlines())} 条规则；近况不筛"
     if v in ("L", "M", "H", "S", "T"):           # 只管日常闲聊那几档长短（讲故事、倾诉等不变）
         pick = {"L": base["short"][2][1], "M": LEN_MORE_NEW, "H": base["short"][1][1],
                 "S": base["short"][0][1], "T": SHORT_MIN_NEW}[v]
@@ -323,6 +330,10 @@ async def test_phrasing(app: App, monkeypatch):
     pr = getattr(p, "prompts", p)
     base = {"persona": pr._persona, "rules": pr.CHAT_RULES, "fam": dict(p.FAMILIARITY_HINT), "temp": p.cfg.llm_temperature,
             "short": list(p.SHORT_VARIANTS), "model": p.cfg.deepseek_model}
+    if hasattr(getattr(p, "reply", None), "life_focus"):
+        base["life_focus"] = p.reply.life_focus
+    if hasattr(p.cfg, "flood_rounds"):
+        monkeypatch.setattr(p.cfg, "flood_rounds", 0)    # 11/05：回放里前面几轮也会算进“一直找她”，这里不管（单独算过）
     assert "多说两句" in base["short"][2][1] and "一句话" in base["short"][1][1] and "几个字" in base["short"][0][1], "SHORT_VARIANTS 的顺序变了，L/H/S 要跟着改"
     real_time_mod, real_dt, real_fam = p.time, p.datetime, p.familiarity_of
     cases, samples, variants = _cases()
@@ -333,6 +344,8 @@ async def test_phrasing(app: App, monkeypatch):
                 events_cache[(case["log"], case["group"])] = rc.read_log(case["log"], int(case["group"]))
             if case["kind"] == "private" and (case["log"], case["user"]) not in private_cache:
                 private_cache[(case["log"], case["user"])] = read_private(case["log"], int(case["user"]))
+            if case.get("life") is not None:          # 11/05：这道题当时的【你的近况】（回放环境里没有她的近况记录）
+                monkeypatch.setattr(p.core.self_mem, "life_for_chat", lambda *a, _d=case["life"], **k: _d)
             fam_map = case.get("fam")
             if isinstance(fam_map, dict):
                 rc.set_plugin_attr(p, "familiarity_of", lambda q, m=fam_map: m.get(str(q), "stranger"))
@@ -382,7 +395,7 @@ async def test_phrasing(app: App, monkeypatch):
     (OUT_DIR / f"措辞对比_{stamp}.json").write_text(json.dumps({"meta": meta, "results": results}, ensure_ascii=False, indent=1), encoding="utf-8")
     # 盲评：每题的回复打乱，只标编号
     rnd = random.Random(stamp)
-    if "P" in variants or "O" in variants or "S" in variants:    # 比模型 / 比改前改后（10/22）：和回归测试的盲评稿用同一套打分
+    if "P" in variants or "O" in variants or "S" in variants or "Q" in variants:    # 比模型 / 比改前改后（10/22）：和回归测试的盲评稿用同一套打分
         key, md = {}, [f"# 措辞对比 {stamp}：盲评稿", "",
                        "每题先看上下文，再看下面打乱顺序的回复，给每条打两个分（0、1、2），写进打分表：",
                        "- **顺**：2 = 像真人随口说的、一读就懂、接得上对方的话；1 = 能懂但有点别扭；0 = 读不通、硬凹、答非所问",

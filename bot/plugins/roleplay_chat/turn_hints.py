@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 
 from . import peak
 from .core import cfg
-from .prompts import LENGTH_HINT, LIFE_CHAT_HEAD, LIFE_PROACTIVE_HEAD, SHORT_VARIANTS
+from .memory import _grams, _related
+from .prompts import LENGTH_HINT, LIFE_CHAT_HEAD, LIFE_ELSEWHERE_HEAD, LIFE_PLAN_TEXT, LIFE_PROACTIVE_HEAD, SHORT_VARIANTS
 
 
 _LONG_HINTS = (
@@ -180,9 +181,40 @@ def _life_place(place: dict | None) -> str:
     return f"你说过自己现在在{where}{stay}。"
 
 
+def _life_plans(plans, statuses: tuple[str, ...]) -> str:
+    """她说过哪天动身（self_mem 的 plans，11/05）：只写 statuses 里的那几种状态"""
+    out = []
+    for p in plans or []:
+        tmpl = LIFE_PLAN_TEXT.get(p.get("status") or "")
+        if not tmpl or p.get("status") not in statuses or not p.get("text"):
+            continue
+        to = f"（去{p['to']}）" if p.get("to") else ""
+        said = str(p.get("said") or "前几天")
+        said = f" {said}" if said[:1].isdigit() else said          # “你 2 天前说过”
+        out.append(tmpl.format(said=said, text=p["text"], to=to, due=p.get("due") or ""))
+    return "".join(out)
+
+
 def _life_item(it: dict) -> str:
     mood = f"（当时觉得{it['mood']}）" if it.get("mood") else ""
     return f"{it.get('when') or '最近'}：{it.get('text', '')}{mood}"
+
+
+# 11/05（《人机感检查-周到型-1105》F）：【你的近况】以前每轮都带，她什么话题都要报一下自己在海边、旅馆的账。
+# 现在：对方问到她（在哪、在干嘛、最近怎样、旅行……）才整段带；别的时候只带和这几句话对得上的那一两件，在哪也不带
+_ASK_LIFE_RE = re.compile(r"在哪|哪儿|哪里|在干|干嘛|干啥|干什么|做什么|在做|忙什么|在忙|忙不忙|最近|今天|这几天|这两天|昨天|"
+                          r"旅行|旅途|旅馆|住哪|住在|去哪|上路|动身|出发|启程|还在|过得|怎么样|吃了|吃什么|天气|下雨|冷不冷|热不热")
+LIFE_MATCH_GRAMS = 2      # 不是在问她的时候：近况里的一件事和这几句话至少有几个两字词对得上才带
+
+
+def life_focus(d: dict | None, text: str, recent: str = "") -> dict | None:
+    """挑这一轮要带的近况：对方在问她 → 原样；没问 → 只留和这几句话（含她上一句）对得上的事，不带在哪"""
+    if not d or _ASK_LIFE_RE.search(text or ""):
+        return d
+    q = _grams(f"{text} {recent}")
+    keep = [it for it in list(d.get("today") or []) + list(d.get("related") or [])
+            if _related(q, it.get("text", "")) >= LIFE_MATCH_GRAMS]
+    return {"place": None, "today": [], "related": keep} if keep else None   # 打算（plans）也不带：没问到她就别提要走的事
 
 
 def life_hint(d: dict | None) -> str:
@@ -193,6 +225,7 @@ def life_hint(d: dict | None) -> str:
     items = list(d.get("today") or []) + list(d.get("related") or [])
     if items:
         parts.append("你说过的：" + "；".join(_life_item(it) for it in items) + "。")
+    parts.append(_life_plans(d.get("plans"), ("还没到日子", "到日子了", "过了日子还没动")))   # 问到她时才走到这里
     body = "".join(p for p in parts if p)
     return f"{LIFE_CHAT_HEAD}\n{body}" if body else ""
 
@@ -201,10 +234,13 @@ def life_hint_proactive(d: dict | None) -> str:
     """冒泡、写信、搭话带的【你的近况】：self_mem.life_for_proactive 的结果"""
     if not d:
         return ""
-    parts = [_life_place(d.get("place"))]
+    parts = [_life_place(d.get("place")),
+             _life_plans(d.get("plans"), ("到日子了", "过了日子还没动"))]   # 还没到日子的不带，免得天天念叨要走
     if d.get("fresh"):
         parts.append("最近说过的：" + "；".join(_life_item(it) for it in d["fresh"]) + "。")
     if d.get("told_here"):
         parts.append("这里已经听你讲过（这次说点别的，别换个说法再讲同一件事）：" + "；".join(f"{it.get('text', '')}（{it.get('when') or '最近'}）" for it in d["told_here"]) + "。")
+    if d.get("told_elsewhere"):
+        parts.append(LIFE_ELSEWHERE_HEAD + "；".join(f"{it.get('text', '')}（{it.get('when') or '最近'}）" for it in d["told_elsewhere"]) + "。")
     body = "\n".join(p for p in parts if p)
     return f"{LIFE_PROACTIVE_HEAD}\n{body}" if body else ""

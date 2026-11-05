@@ -12,6 +12,8 @@
 3. 正常聊天（10/23 C）：server_logs 最新一次的 history 里每个私聊、群聊最近的聊天，配真实档案，照线上的整理（带核对）跑一遍，
    看她讲的经历、说自己在哪收得对不对（要人看）；再加几段编的聊天（被问起讲小说往事、说现在在哪、讲今天的事、玩笑、别人的事），程序判。
    这一部分每遍二三十次整理，整套 3 遍大约五毛钱。不想跑设 SELF_CHAT=0。
+4. 近况少提（11/05，《交接-近况少提-记忆-1105》）：编一条时间线（同一个群一天讲两遍、两个群冒泡讲同一件、“后天动身”到了日子、
+   过期、到了新地方），整理照真的调模型，程序在每一步后面判对错。每遍 4 次调用。
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import re
 import shutil
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -95,7 +97,24 @@ SYNTH = [
      lambda sm, before: (any("扫帚" in t or "鸡毛掸子" in t for t in _texts(sm)), "该收")),
     ("写信讲了经历", ("山谷里的小镇", "城镇"), [], "致 测试：\n这两天在山谷里的小镇落脚，昨晚去看了会发光的湖。\n——伊蕾娜",
      lambda sm, before: (any("湖" in t for t in _texts(sm)), "该收“看了会发光的湖”")),
+    ("说了哪天动身（11/05）", ("海边的小镇", "城镇"), [], "这边的海看了好几天，有点腻了，后天就动身，换个海岸看看。",
+     lambda sm, before: (len(sm._load()["plans"]) == 1 and _plan_in(sm, 2) and not _texts(sm), "该记一条“后天动身”的打算，不当成经历")),
+    ("没说哪天的打算（11/05）", ("海边的小镇", "城镇"), [], "以后有机会，想去北边的雪国看看，听说那边的面包会冻成石头。",
+     lambda sm, before: (not sm._load()["plans"], "没说哪天，不该记打算")),
+    ("一路上的赶路不算动身（11/05 回放）", ("往东的山路", "野外"), [], "这个点了还没睡，明天怕是要顶着黑眼圈赶路。",
+     lambda sm, before: (not sm._load()["plans"], "本来就在路上，“明天赶路”不算换地方的打算")),
+    ("待了两天不是过两天（11/05 回放）", ("海边的小镇", "城镇"), [], "待了两天，差不多该走了",
+     lambda sm, before: (not sm._load()["plans"], "没说哪天走，不该记成“过两天动身”")),
 ]
+
+
+def _plan_in(sm, days: int) -> bool:
+    """打算的日子是不是“说的那天 + days 天”（按北京时间）"""
+    p = (sm._load().get("plans") or [{}])[0]
+    try:
+        return (datetime.fromisoformat(p["due"]).date() - datetime.fromisoformat(p["said"]).date()).days == days
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 # 编的聊天：(名字, 先有的地方, [(对方说, 她说), ...], 判对错)
@@ -116,6 +135,9 @@ CHAT_SYNTH = [
     ("别人的事", ("某小镇", "城镇"),
      [("我朋友最近失恋了，天天哭", "是喔……那你多陪陪他吧。"), ("嗯", "失恋这种事，过一阵就好了。")],
      lambda sm: (not _texts(sm), "不该收")),
+    ("聊天里说了明天走（11/05）", ("海边的小镇", "城镇"),
+     [("你还在海边吗", "在呢，不过明天就动身往北走了，这边的风吹得我头疼。"), ("这么快", "待够了嘛。")],
+     lambda sm: (len(sm._load()["plans"]) == 1 and _plan_in(sm, 1), "该记一条“明天动身”的打算")),
 ]
 
 
@@ -162,7 +184,7 @@ async def chat_round(client, model: str, logs: Path, rnd: int) -> dict:
                 print(f"  {h.stem} 出错：{e!r}")
             got = _summary_self(client.rows[n0:])
             kept = [i["text"] for i in sm._items() if i["id"] not in before]
-            real.append({"key": h.stem, "her": " / ".join(her)[:300], "got": {k: got.get(k) for k in ("same", "new", "place")},
+            real.append({"key": h.stem, "her": " / ".join(her)[:300], "got": {k: got.get(k) for k in ("same", "new", "place", "plans")},
                          "kept": kept, "place_after": sm.get_place().get("name", "")})
         for name, place, talk, chk in CHAT_SYNTH:
             sm2 = S.SelfMemory(work / f"c_{len(synth)}.json", client, model)
@@ -179,7 +201,7 @@ async def chat_round(client, model: str, logs: Path, rnd: int) -> dict:
             await ltm.summarize(key, force=True)
             got = _summary_self(client.rows[n0:])
             ok, why = chk(sm2)
-            synth.append({"name": name, "ok": ok, "why": "" if ok else why, "got": {k: got.get(k) for k in ("same", "new", "place")},
+            synth.append({"name": name, "ok": ok, "why": "" if ok else why, "got": {k: got.get(k) for k in ("same", "new", "place", "plans")},
                           "place": sm2.get_place().get("name", ""), "items": _texts(sm2)})
         print(f"第 {rnd} 遍（正常聊天）：真实 {len(real)} 段，编的 {sum(x['ok'] for x in synth)}/{len(synth)} 对")
         return {"real": real, "synth": synth, "final": {"place": sm.get_place(), "items": sm._items()}}
@@ -199,7 +221,7 @@ async def one_round(client, model: str, said: list[dict], rnd: int) -> dict:
             await sm.digest_said()
             got = R._last_json(client.rows[n0:]) if len(client.rows) > n0 else {}
             real.append({"at": s["at"], "source": s["source"], "text": s["text"],
-                         "got": {k: got.get(k) for k in ("same", "new", "place")},
+                         "got": {k: got.get(k) for k in ("same", "new", "place", "plans")},
                          "place_after": sm.get_place().get("name", ""), "items": len(sm._items())})
         final = {"place": sm.get_place(), "trail": sm._load()["trail"], "items": sm._items()}
         import time as _t
@@ -217,10 +239,106 @@ async def one_round(client, model: str, said: list[dict], rnd: int) -> dict:
             await sm2.digest_said()
             got = R._last_json(client.rows[n0:]) if len(client.rows) > n0 else {}
             ok, why = chk(sm2, None)
-            synth.append({"name": name, "ok": ok, "why": "" if ok else why, "got": {k: got.get(k) for k in ("same", "new", "place")},
+            synth.append({"name": name, "ok": ok, "why": "" if ok else why, "got": {k: got.get(k) for k in ("same", "new", "place", "plans")},
                           "place": sm2.get_place().get("name", ""), "items": _texts(sm2)})
         print(f"第 {rnd} 遍：线上 {len(real)} 段，编的 {sum(x['ok'] for x in synth)}/{len(synth)} 对")
         return {"real": real, "final": final, "synth": synth}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+# 近况少提（11/05）：一条编的时间线。每步：(第几天, 几点, 会话, 原话)，后面跟几项检查 (名字, 第几天, 几点, 判对错)
+HAT = ("帽子",)
+TIMELINE = [
+    ((0, 10, "group_1", "早上海风大得离谱，帽子直接被吹跑了，追了半条街才抓回来。"), [
+        ("记下帽子那件，记上“今天在群1讲过”", 0, 10.1,
+         lambda sm, now: (len(_hats(sm)) == 1 and sm._told_day(_hats(sm)[0], "group_1") == _bjday(now), "")),
+        ("群1今天再回消息：近况里不再带帽子", 0, 10.5,
+         lambda sm, now: (not _has_hat(sm.life_for_chat("group_1", "你在干嘛呢", now=now)), "")),
+        ("群1有人问到帽子：照样带", 0, 10.5,
+         lambda sm, now: (_has_hat(sm.life_for_chat("group_1", "帽子追回来了吗", now=now)), "")),
+        ("群2回消息：照常带（那里没听过）", 0, 10.5,
+         lambda sm, now: (_has_hat(sm.life_for_chat("group_2", "你在干嘛呢", now=now)), "")),
+        ("群2冒泡：帽子不算“还没讲过的”，放进“这几天在别处讲过的”", 0, 14,
+         lambda sm, now: ((lambda d: not _has_hat({"today": d["fresh"]}) and _has_hat({"today": d["told_elsewhere"]}))(
+             sm.life_for_proactive("group_2", now=now)), "")),
+    ]),
+    ((0, 15, "group_2", "海边的风真是一点都不讲理，帽子都被吹跑过一回了。"), [
+        ("群2又讲了帽子：认成同一件，不另记一条", 0, 15.1,
+         lambda sm, now: (len(_hats(sm)) == 1 and "group_2" in (_hats(sm)[0].get("told_in") or []), "")),
+        ("第二天群1回消息：可以再带", 1, 10,
+         lambda sm, now: (_has_hat(sm.life_for_chat("group_1", "帽子追回来了吗", now=now)), "")),
+        ("过了 3 天：群3冒泡可以再讲帽子", 3, 10,
+         lambda sm, now: (_has_hat({"today": sm.life_for_proactive("group_3", n=5, now=now)["fresh"]}), "")),
+    ]),
+    ((0, 20, "group_1", "这边的海看了好几天，有点腻了，后天就动身，换个海岸看看。"), [
+        ("记一条“后天动身”，不当成经历", 0, 20.1,
+         lambda sm, now: (len(sm._load()["plans"]) == 1 and _plan_in(sm, 2) and not any("动身" in t for t in _texts(sm)), "")),
+        ("第二天：还没到日子（明天）", 1, 12,
+         lambda sm, now: (_plan_st(sm, now) == ("还没到日子", "明天"), "")),
+        ("到了那天：到日子了", 2, 12,
+         lambda sm, now: (_plan_st(sm, now) == ("到日子了", "今天"), "")),
+        ("过了两天还没动：过了日子还没动", 4, 12,
+         lambda sm, now: (_plan_st(sm, now) == ("过了日子还没动", "2 天前"), "")),
+        ("过了三天：不提了", 5, 12,
+         lambda sm, now: (_plan_st(sm, now) is None, "")),
+    ]),
+    ((2, 18, "group_1", "终于到了新的海岸，这边的沙子是白色的，踩上去软软的。"), [
+        ("到了新地方：打算去掉、地方换了", 2, 18.1,
+         lambda sm, now: (not sm._load()["plans"] and sm.get_place().get("name") != "海边的小镇", "")),
+    ]),
+]
+
+
+def _bjday(ts: float) -> str:
+    return datetime.fromtimestamp(ts, S.BEIJING).date().isoformat()
+
+
+def _hats(sm) -> list[dict]:
+    return [i for i in sm._items() if any(w in i.get("text", "") for w in HAT)]
+
+
+def _has_hat(d: dict) -> bool:
+    return any(any(w in x.get("text", "") for w in HAT) for x in list(d.get("today") or []) + list(d.get("related") or []))
+
+
+def _plan_st(sm, now):
+    p = sm._plans_out(now)
+    return (p[0]["status"], p[0]["due"]) if p else None
+
+
+async def timeline_round(client, model: str, rnd: int) -> dict:
+    """近况少提：按时间线一步步交原话（调模型整理），每步后面程序判"""
+    day0 = datetime.now(S.BEIJING).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+    ts = lambda d, h: (day0 + timedelta(days=d, hours=h)).timestamp()
+    work = Path(tempfile.mkdtemp(prefix="selfless_"))
+    checks, steps = [], []
+    try:
+        sm = S.SelfMemory(work / "self.json", client, model)
+        S._now = (lambda: ts(0, 9))
+        sm._move_to("海边的小镇", "城镇")
+        sm._save()
+        # 先把每一步的原话都交进去（按时间），记下每步之后的状态快照，再在快照上做检查
+        for (d, h, key, text), tests in TIMELINE:
+            S._now = (lambda t=ts(d, h): t)
+            sm._load()["said"].append({"text": text, "source": "冒泡", "key": key, "at": ts(d, h)})
+            n0 = len(client.rows)
+            await sm.digest_said()
+            got = R._last_json(client.rows[n0:]) if len(client.rows) > n0 else {}
+            steps.append({"day": d, "hour": h, "key": key, "text": text,
+                          "got": {k: got.get(k) for k in ("same", "new", "place", "plans")}})
+            snap = json.loads(json.dumps(sm._load(), ensure_ascii=False))
+            for name, cd, ch, chk in tests:
+                sm2 = S.SelfMemory(work / "snap.json", client, model)
+                sm2._data = json.loads(json.dumps(snap, ensure_ascii=False))
+                S._now = (lambda t=ts(cd, ch): t)
+                try:
+                    ok, why = chk(sm2, ts(cd, ch))
+                except Exception as e:  # noqa: BLE001
+                    ok, why = False, f"出错：{e!r}"
+                checks.append({"name": name, "ok": bool(ok), "why": why})
+        print(f"第 {rnd} 遍（近况少提）：{sum(c['ok'] for c in checks)}/{len(checks)} 对")
+        return {"checks": checks, "steps": steps, "final": {"place": sm.get_place(), "items": sm._items(), "plans": sm._load()["plans"]}}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -235,10 +353,14 @@ def _fmt_got(g: dict) -> str:
     p = g.get("place")
     if isinstance(p, dict) and p.get("name"):
         parts.append(f"地方：{p.get('name')}（{p.get('kind') or '?'}，{'换了' if p.get('moved') else '没换'}）")
+    for x in g.get("plans") or []:
+        if isinstance(x, dict):
+            parts.append(f"打算：{x.get('when')}{x.get('text')}" + (f"（去{x['to']}）" if x.get("to") else ""))
     return ("；".join(parts) or "（什么都没收）").replace("\n", " / ").replace("|", "｜")
 
 
-def write(rounds: list[dict], said: list[dict], model: str, cost: float, chats: list[dict] | None = None) -> Path:
+def write(rounds: list[dict], said: list[dict], model: str, cost: float, chats: list[dict] | None = None,
+          lines: list[dict] | None = None) -> Path:
     stamp = datetime.now().strftime("%m%d_%H%M")
     R.OUT.mkdir(parents=True, exist_ok=True)
     (R.OUT / f"近况回放_{stamp}.json").write_text(json.dumps(rounds, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -301,6 +423,17 @@ def write(rounds: list[dict], said: list[dict], model: str, cost: float, chats: 
                 cells.append(f"{_fmt_got(y.get('got') or {})} → {kept}｜在：{y.get('place_after') or '（还没有）'}".replace("|", "｜"))
             her = x["her"].replace("\n", " / ").replace("|", "｜")
             L.append(f"| {k + 1}{'（群）' if x['key'].startswith('group_') else ''} | {her[:120]} | " + " | ".join(cells) + " |")
+    if lines:
+        L += ["", "## 7. 近况少提（11/05，程序判）", "",
+              "一条编的时间线：群1冒泡讲帽子 → 群2冒泡又讲帽子 → 群1说“后天动身” → 第 2 天说到了新的海岸。每步后面的几项检查：", "",
+              "| 检查 | " + " | ".join(f"第 {i + 1} 遍" for i in range(len(lines))) + " |", "|---|" + "---|" * len(lines)]
+        for k, c in enumerate(lines[0]["checks"]):
+            L.append(f"| {c['name']} | " + " | ".join("对" if x["checks"][k]["ok"] else f"**错**{x['checks'][k]['why']}" for x in lines) + " |")
+        L += ["", "每步模型给的：", "", "| 第几天 几点 | 会话 | 原话 | " + " | ".join(f"第 {i + 1} 遍" for i in range(len(lines))) + " |",
+              "|---|---|---|" + "---|" * len(lines)]
+        for k, st in enumerate(lines[0]["steps"]):
+            L.append(f"| 第 {st['day']} 天 {st['hour']}:00 | {st['key']} | {st['text']} | "
+                     + " | ".join(_fmt_got(x["steps"][k]["got"]) for x in lines) + " |")
     out = R.OUT / f"近况回放_{stamp}.md"
     out.write_text("\n".join(L) + "\n", encoding="utf-8")
     return out
@@ -315,7 +448,7 @@ async def main() -> None:
     if not said:
         sys.exit("server_logs 里没找到她主动说的话（冒泡、搭话、写信）")
     times = int(os.environ.get("SELF_TIMES") or 3)
-    print(f"线上 {len(said)} 段，编的 {len(SYNTH)} 段，跑 {times} 遍……")
+    print(f"线上 {len(said)} 段，编的 {len(SYNTH)} 段，近况少提时间线 {len(TIMELINE)} 步，跑 {times} 遍……")
     rounds = [await one_round(client, model, said, i + 1) for i in range(times)]
     chats = []
     if os.environ.get("SELF_CHAT", "1") != "0":
@@ -323,7 +456,8 @@ async def main() -> None:
         if (logs / "history").exists():
             print(f"正常聊天：用 {logs.name} 的 history……")
             chats = [await chat_round(client, model, logs, i + 1) for i in range(times)]
-    out = write(rounds, said, model, sum(r["cost"] for r in client.rows), chats)
+    lines = [await timeline_round(client, model, i + 1) for i in range(times)]
+    out = write(rounds, said, model, sum(r["cost"] for r in client.rows), chats, lines)
     print(f"写好了：{out}")
 
 

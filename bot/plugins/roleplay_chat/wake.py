@@ -5,6 +5,7 @@
 - 她起床后过一会儿（像早上起来看手机），一个会话一个会话地交给回消息主流程，**照正常聊天的规则走**：
   额度、水话可能不接、她觉得没必要接话可以不回……只是她知道这些是睡着时收到的、现在才看到；
 - 醒来以后对方先来说话的，睡着时那几条并进这一轮一起看，不再单独补。
+- 11/05：群里只看 WAKE_CATCHUP_GROUP_HOURS（默认 2）小时以内的，再早的不专门回；私聊照旧。
 """
 from __future__ import annotations
 
@@ -79,7 +80,14 @@ def take(ik: tuple[str, int]) -> tuple[list[tuple[str, float]], float] | None:
     if time.time() - float(e.get("first") or 0) > cfg.wake_catchup_max_hours * 3600:
         logger.info(f"睡着时收到的话太久了，不看了：{ik[0]} user={ik[1]}")
         return None
-    return [(i["text"], float(i.get("at") or e["first"])) for i in e["items"]], float(e["first"])
+    items = [(i["text"], float(i.get("at") or e["first"])) for i in e["items"]]
+    if ik[0].startswith("group_"):
+        # 11/05：群里的话过了几个小时就不专门回了（11/04 早上 7 点多回了凌晨 2 点那条）；私聊照旧
+        items = [x for x in items if time.time() - x[1] <= cfg.wake_catchup_group_hours * 3600]
+        if not items:
+            logger.info(f"睡着时群里的话都是 {cfg.wake_catchup_group_hours:g} 小时以前的了，不专门回：{ik[0]} user={ik[1]}")
+            return None
+    return items, items[0][1]
 
 
 def pending() -> list[tuple[str, int]]:

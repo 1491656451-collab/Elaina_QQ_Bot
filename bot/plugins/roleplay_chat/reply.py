@@ -17,9 +17,9 @@ from . import budget, commands, core, peak, quota, sleep, stickers, story, voice
 from .oocheck import ooc_words
 from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
-from .prompts import FAMILIARITY_HINT, LATE_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
+from .prompts import FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
-from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
+from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
 from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
 from .textout import CHAT_STOP, clean_reply, cut_derailed, drop_ooc_sentences, is_fragment, speaker_names, split_bubbles, split_sticker
 from .quota import _active_chats, _count_sent, _crossed_mid_chat, _farewell_at, _global_window, _hour_window, _last_trigger, _refund, _wrapup, bubble_gap, in_wrapup, quota_left, rate_limited, say_farewells, say_tired, typing_delay, WRAPUP_EXTRA, WRAPUP_MINUTES
@@ -94,6 +94,19 @@ _reply_started: dict[tuple[str, int], float] = {}  # (会话, QQ) -> 她开始�
 _reply_done: dict[tuple[str, int], float] = {}     # (会话, QQ) -> 她回完这个人的时间
 # 10/23 对方像机器人：每 (会话, QQ) 记她最后一条发出的时间、这一轮对方回了没有、最近几轮是不是“几秒内引用回”、不回到什么时候
 _botlike: dict[tuple[str, int], dict] = {}
+
+
+_flood: dict[tuple[str, int], deque] = {}
+
+
+def note_flood(ik: tuple[str, int]) -> int:
+    """11/05：记一次“这个人在群里找她”（合并以后算一轮）；返回最近 FLOOD_MINUTES 分钟里一共几轮（含这次）"""
+    now = time.monotonic()
+    q = _flood.setdefault(ik, deque(maxlen=200))
+    q.append(now)
+    while q and now - q[0] > cfg.flood_minutes * 60:
+        q.popleft()
+    return len(q)
 
 
 def note_round(ik: tuple[str, int], event: MessageEvent, self_id: int) -> None:
@@ -441,6 +454,24 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
             return None
         _peak_last_real[event.user_id] = now
 
+    # 11/05（《人机感检查-周到型-1105》A）：群里同一个人短时间里一直找她（10/28 一个多小时 @ 了 59 次，她回了 140 条）：
+    # 过了次数以后按关系概率不理（不花 token）；没跳过的那几轮，提示里告诉她可以嫌烦、可以不接
+    flooded = 0
+    if is_group and catchup_age is None and cfg.flood_rounds > 0:
+        n = note_flood(ik)
+        if n > cfg.flood_rounds:
+            if random.random() < tier_value(cfg.flood_ignore_prob, core.familiarity_of(event.user_id), 0.5):
+                texts = _take_inbox(ik)
+                if texts:
+                    async with _locks[key]:
+                        history = get_history(key)
+                        joined = clip_input("\n".join(texts))
+                        history.append({"role": "user", "content": speaker_head(event) + clean_body(joined),
+                                        "uid": event.user_id, "name": sender_label(event), "ts": time.time()})
+                        save_history(key)
+                logger.info(f"{cfg.flood_minutes:g} 分钟里 {event.user_id} 已经找了她 {n} 次，这次不接了：{key}")
+                return None
+            flooded = n
     # 被讨厌的人：有一定概率直接不理（不花 token）
     if core.familiarity_of(event.user_id) == "disliked" and random.random() < cfg.dislike_ignore_prob:
         _take_inbox(ik)
@@ -493,7 +524,7 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
         await look_at_images(ik, drop_at)
     return SimpleNamespace(bot=bot, event=event, catchup_age=catchup_age, drop_at=drop_at, key=key, is_group=is_group,
                            ik=ik, token=token, target=target, busy=busy, admitted_at=admitted_at, stamp=stamp,
-                           gid_q=gid_q, uid_q=uid_q)
+                           gid_q=gid_q, uid_q=uid_q, flooded=flooded)
 
 
 async def _build_prompt(turn: SimpleNamespace) -> bool:
@@ -571,7 +602,8 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     long_memo = ltm.context_for(event.user_id, name, event.group_id if is_group else None,
                                 text=text, recent=f"{prev_user[-60:]} {prev_bot[-120:]}")   # 按这句话挑几条；群里不带私聊知道的事
     try:                                          # 10/23【你的近况】：她自己说过的经历、在哪（出错不影响回复）
-        life_memo = life_hint(core.self_mem.life_for_chat(key, text, f"{prev_user[-60:]} {prev_bot[-120:]}"))
+        recent_two = f"{prev_user[-60:]} {prev_bot[-120:]}"
+        life_memo = life_hint(life_focus(core.self_mem.life_for_chat(key, text, recent_two), text, recent_two))   # 11/05 没问到她就少带
     except Exception as e:  # noqa: BLE001
         logger.warning(f"近况：取用出错，这次不带：{e}")
         life_memo = ""
@@ -624,7 +656,8 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
             and not she_asked(history) and not gifts):
         skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
                      "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
-    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, space_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo) if x)
+    flood_memo = FLOOD_HINT.format(minutes=f"{cfg.flood_minutes:g}", n=turn.flooded) if getattr(turn, "flooded", 0) else ""
+    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, space_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo, flood_memo) if x)
     recall_msg = [{"role": "system", "content": extra}]
 
     messages = api_messages(

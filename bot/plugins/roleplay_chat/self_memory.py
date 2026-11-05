@@ -16,7 +16,7 @@ import asyncio
 import json
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from nonebot import logger
@@ -33,6 +33,13 @@ CHAT_CHARS = 100               # 每轮【你的近况】大概多少字
 SAID_RETRY_SECONDS = 600       # 主动说的话整理失败：隔多久再试
 SAID_MAX_PENDING = 20          # 没整理完的最多攒几段（再多丢最早的）
 KINDS = ("城镇", "野外", "小说地点")
+# 11/05（《交接-近况少提-记忆-1105》）：同一件事别一遍遍讲；她说过哪天动身，到日子要记得
+PRO_SOURCES = ("冒泡", "写信", "搭话")   # 她主动说的（不是被问起才讲的）
+PRO_RECENT_DAYS = 3             # 主动说话：最近这么多天在任何地方主动讲过的，不再算“还没讲过的”
+TOLD_ELSEWHERE_MAX = 3          # 主动说话：“这几天在别处讲过的”给几条
+ASKED_MIN_GRAMS = 1             # 今天这里讲过的那件，对方这句话里提到它（“帽子追回来了吗”）就照样带
+PLAN_WHEN = {"今天": 0, "今晚": 0, "明天": 1, "明早": 1, "明晚": 1, "后天": 2, "大后天": 3, "过两天": 2, "过几天": 3}
+PLAN_GRACE_DAYS = 2             # 过了日子几天还没换地方：标“过了日子还没动”；再往后就不提了
 _SHOP_RE = re.compile(r"(店|馆|堂|铺|屋|房间|集市|市场|摊)$")               # 只是一家店、一间屋子，不算“在哪”
 _PLACE_CHARS = "镇城国村林山谷湖河岛"
 _PLACE_WORD_RE = re.compile(r"到了|来到|回到|落脚|住下|镇|城|国|村|森林|林子|山|谷|湖|草原|荒野|路上|赶路")   # 原话里有这些才可能是在说在哪
@@ -42,16 +49,17 @@ SAID_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人，正�
 规则：
 1. 原话讲的就是“最近说过的经历”里的某一条（同一件事，换了说法也算），把编号写进 same，不要再写进 new。
 2. 原话里她讲成自己最近真的经历过的事（到了哪里、遇到什么、接了什么委托、看到吃到什么；很小的事也算，比如被路人问了句什么、排了半天队），而“最近说过的经历”里没有的，写进 new：每件一句，不超过 40 字，省略主语，只写发生了什么（比如“在……被……”），不写她说话的语气；mood 写她讲这件事时的心情，两三个字，看不出就空着。
-3. 这些不算，不要写：问对方的话、打招呼、只吐槽天气这类没有具体事情的话；玩笑、比喻、假设（“要是……”）；小说里以前的旅途往事（以前遇到的人、很久以前去过的地方）；别人的事；她以后打算做的事。分不清是不是真经历的，不写。
+3. 这些不算，不要写：问对方的话、打招呼、只吐槽天气这类没有具体事情的话；玩笑、比喻、假设（“要是……”）；小说里以前的旅途往事（以前遇到的人、很久以前去过的地方）；别人的事；她以后打算做的事（带日子的动身打算写进第 6 条的 plans）。分不清是不是真经历的，不写。
 4. place：只有她在这段原话里**明说了自己现在在哪**（“到了……”“在……落脚”“这几天都在……赶路”“又回到了……”）才写，写 {"name": "地名，没有名字就写“某片森林”“往东的山路”这样的说法，不超过 15 字", "kind": "城镇、野外、小说地点 三选一（小说地点是她以前在旅途里去过、这次又回去的地方），判断不出来就空着", "moved": true 或 false}。moved：她说的是到了新地方、换了地方写 true；只是提到现在待的地方、没换写 false。没说自己在哪就不写 place。这些都不算说了在哪，不要写 place：
    - 只提到一家店、一间屋子（面包店、旅店、澡堂、集市），地方要是城镇、国家、森林、山路这一级；
    - 从她做的事、天气推出来的（“找棵树歇会儿”不等于说在树林里）；
    - 以前、小说里的往事里的地方（“以前在……的时候”）；
    - 用户消息里给你的“她之前说自己在哪”：原话里没再提，就不要照抄过来。
 5. fits：new 里每件事和她现在在哪对不对得上。她这次说了换地方的，按新的地方看；没说换地方，人在野外、森林里却讲“刚在镇上的店里……”，就是对不上，写 false。说的是前几天在上一个地方的事，也算对得上。
-6. 什么都没有就输出空的。
+6. plans：她在原话里说了**哪天**要动身、离开、换地方（“明天就动身”“后天去别的海岸看看”“过两天往北走”），写 [{"text": "要做什么，不超过 20 字，例如“动身去别的海岸”", "when": "今天、今晚、明天、后天、大后天、过两天、过几天 选一个，照她的原话", "to": "要去哪，没说就空着"}]。只收要离开现在待的地方、换地方的打算（一路上本来就在赶路的“明天还得赶路”不算）；没说哪天的（“以后想去……”“有机会再去”）、别的打算（明天去集市、晚上吃什么）、玩笑、假设、小说里以前的事都不写。没有就不写 plans。
+7. 什么都没有就输出空的。
 
-格式：{"same": [3], "new": [{"text": "……", "mood": "好笑", "fits": true}], "place": {"name": "……", "kind": "城镇", "moved": true}}"""
+格式：{"same": [3], "new": [{"text": "……", "mood": "好笑", "fits": true}], "place": {"name": "……", "kind": "城镇", "moved": true}, "plans": [{"text": "……", "when": "后天", "to": ""}]}"""
 
 
 def _now() -> float:
@@ -143,6 +151,7 @@ class SelfMemory:
             d.setdefault("trail", [])
             d.setdefault("items", [])
             d.setdefault("said", [])          # 主动说的、还没整理的原话
+            d.setdefault("plans", [])         # 她说过哪天动身、换地方（11/05）
             d.setdefault("next_id", 1)
             self._data = d
         return self._data
@@ -170,6 +179,8 @@ class SelfMemory:
         d["items"] = items
         d["trail"] = [t for t in d["trail"] if isinstance(t, dict)][-TRAIL_MAX:]
         d["said"] = [s for s in d["said"] if isinstance(s, dict)][-SAID_MAX_PENDING:]
+        d["plans"] = [p for p in d.get("plans") or [] if isinstance(p, dict)
+                      and _days_between(p.get("due"), now) <= PLAN_GRACE_DAYS]       # 过了日子两天以上：不提了
 
     def _new_id(self) -> str:
         d = self._load()
@@ -222,6 +233,9 @@ class SelfMemory:
             d["trail"].append({"name": old.get("name"), "kind": old.get("kind") or "", "from": old.get("since"), "to": today})
         d["place"] = {"name": _clean_text(name, 15), "kind": kind if kind in KINDS else "", "since": today}
         logger.info(f"近况：她说现在在 {d['place']['name']}" + (f"（{d['place']['kind']}）" if d["place"]["kind"] else ""))
+        if d.get("plans"):                    # 换了地方：之前说的“哪天动身”算兑现了
+            logger.info(f"近况：换了地方，之前说的打算去掉：{'；'.join(str(p.get('text')) for p in d['plans'])}")
+            d["plans"] = []
 
     def _apply_place(self, pl, said: str = "") -> None:
         """模型认出的“她说自己在哪”：说了换地方就换；没说换、又和现在的对不上，不更新（日志记一行）。
@@ -340,6 +354,40 @@ class SelfMemory:
         d["_nums"] = nums
         return d
 
+    @staticmethod
+    def _mark_told(it: dict, key: str, s: dict) -> None:
+        """记下这件事哪天在哪个会话讲过（told_on），主动说的再记一个“最近哪天主动讲过”（pro_on）。11/05"""
+        day = _day_of(float(s.get("at") or _now()))
+        if key:
+            if key not in it.setdefault("told_in", []):
+                it["told_in"].append(key)
+            on = it.get("told_on") if isinstance(it.get("told_on"), dict) else {}
+            if str(on.get(key) or "") < day:
+                on[key] = day
+            it["told_on"] = on
+        if s.get("source") in PRO_SOURCES and str(it.get("pro_on") or "") < day:
+            it["pro_on"] = day
+
+    def _apply_plans(self, plans, s: dict) -> None:
+        """她说了哪天动身、换地方：单独记一条打算（不当成经历）。新说的顶掉旧的（人一次只能往一个地方走）"""
+        at = float(s.get("at") or _now())
+        for x in _as_list_of_dict(plans)[:1]:
+            text, when = _clean_text(x.get("text"), 20), str(x.get("when") or "").strip()
+            if not text or when not in PLAN_WHEN:
+                if text:
+                    logger.info(f"近况：打算“{text}”没说哪天（{when or '空'}），不记")
+                continue
+            said = str(s.get("text") or "")
+            if said and when not in said and not (when in ("明早", "明晚") and "明" in said):
+                # 11/05 回放：“待了两天，差不多该走了”被写成“过两天动身”。原话里得真有这个日子的说法
+                logger.info(f"近况：原话里没有“{when}”，打算“{text}”不记")
+                continue
+            due = (_bj(at).date() + timedelta(days=PLAN_WHEN[when])).isoformat()
+            plan = {"text": text, "to": _clean_text(x.get("to"), 15), "when": when, "said": _day_of(at), "due": due,
+                    "at": at, "source": str(s.get("source") or ""), "key": str(s.get("key") or "")}
+            self._load()["plans"] = [plan]
+            logger.info(f"近况：记下打算（{plan['said']} 说{when}，{due}）{text}")
+
     def _apply_said(self, s: dict, got: dict) -> None:
         nums: dict[int, dict] = got.get("_nums") or {}
         key = str(s.get("key") or "")
@@ -362,8 +410,7 @@ class SelfMemory:
                 logger.info(f"近况：原话里看不出讲的是“{it.get('text')}”，不算在 {key} 讲过")
                 continue
             if it is not None:
-                if key and key not in it.setdefault("told_in", []):
-                    it["told_in"].append(key)
+                self._mark_told(it, key, s)
                 told_texts.append(it.get("text", ""))
         for x in got.get("new") or []:
             if not isinstance(x, dict) or not str(x.get("text") or "").strip():
@@ -374,7 +421,9 @@ class SelfMemory:
             it = self._add(str(x["text"]), source=str(s.get("source") or "主动"), at=float(s.get("at") or _now()),
                            mood=str(x.get("mood") or ""), told_in=[key] if key else [])
             if it:
+                self._mark_told(it, key, s)
                 told_texts.append(it["text"])
+        self._apply_plans(got.get("plans"), s)
         if s.get("source") == "写信" and s.get("qq") and self.ltm is not None:
             self._letter_told(int(s["qq"]), told_texts)
 
@@ -409,6 +458,36 @@ class SelfMemory:
                 "said": _ago(last, now), "status": "前几天说的" if quiet > self.place_stale_days else "现在"}
 
     @staticmethod
+    def _told_day(it: dict, key: str) -> str:
+        """这件事最近哪天在这个会话讲过（11/05 以前的数据没有 told_on：记下它的那个会话，就按记下的那天算）"""
+        on = it.get("told_on") if isinstance(it.get("told_on"), dict) else {}
+        if on.get(key):
+            return str(on[key])
+        told = it.get("told_in") or []
+        return str(it.get("date") or "") if told and told[0] == key else ""
+
+    @staticmethod
+    def _pro_day(it: dict) -> str:
+        """这件事最近哪天被她主动讲过（冒泡、写信、搭话，哪个会话都算）"""
+        return str(it.get("pro_on") or (it.get("date") if it.get("source") in PRO_SOURCES else "") or "")
+
+    def _plans_out(self, now: float) -> list[dict]:
+        """她说过哪天动身。status：还没到日子 / 到日子了 / 过了日子还没动（过了 PLAN_GRACE_DAYS 天就不给了）。
+        给她看的那句话由聊天 agent 写"""
+        out = []
+        for p in self._load().get("plans") or []:
+            if not isinstance(p, dict):
+                continue
+            n = _days_between(p.get("due"), now)          # 正数：过了日子几天
+            if n > PLAN_GRACE_DAYS:
+                continue
+            due = {0: "今天", 1: "昨天", -1: "明天", -2: "后天"}.get(n) or (f"{-n} 天后" if n < 0 else f"{n} 天前")
+            status = "还没到日子" if n < 0 else ("到日子了" if n == 0 else "过了日子还没动")
+            out.append({"text": p.get("text", ""), "to": p.get("to") or "", "said": _ago(p.get("said"), now),
+                        "due": due, "status": status})
+        return out
+
+    @staticmethod
     def _out(it: dict, now: float) -> dict:
         return {"text": it.get("text", ""), "when": _when_of(it, now), "mood": it.get("mood") or ""}
 
@@ -437,8 +516,11 @@ class SelfMemory:
         if not self.enabled:
             return {}
         now = now or _now()
-        vis = self._visible(now)
         today_day = _day_of(now)
+        asked = _grams(text)
+        # 11/05：今天已经在这个会话讲过的，不再放进来（对方这句正问到它的除外），免得她一天讲好几遍
+        vis = [it for it in self._visible(now)
+               if self._told_day(it, key) != today_day or _related(asked, it.get("text", "")) >= ASKED_MIN_GRAMS]
         today = [it for it in vis if it.get("date") == today_day]
         q = _grams(f"{text} {recent}")
         scored = [(_related(q, it.get("text", "")), float(it.get("at") or 0), it) for it in vis if it not in today]
@@ -456,7 +538,7 @@ class SelfMemory:
             today.pop(0)                          # 先丢今天早些的
         place = self._place_out(now)
         return {"place": place, "today": [self._out(it, now) for it in today],
-                "related": [self._out(it, now) for it in related]}
+                "related": [self._out(it, now) for it in related], "plans": self._plans_out(now)}
 
     def life_for_proactive(self, key: str, n: int = 3, now: float | None = None) -> dict:
         """冒泡、写信、搭话：最近几条这个会话还没听过的（今天的排前面）+ 这里已经听过的（别再讲）"""
@@ -465,7 +547,14 @@ class SelfMemory:
         now = now or _now()
         vis = self._visible(now)
         today_day = _day_of(now)
-        fresh = [it for it in vis if key not in (it.get("told_in") or [])]
+        # 11/05：最近几天在任何地方主动讲过的（和字面几乎一样的），不再算“还没讲过的”；另外给几条“这几天在别处讲过的”，
+        # “同一类别再讲”交给提示（按两字词数“意思差不多”试过：“追了半条街”“跟了半条街”就对上 3 个，分不开）
+        recent = [it for it in vis if self._pro_day(it) and _days_between(self._pro_day(it), now) < PRO_RECENT_DAYS]
+        pending = [x for x in self._load()["said"] if isinstance(x, dict)]
+
+        def said_lately(it: dict) -> bool:
+            return it in recent or any(_similar(r.get("text", ""), it.get("text", "")) for r in recent)
+        fresh = [it for it in vis if key not in (it.get("told_in") or []) and not said_lately(it)]
         fresh.sort(key=lambda it: (it.get("date") == today_day, float(it.get("at") or 0)), reverse=True)
         fresh = self._cap_topics(fresh, set())[:n]
         told = [it for it in vis if key in (it.get("told_in") or [])][-TOLD_HERE_MAX:]
@@ -473,8 +562,11 @@ class SelfMemory:
         for s in self._load()["said"]:            # 刚说过、还没整理完的：原话先算“这里听过了”
             if s.get("key") == key:
                 told_out.append({"text": _clean_text(s.get("text"), 40), "when": "刚才", "mood": ""})
+        elsewhere = [self._out(it, now) for it in sorted(recent, key=self._pro_day) if key not in (it.get("told_in") or [])]
+        elsewhere += [{"text": _clean_text(x.get("text"), 40), "when": "刚才", "mood": ""} for x in pending if x.get("key") != key]
         place = self._place_out(now)
-        return {"place": place, "fresh": [self._out(it, now) for it in fresh], "told_here": told_out[-TOLD_HERE_MAX:]}
+        return {"place": place, "fresh": [self._out(it, now) for it in fresh], "told_here": told_out[-TOLD_HERE_MAX:],
+                "told_elsewhere": elsewhere[-TOLD_ELSEWHERE_MAX:], "plans": self._plans_out(now)}
 
     # -------------------------------------------------------------- 管理员：/近况
     def _listed(self) -> list[dict]:
@@ -489,6 +581,8 @@ class SelfMemory:
         d = self._load()
         if d["trail"]:
             lines.append("之前：" + " → ".join(str(t.get("name")) for t in d["trail"][-5:]))
+        for pl in self._plans_out(now):
+            lines.append(f"打算：{pl['said']}说{pl['due']}{pl['text']}（{pl['status']}）")
         items = self._listed()
         if not items:
             lines.append("近况：（还没有）")

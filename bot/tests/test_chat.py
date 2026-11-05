@@ -93,6 +93,9 @@ def clean_state():
         p._reply_started.clear(); p._reply_done.clear()
         getattr(p.reply, "_reply_owner", {}).clear()
         getattr(p.reply, "_botlike", {}).clear()
+        getattr(p.reply, "_flood", {}).clear()
+    if hasattr(p.cfg, "flood_rounds"):
+        p.cfg.flood_rounds = 0        # 11/05：别的测试一个人在群里连着发好几轮，别被“一直找她就不理”打断；测这个的测试自己打开
     if hasattr(p, "_recent_chat"):
         p._recent_chat.clear(); p._interject_skip_until.clear(); p._interject_busy.clear()
         p.INTERJECT_FILE.unlink(missing_ok=True)
@@ -2457,7 +2460,9 @@ def test_short_hint_not_tiny_for_long_message(monkeypatch):
 def test_stranger_tone_softer():
     import plugins.roleplay_chat as p
     h = p.FAMILIARITY_HINT["stranger"]
-    assert "客气" in h and "不要凶" in h and "毫不客气地怼回去" not in h
+    # 11/05 人设交接第 41 节：第一句去掉“客气”“用敬语、礼貌”，改成“口气淡、有分寸”
+    assert "有分寸" in h and "不要凶" in h and "毫不客气地怼回去" not in h
+    assert "敬语" not in h
     persona = Path("personas/elaina.md").read_text(encoding="utf-8")
     assert "……你谁啊？" not in persona and "蛤？你脑子没问题吧？" not in persona
 
@@ -4012,7 +4017,7 @@ def test_rules_merged_0929():
     """9/29 规则合并：24 条 → 12 条；意思都还在（“喜好别硬扯”21:30 删过，22:10 回归测试面包变多，又加回来）"""
     import plugins.roleplay_chat as p
     rules = [x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]
-    assert len(rules) == 12
+    assert len(rules) == 13          # 11/05 加了“玩笑别当真”一条
     for must in ("（群友）", "#2", "（过了 X）", "Markdown", "只用中文", "最多三条", "群聊旁听记录", "伊蕾娜本人的画像",
                  "[表情:情绪]", "OOC", "→ 别人", "那个人说", "叫你一声", "说岔了", "有主见", "硬扯", "男是女"):
         assert must in p.CHAT_RULES, must
@@ -4840,7 +4845,7 @@ def test_promise_direction_2010():
     import plugins.roleplay_chat as p
     assert "别说成你请对方" in p.NUDGE_PROMPT and "别随口许下" in p.NUDGE_PROMPT
     assert "别把对方答应你的说成你答应对方的" in p.CHAT_RULES
-    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 13   # 11/05 加了“玩笑别当真”
 
 
 @pytest.mark.asyncio
@@ -4988,7 +4993,7 @@ def test_chat_stop_and_rule_0100():
     import plugins.roleplay_chat as p
     assert p.CHAT_STOP == ["\n【"]
     assert "只写你自己这一轮要说的话" in p.CHAT_RULES
-    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 13   # 11/05 加了“玩笑别当真”
 
 
 @pytest.mark.asyncio
@@ -5068,7 +5073,7 @@ def test_watch_gaps_and_caller_mark_0140():
     assert p.caller_lead_start(buf, 1, now) == 1
     assert p.caller_lead_start(buf, 2, now) is None
     assert p.caller_lead_start([(1, "A", "【A → B】你说呢", now - 5)], 1, now) is None
-    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 12
+    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 13   # 11/05 +1
 
 
 @pytest.mark.asyncio
@@ -6481,3 +6486,134 @@ async def test_judge_call_goes_to_judge_client_1028(app: App, monkeypatch):
     assert seen.get("model") == "deepseek-v4-pro" and seen.get("max_tokens") == 2
     assert "接着她刚才的话往下说的" in seen["messages"][0]["content"] and "你有脚气吗" in seen["messages"][0]["content"]
     assert CALLS == []                                   # 判断说“否”：不回
+
+
+@pytest.mark.asyncio
+async def test_flood_ignore_and_hint_1105(app: App, monkeypatch):
+    """11/05（《人机感检查-周到型-1105》A）：群里同一个人 10 分钟里找她超过 N 轮，后面的按关系概率不理（不调模型），
+    没跳过的那轮提示里带【被一直找】；私聊不管"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "flood_rounds", 3)
+    monkeypatch.setattr(p.cfg, "flood_ignore_prob", {"stranger": 1.0})
+    p.client.chat.completions.create = fake_create("嗯")
+    for i in range(3):
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = gev(f"@你第{i}次", True, uid=1931, mid=9800 + i, card="栞栞")
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "嗯", result=None, bot=bot)
+    n_calls = len(CALLS)
+    async with app.test_matcher() as ctx:                      # 第 4 轮：陌生人，概率 1 → 不理、不调模型
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("宝宝你在吗", True, uid=1931, mid=9810, card="栞栞"))
+    assert len(CALLS) == n_calls
+    assert "宝宝你在吗" in p.get_history("group_555")[-1]["content"]          # 话还是记进了群聊记录
+    # 概率 0：照常回，但提示里告诉她可以嫌烦
+    monkeypatch.setattr(p.cfg, "flood_ignore_prob", {"stranger": 0.0})
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = gev("宝宝你理理我", True, uid=1931, mid=9811, card="栞栞")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "嗯", result=None, bot=bot)
+    sys_text = "".join(str(m["content"]) for m in CALLS[-1]["messages"] if m["role"] == "system")
+    assert "【被一直找】" in sys_text and "5 次" in sys_text
+    # 别的人不受影响
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = gev("伊蕾娜晚上好", True, uid=2697, mid=9812, card="Zidane")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "嗯", result=None, bot=bot)
+    assert "【被一直找】" not in "".join(str(m["content"]) for m in CALLS[-1]["messages"] if m["role"] == "system")
+
+
+@pytest.mark.asyncio
+async def test_flood_not_in_private_1105(monkeypatch):
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "flood_rounds", 2)
+    monkeypatch.setattr(p.cfg, "flood_ignore_prob", {"stranger": 1.0, "friend": 1.0, "acquaintance": 1.0, "close": 1.0})
+    p.client.chat.completions.create = fake_create("嗯")
+    bot = _PBot()
+    for i in range(4):
+        await p.converse(bot, pev(f"第{i}句", uid=9993, mid=9820 + i))
+    assert len(bot.sent) == 4                                  # 私聊一对一聊天，聊得多是正常的
+
+
+def test_life_focus_1105():
+    """11/05（F）：没问到她时【你的近况】只带和这几句话对得上的事，不带在哪；问到了照旧整段带"""
+    import plugins.roleplay_chat as p
+    d = {"place": {"name": "海边的小镇", "status": "现在", "days_here": 6},
+         "today": [{"text": "在海边捡到一枚螺旋反着的怪贝壳", "when": "今天下午"}],
+         "related": [{"text": "在旅馆泡澡很舒服，舍不得走", "when": "昨天"}]}
+    th = p.turn_hints
+    assert th.life_focus(d, "你最近在哪呀") is d
+    assert th.life_focus(d, "今天干嘛了") is d
+    assert th.life_focus(d, "你知道 aug 吗") is None                       # 不沾边：一条都不带
+    got = th.life_focus(d, "那个贝壳后来呢", "今天我在海边捡到一枚纹路是反着拧的贝壳")
+    assert got == {"place": None, "today": [], "related": [d["today"][0]]}
+    hint = th.life_hint(got)
+    assert "贝壳" in hint and "海边的小镇" not in hint and "泡澡" not in hint
+    assert th.life_hint(th.life_focus(d, "你知道 aug 吗")) == ""
+
+
+def test_life_plans_hint_1105():
+    """11/05（记忆 agent 给了 plans）：她说过哪天动身——回消息时问到她才带；冒泡只带到日子了、过了日子的"""
+    import plugins.roleplay_chat as p
+    th = p.turn_hints
+    place = {"name": "海边的小镇", "status": "现在", "days_here": 6}
+    mk = lambda st, due: [{"text": "动身去别的海岸", "to": "", "said": "2 天前", "due": due, "status": st}]
+    # 回消息：问到她
+    h = th.life_hint(th.life_focus({"place": place, "today": [], "related": [], "plans": mk("到日子了", "今天")}, "你还在海边吗"))
+    assert "你 2 天前说过要动身去别的海岸" in h and "说好的就是今天" in h and "改了主意" in h
+    h = th.life_hint(th.life_focus({"place": place, "today": [], "related": [], "plans": mk("还没到日子", "明天")}, "什么时候动身"))
+    assert "说好的是明天，还没到日子" in h
+    h = th.life_hint({"place": place, "today": [], "related": [], "plans": mk("过了日子还没动", "昨天")})
+    assert "说好的是昨天，日子过了你还没走" in h
+    # 回消息：没问到她，打算也不带
+    d = {"place": place, "today": [], "related": [], "plans": mk("到日子了", "今天")}
+    assert th.life_hint(th.life_focus(d, "你知道 aug 吗")) == ""
+    # 冒泡：到日子了 / 过了日子带，还没到日子不带；有“去哪”时写上
+    pro = lambda st, due, to="": th.life_hint_proactive(
+        {"place": place, "fresh": [], "told_here": [], "told_elsewhere": [],
+         "plans": [{"text": "往北走", "to": to, "said": "昨天", "due": due, "status": st}]})
+    assert "你昨天说过要往北走（去北边的山），说好的就是今天" in pro("到日子了", "今天", "北边的山")
+    assert "日子过了你还没走" in pro("过了日子还没动", "昨天")
+    assert "往北走" not in pro("还没到日子", "明天")
+    assert th.life_hint({"plans": []}) == "" and th.life_hint_proactive({"plans": [{"text": "", "status": "到日子了"}]}) == ""
+
+
+def test_life_elsewhere_hint_1105():
+    """11/05（记忆 agent 给了 told_elsewhere）：冒泡时写出这几天在别处讲过的，别再讲同一件、同一类"""
+    import plugins.roleplay_chat as p
+    d = {"place": None, "fresh": [{"text": "在集市上看人斗鸡", "when": "今天上午"}], "told_here": [],
+         "told_elsewhere": [{"text": "海风把帽子吹跑了，追了半条街", "when": "昨天"},
+                            {"text": "集市上那只猫跟了我一路", "when": "刚才"}]}
+    h = p.turn_hints.life_hint_proactive(d)
+    assert p.turn_hints.LIFE_ELSEWHERE_HEAD in h and "也别讲同一类" in h
+    assert "海风把帽子吹跑了，追了半条街（昨天）；集市上那只猫跟了我一路（刚才）" in h
+    assert h.index("在集市上看人斗鸡") < h.index(p.turn_hints.LIFE_ELSEWHERE_HEAD)
+    d["told_elsewhere"] = []
+    assert p.turn_hints.LIFE_ELSEWHERE_HEAD not in p.turn_hints.life_hint_proactive(d)
+
+
+def test_joke_rule_1105():
+    import plugins.roleplay_chat as p
+    assert "别当真" in p.CHAT_RULES and "不用一条条澄清" in p.CHAT_RULES
+
+
+def test_wake_group_only_recent_1105(monkeypatch, tmp_path):
+    """11/05（第 8 条）：睡醒补看时，群里只看 2 小时以内的；私聊照旧看（最多 12 小时）"""
+    import plugins.roleplay_chat as p
+    _wake_env_1024(monkeypatch, tmp_path, p)
+    old, new = int(time.time()) - 5 * 3600, int(time.time()) - 3600
+    g1 = gev("这么晚了不应该待在外面才对", True, uid=2824, mid=9830); g1.time = old
+    p.wake.note(("group_555", 2824), g1, "这么晚了不应该待在外面才对")
+    assert p.wake.take(("group_555", 2824)) is None                     # 5 小时前：不专门回
+    g2 = gev("早", True, uid=2825, mid=9831); g2.time = new
+    p.wake.note(("group_555", 2825), g1, "这么晚了还不睡")             # 一段 5 小时前、一段 1 小时前
+    p.wake.note(("group_555", 2825), g2, "早")
+    items, first = p.wake.take(("group_555", 2825))
+    assert [t for t, _ in items] == ["早"] and first == float(new)
+    e = pev("昨晚的事还记得吗", uid=7791, mid=9832); e.time = old
+    p.wake.note(("private_7791", 7791), e, "昨晚的事还记得吗")
+    items, _ = p.wake.take(("private_7791", 7791))
+    assert [t for t, _ in items] == ["昨晚的事还记得吗"]                 # 私聊 5 小时前的照旧看
