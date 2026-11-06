@@ -17,6 +17,7 @@ echo.
 echo [1/6] 机器人日志
 scp %SERVER%:QQBot/bot/data/logs/bot_*.log "%OUT%"
 if not exist "%OUT%\bot_*.log" echo   ！！没下载到机器人日志，请把这个窗口截图发给 Claude
+scp -q %SERVER%:QQBot/bot/data/logs/memlog.log "%OUT%" 2>nul
 echo [2/6] 风控记录
 scp %SERVER%:QQBot/bot/data/risk_events.log "%OUT%"
 echo [3/6] 空间日志
