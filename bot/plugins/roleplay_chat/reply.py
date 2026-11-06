@@ -20,7 +20,7 @@ from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg
 from .prompts import FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
 from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
-from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
+from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
 from .textout import CHAT_STOP, clean_reply, cut_derailed, drop_ooc_sentences, is_fragment, speaker_names, split_bubbles, split_sticker
 from .quota import _active_chats, _count_sent, _crossed_mid_chat, _farewell_at, _global_window, _hour_window, _last_trigger, _refund, _wrapup, bubble_gap, in_wrapup, quota_left, rate_limited, say_farewells, say_tired, typing_delay, WRAPUP_EXTRA, WRAPUP_MINUTES
 from .voice_chat import _voice_count, split_voice_mark, tts, tts_ready, voice_day, voice_roll, voice_text, voice_wav_seconds
@@ -51,6 +51,9 @@ _peak_last_busy: dict[int, float] = {}
 
 
 _inbox_token: dict[tuple[str, int], int] = {}
+_redo_count: dict[tuple[str, int], int] = {}     # 11/06 这一串里已经重想过几次（真发出去了就清零）
+_redo_skip_wait: set = set()                     # 11/06 上一轮是重想放弃的：下一轮不用再等“她发完以后”那几秒
+_redo_pending: set = set()                       # 11/06 收件箱里有重想放回去的话：这一轮不按概率不理（水话、刷屏、讨厌的人），免得前一句也没人回
 
 
 _token_counter = 0
@@ -186,8 +189,12 @@ async def wait_own_reply(ik: tuple[str, int], token: int) -> int | None:
         await asyncio.sleep(0.5)
         if _inbox_token.get(ik) != token:
             return None
-    if waited:
-        await asyncio.sleep(cfg.merge_wait_complete)     # 她刚发完，对方可能正在回最后那条
+    if waited and ik in _redo_skip_wait:
+        _redo_skip_wait.discard(ik)               # 上一稿没发出去（对方又说了，重想）：她什么都没说，不用等对方看完
+    elif waited:
+        # 她刚发完，对方多半在看她后面几条、还会再说一句：多等一会儿，合成一轮回（11/06：以前等 3 秒，
+        # 对方看完整轮话再说的下一句常在 3 秒以后，一条一轮，她总慢半拍，看起来每条都回）
+        await asyncio.sleep(cfg.merge_wait_after_own or cfg.merge_wait_complete)
         if _inbox_token.get(ik) != token:
             return None
     return token
@@ -311,6 +318,7 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
     global _token_counter
     # 先不调模型看图（本机角色识别照常，免费）：等确定要回了再看，被合并、限流、跳过的消息就不花这个钱
     drop_at = isinstance(event, GroupMessageEvent)
+    await prefetch_forwards(bot, event)          # 11/06 转发的聊天记录：先把内容要来
     text = await rich_text(event, look=False, drop_at=drop_at)
     look_later = has_images(event) and cfg.vision_enabled and (cfg.vision_in_peak or not core.in_peak())
     if not text:
@@ -405,7 +413,7 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
         return None
     # 水话（“哈哈”“嗯”“好的”、一个表情）：按关系远近，有一定概率直接不接话（不调用模型）
     pending = _inbox.get(ik, [])
-    if cfg.skip_filler and pending and all(is_filler(t) for t in pending):
+    if cfg.skip_filler and pending and all(is_filler(t) for t in pending) and ik not in _redo_pending:
         async with _locks[key]:
             history = get_history(key)
             if not she_asked(history) and random.random() < tier_value(cfg.skip_filler_prob, core.familiarity_of(event.user_id), 0.5):
@@ -457,7 +465,7 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
     # 11/05（《人机感检查-周到型-1105》A）：群里同一个人短时间里一直找她（10/28 一个多小时 @ 了 59 次，她回了 140 条）：
     # 过了次数以后按关系概率不理（不花 token）；没跳过的那几轮，提示里告诉她可以嫌烦、可以不接
     flooded = 0
-    if is_group and catchup_age is None and cfg.flood_rounds > 0:
+    if is_group and catchup_age is None and cfg.flood_rounds > 0 and ik not in _redo_pending:
         n = note_flood(ik)
         if n > cfg.flood_rounds:
             if random.random() < tier_value(cfg.flood_ignore_prob, core.familiarity_of(event.user_id), 0.5):
@@ -473,7 +481,7 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
                 return None
             flooded = n
     # 被讨厌的人：有一定概率直接不理（不花 token）
-    if core.familiarity_of(event.user_id) == "disliked" and random.random() < cfg.dislike_ignore_prob:
+    if core.familiarity_of(event.user_id) == "disliked" and ik not in _redo_pending and random.random() < cfg.dislike_ignore_prob:
         _take_inbox(ik)
         logger.info(f"讨厌的人，不想理 user={event.user_id}")
         return None
@@ -537,6 +545,8 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     woke = woke_items[0][1] if woke_items else None
     _reply_started[ik] = time.monotonic()
     _reply_owner[ik] = asyncio.current_task()      # 谁开始回的，谁回完了才记“结束了”（见 converse）
+    turn.texts, turn.woke_items = list(texts), woke_items      # 11/06 重想时要放回收件箱
+    _redo_pending.discard(ik)
     text = clip_input("\n".join(texts))
     # 这条消息到的时候的计数（之后有人插话、或者她先说了别的，就引用原句）
     seq_at_trigger = _arrival_seq.pop((_target_of(event), int(event.message_id)), _chat_seq[_target_of(event)])
@@ -851,10 +861,44 @@ async def _finalize(turn: SimpleNamespace, reply: str, emotion: str | None) -> b
         if k > 0:
             ltm.taboo_penalty(event.user_id, cfg.taboo_penalty * k, cfg.taboo_daily_max * k,
                               f"说她{hit}（{ltm.TIER_NAMES.get(tier_now, tier_now)}）")
+    turn.taboo_hit = hit
 
     turn.__dict__.update(reply=reply, record=record, sticker=sticker, sticker_note=sticker_note, tier_now=tier_now,
                          voice_payload=voice_payload, voice_cost=voice_cost, voice_with_text=voice_with_text)
     return True
+
+
+def should_redo(turn: SimpleNamespace) -> bool:
+    """11/06（和 1491656451 的私聊）：她想好了，第一条还没发出去（在“打字”），对方又说了一句：
+    这稿不发，把这一轮的话放回收件箱，交给新来的那条一起重想（像真人看到对方又补了一句，删掉重打）。
+    私聊、群聊都做（用户 11/06 定的）。群里新来的那句只有被认成在跟她说话才会进收件箱（@ 她、刚跟她聊着又没别人插话、判断说是），
+    认不出来的进旁听，这稿照发，不会两句都没人回。
+    每串最多一次；语音、睡醒补看、测试模式、高峰、这轮扣过雷点分的不重想（免得重复扣分、白合成语音）"""
+    ik = turn.ik
+    return bool(cfg.redo_on_more and turn.catchup_age is None and _inbox.get(ik)
+                and _redo_count.get(ik, 0) < 1 and not turn.voice_payload and not getattr(turn, "woke_items", None)
+                and not getattr(turn, "taboo_hit", None) and getattr(turn, "texts", None)
+                and not turn.busy and not commands.in_test_mode(turn.event.user_id))
+
+
+def _drop_for_redo(turn: SimpleNamespace) -> None:
+    """不发这稿：聊天记录里拿掉她这句和这一轮对方的话，对方的话放回收件箱最前面，额度退回"""
+    key, ik = turn.key, turn.ik
+    _unrecord(key, turn.record)
+    h = get_history(key)
+    for e in turn.new_entries:
+        for i in range(len(h) - 1, -1, -1):
+            if h[i] is e or (h[i].get("role") == e.get("role") and h[i].get("content") == e.get("content")
+                             and h[i].get("ts") == e.get("ts")):
+                h.pop(i)
+                break
+    save_history(key)
+    _inbox[ik][:0] = turn.texts
+    _refund(turn.stamp, turn.gid_q, turn.uid_q)
+    _redo_count[ik] = _redo_count.get(ik, 0) + 1
+    _redo_skip_wait.add(ik)
+    _redo_pending.add(ik)
+    logger.info(f"还没发出去对方又说了，这稿不发，合在一起重想：{key} user={turn.event.user_id}：{turn.reply[:30]!r}")
 
 
 async def _send(bot: Bot, turn: SimpleNamespace) -> None:
@@ -882,6 +926,9 @@ async def _send(bot: Bot, turn: SimpleNamespace) -> None:
         if busy:
             delay += random.uniform(cfg.peak_extra_delay_min, cfg.peak_extra_delay_max)
         await asyncio.sleep(delay)
+        if should_redo(turn):
+            _drop_for_redo(turn)
+            return
 
         sent = 0
         voice_first = False
@@ -979,6 +1026,7 @@ async def _send(bot: Bot, turn: SimpleNamespace) -> None:
             logger.info(f"测试模式：{event.user_id} 这一轮不交给长期记忆")
         mark_sent(target)
         note_sent_round(ik)
+        _redo_count.pop(ik, None)
         # 她这一轮说了要走：先记下“不在了”，再记“这一轮结束了”，排在后面等着的那条就不会再回（10/23）
         leaving = note_leaving(target, out_text)
         _reply_done[ik] = time.monotonic()

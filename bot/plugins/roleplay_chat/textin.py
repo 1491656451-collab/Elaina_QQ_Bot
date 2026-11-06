@@ -48,8 +48,109 @@ def seg_text(seg: MessageSegment) -> str:
     if seg.type == "dice":
         n = str(seg.data.get("result") or "").strip()
         return f"[骰子：{n} 点]" if n.isdigit() else "[骰子]"
+    if seg.type == "forward" and str(seg.data.get("id") or "") in _forward_cache:
+        return _forward_cache[str(seg.data.get("id"))]          # 11/06 已经向 NapCat 要到了里面的内容
     # 9/30：别的都看不懂（聊天记录、位置……）。以前直接丢掉，她以为对方什么都没发，接着乱猜
     return f"[{unreadable_kind(seg)}（看不懂）]"
+
+
+# ---- 11/06 转发的聊天记录：消息里只带一个编号，内容要向 NapCat 另外要（get_forward_msg）。
+# 收到时先要来、拼成一行放进缓存，之后 seg_text 直接用；要不到就照旧写“[聊天记录（看不懂）]”
+_forward_cache: dict[str, str] = {}
+_FORWARD_CACHE_MAX = 300
+
+
+def _node_segs(node: dict) -> list[MessageSegment]:
+    """一条转发里的消息：NapCat 给 message（列表），go-cqhttp 给 content（列表或 CQ 码字符串）"""
+    raw = node.get("message")
+    if raw is None:
+        raw = node.get("content")
+    if isinstance(raw, str):
+        return list(Message(raw))
+    out = []
+    for x in raw or []:
+        if isinstance(x, dict) and x.get("type"):
+            out.append(MessageSegment(x["type"], x.get("data") or {}))
+    return out
+
+
+def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | None = None) -> str:
+    """拼成一行：[聊天记录（共 N 条）：甲：……；乙：……]。里面的方括号换成【】，免得和外面的标记混在一起"""
+    max_nodes = max_nodes or cfg.forward_max_nodes
+    max_chars = max_chars or cfg.forward_max_chars
+    nodes = [n for n in nodes or [] if isinstance(n, dict)]
+    lines = []
+    for node in nodes[:max_nodes]:
+        sender = node.get("sender") or {}
+        who = _short(sender.get("card") or sender.get("nickname") or node.get("nickname") or sender.get("user_id") or "某人", 12)
+        parts = []
+        for seg in _node_segs(node):
+            if seg.type == "forward":
+                parts.append("[一段聊天记录]")
+            elif seg.type == "reply":
+                continue
+            else:
+                parts.append(seg_text(seg))
+        body = re.sub(r"\s+", " ", "".join(parts)).strip() or "（空）"
+        body = body.replace("[", "【").replace("]", "】")
+        lines.append(f"{who}：{body if len(body) <= 40 else body[:40] + '…'}")
+    if not lines:
+        return ""
+    text = "；".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip("；") + "……"
+    elif len(nodes) > max_nodes:
+        text += "；……"
+    return f"[聊天记录（共 {len(nodes)} 条）：{text}]"
+
+
+async def fetch_forward(bot, fid: str) -> str:
+    """向 NapCat 要这段聊天记录的内容，拼好放进缓存；要不到返回空"""
+    if not fid:
+        return ""
+    if fid in _forward_cache:
+        return _forward_cache[fid]
+    got = None
+    for kw in ({"id": fid}, {"message_id": fid}):
+        try:
+            got = await bot.call_api("get_forward_msg", **kw)
+            break
+        except Exception as e:  # noqa: BLE001
+            logger.info(f"聊天记录：要内容没要到（{list(kw)[0]}）：{e}")
+    nodes = (got.get("messages") or got.get("message")) if isinstance(got, dict) else got
+    text = render_forward(nodes if isinstance(nodes, list) else [])
+    if not text:
+        return ""
+    if len(_forward_cache) >= _FORWARD_CACHE_MAX:
+        _forward_cache.pop(next(iter(_forward_cache)))
+    _forward_cache[fid] = text
+    logger.info(f"聊天记录：{text[:60]}")
+    return text
+
+
+async def prefetch_forwards(bot, event: MessageEvent) -> None:
+    """这条消息（和它引用的消息）里有转发的聊天记录：先把内容要来，后面拼文字时就能看到"""
+    if not cfg.forward_read:
+        return
+    msgs = [event.get_message()]
+    reply = getattr(event, "reply", None)
+    if reply is not None and getattr(reply, "message", None):
+        msgs.append(reply.message)
+    for msg in msgs:
+        for seg in msg:
+            if seg.type != "forward":
+                continue
+            fid = str(seg.data.get("id") or "")
+            inline = seg.data.get("content")
+            if fid and fid not in _forward_cache and isinstance(inline, list) and inline:
+                text = render_forward(inline)              # 有的版本直接带着内容
+                if text:
+                    _forward_cache[fid] = text
+                    continue
+            try:
+                await fetch_forward(bot, fid)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"聊天记录：出错，这次不看：{e}")
 
 
 def _short(text, n: int) -> str:

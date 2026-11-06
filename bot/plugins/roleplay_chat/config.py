@@ -21,6 +21,9 @@ class Config(BaseModel):
     vision_enabled: bool = True           # 看懂对方发的图片 / 表情包（deepseek-flash 支持）
     vision_model: str = "deepseek-flash"  # 看图用的模型（deepseek-v4-pro 不支持图片，所以单独设置）
     vision_max_images: int = 2            # 一条消息最多看几张图
+    forward_read: bool = True             # 转发的聊天记录：向 NapCat 要里面的内容给她看（11/06；关掉就照旧只写“[聊天记录（看不懂）]”）
+    forward_max_nodes: int = 8            # 一段聊天记录最多给她看前几条
+    forward_max_chars: int = 200          # 一段聊天记录拼出来最多多少字
     vision_in_peak: bool = False          # 高峰时段也看图吗（默认不看，省钱）
     vision_cache: str = "data/vision_cache.json"   # 同一张图只看一次
     # 本机角色识别（WD14 Tagger）：认出画里是不是伊蕾娜。第一次启动自动下载模型（约 470 MB）
@@ -253,10 +256,12 @@ class Config(BaseModel):
     followup_window: int = 60             # 她回完某人之后（从她最后一条发出算起），这么多秒内这个人接着说的话直接算在跟她说（不用判断）
     followup_judge_window: int = 300      # 过了上面的时间、还在这么多秒内，这个人接着说而且这期间群里没别人说话：交给判断要不要回（10/27；0 = 不用）
     # 分条发送：收到消息先等一等，同一个人接着发的合成一条再回；每来一条新的重新计时
-    merge_wait: float = 4.0               # 看不出话说完没说完时，等几秒
-    merge_wait_complete: float = 3.0      # 看起来话说完了（问号结尾、完整的一句），等几秒
-    merge_wait_incomplete: float = 8.0    # 看起来还没说完（“我跟你说”“然后”、逗号结尾、只叫了她一声），等几秒
+    merge_wait: float = 6.0               # 看不出话说完没说完时，等几秒（11/06 从 4 改）
+    merge_wait_complete: float = 5.0      # 看起来话说完了（问号结尾、完整的一句），等几秒（11/06 从 3 改：对方连着发，两条之间多半隔 3～15 秒）
+    merge_wait_incomplete: float = 10.0   # 看起来还没说完（“我跟你说”“然后”、逗号结尾、只叫了她一声），等几秒（11/06 从 8 改）
     merge_wait_max: float = 20.0          # 从第一条算起最多等多久，到点就回
+    merge_wait_after_own: float = 10.0    # 她一轮还没发完时对方又说了：等她发完以后再等几秒（11/06 从 3 秒改：对方看完她整轮话再说的下一句常在 3 秒以后，合不上，就一条一轮地回）；0 = 用 MERGE_WAIT_COMPLETE
+    redo_on_more: bool = True             # 她想好了、第一条还没发出去（在“打字”）时同一个人又说了，这稿不发，带上新的话重想一遍（11/06；私聊、群聊都做；群里只算被认成在跟她说的话；每串最多一次）
     sticker_follow_seconds: float = 20.0  # 她正在回、或者回完这么多秒内，对方单独补的一个表情算同一条消息，不单独回
 
     # 送东西：嘴上说“[给面包]”“给你钱”不会直接当真，防止靠这个刷好感

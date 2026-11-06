@@ -21,7 +21,7 @@ from .core import BOT_DIR, cap_text, cfg, over_cap
 from .prompts import BUBBLE_PROMPT, INTERJECT_PROMPT, system_prompt
 from .history import _locks, _passive, _recent_chat, api_messages, get_history, save_history
 from .turn_hints import _WEEKDAY, clock_text, human_gap, now_hint, short_hint
-from .textin import clean_body, clip_input, group_body, is_bot_like, message_to_text, quote_note, sender_label, speaker_head, watch_block
+from .textin import clean_body, clip_input, group_body, is_bot_like, message_to_text, prefetch_forwards, quote_note, sender_label, speaker_head, watch_block
 from .quota import _global_window, _group_hour, _has_quota, _hour_window, quota_left
 from .online import quiet_left
 from .commands import is_slash_message
@@ -33,6 +33,7 @@ passive = on_message(rule=Rule(_is_group_not_to_me) & allowed, priority=99, bloc
 
 @passive.handle()
 async def _(bot: Bot, event: GroupMessageEvent):
+    await prefetch_forwards(bot, event)          # 11/06 群友转发的聊天记录：旁听里也能看到内容
     text = message_to_text(event.get_message())
     # 群友转的卡片（B 站视频、链接、名片）也进旁听，只显示标题，不会因为它开口；Markdown、按钮这些机器人消息照旧不要
     if not text or is_slash_message(event, bot.config.command_start) or is_bot_like(event, allow_cards=True):

@@ -96,6 +96,11 @@ def clean_state():
         getattr(p.reply, "_flood", {}).clear()
     if hasattr(p.cfg, "flood_rounds"):
         p.cfg.flood_rounds = 0        # 11/05：别的测试一个人在群里连着发好几轮，别被“一直找她就不理”打断；测这个的测试自己打开
+    if hasattr(p.cfg, "merge_wait_after_own"):
+        p.cfg.merge_wait_after_own = 0   # 11/06：默认 10 秒太慢；别的测试照旧用 merge_wait_complete，测这个的测试自己设
+    if hasattr(p.cfg, "redo_on_more"):
+        p.cfg.redo_on_more = False       # 11/06：别的测试按“发完再回下一轮”写的；测重想的测试自己打开
+        p.reply._redo_count.clear(); p.reply._redo_skip_wait.clear(); p.reply._redo_pending.clear()
     if hasattr(p, "_recent_chat"):
         p._recent_chat.clear(); p._interject_skip_until.clear(); p._interject_busy.clear()
         p.INTERJECT_FILE.unlink(missing_ok=True)
@@ -4740,6 +4745,45 @@ async def test_wait_own_reply_1930(monkeypatch):
 
 
 
+@pytest.mark.asyncio
+async def test_wait_after_own_reply_1106(monkeypatch):
+    """11/06（和 1491656451 的私聊）：她一轮还没发完时对方又说了，等她发完以后多等 MERGE_WAIT_AFTER_OWN 秒，
+    这期间对方看完整轮话再说的下一句能合进来（以前只等 3 秒，一条一轮）；她没在回时不受影响"""
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat.config import Config
+    c = Config()
+    assert (c.merge_wait_after_own, c.merge_wait_complete, c.merge_wait, c.merge_wait_incomplete, c.redo_on_more) == (10.0, 5.0, 6.0, 10.0, True)
+    monkeypatch.setattr(p.cfg, "merge_wait_complete", 0.05)
+    monkeypatch.setattr(p.cfg, "merge_wait_after_own", 0.6)
+    ik = ("private_4456", 4456)
+    p._inbox_token[ik] = 1
+    p._reply_started.pop(ik, None); p._reply_done.pop(ik, None)
+    t0 = time.monotonic()
+    assert await p.wait_own_reply(ik, 1) == 1
+    assert time.monotonic() - t0 < 0.3                       # 没在回：不多等
+    p._reply_started[ik] = time.monotonic(); p._reply_done[ik] = -1e9
+
+    async def finish_then_more():
+        await asyncio.sleep(0.2)
+        p._reply_done[ik] = time.monotonic()                 # 她发完了
+        await asyncio.sleep(0.4)                             # 发完 0.4 秒后对方又说了一句（以前 3 秒档这里已经开始回了）
+        p._inbox_token[ik] = 2
+    t = asyncio.create_task(finish_then_more())
+    assert await p.wait_own_reply(ik, 1) is None             # 这条让给新的那条，合成一轮
+    await t
+    # 设成 0：退回 MERGE_WAIT_COMPLETE
+    monkeypatch.setattr(p.cfg, "merge_wait_after_own", 0)
+    p._reply_started[ik] = time.monotonic(); p._reply_done[ik] = -1e9
+
+    async def finish():
+        await asyncio.sleep(0.2)
+        p._reply_done[ik] = time.monotonic()
+    t = asyncio.create_task(finish())
+    t0 = time.monotonic()
+    assert await p.wait_own_reply(ik, 2) == 2 and time.monotonic() - t0 < 0.9     # 每 0.5 秒看一次，再加 0.05
+    await t
+
+
 def test_card_titles_faces_files_1945():
     """9/30 19:35：卡片只取标题（名片取昵称），QQ 小表情带名字，文件带文件名，骰子带点数"""
     import plugins.roleplay_chat as p
@@ -6148,6 +6192,207 @@ async def test_superseded_message_not_mark_done_1023(monkeypatch):
     assert log[2][1] > log[1][1]
     assert "第二句" in str(CALLS[-1]["messages"]) and "第三句" in str(CALLS[-1]["messages"])
 
+
+@pytest.mark.asyncio
+async def test_redo_when_more_before_send_1106(monkeypatch):
+    """11/06（和 1491656451 的私聊）：她想好了、第一条还没发出去（在打字），对方又说了一句：
+    这稿不发，两句合在一起重想一遍，只回一轮；聊天记录里只有一轮，不留没发出去的那稿。每串最多重想一次"""
+    import plugins.roleplay_chat as p
+    for k in ("merge_wait", "merge_wait_complete", "merge_wait_incomplete"):
+        monkeypatch.setattr(p.cfg, k, 0.3)
+    monkeypatch.setattr(p.cfg, "redo_on_more", True)
+    monkeypatch.setattr(p.cfg, "merge_wait_after_own", 5.0)     # 重想时不该等这 5 秒
+    monkeypatch.setattr(p.reply, "typing_delay", lambda s: 1.5)
+    log, replies = [], iter(["第一稿。", "合起来的回答。", "第三轮。"])
+    base = fake_create("占位")
+
+    async def create(**kw):
+        if kw.get("max_tokens") != 2 and "response_format" not in kw:
+            log.append(("想", time.monotonic() - t0))
+            await base(**kw)
+            return resp(next(replies))
+        return await base(**kw)
+    p.client.chat.completions.create = create
+    sent = []
+
+    class B(_PBot):
+        async def send(self, event, msg):
+            sent.append(str(msg)); log.append(("发", time.monotonic() - t0))
+    bot = B()
+    t0 = time.monotonic()
+    first = asyncio.create_task(p.converse(bot, pev("高兴高兴", uid=7791, mid=8201)))
+    await asyncio.sleep(0.8)                       # 她已经想好了，正在打字
+    second = asyncio.create_task(p.converse(bot, pev("好好好，不想不想", uid=7791, mid=8202)))
+    await asyncio.gather(first, second)
+    assert [k for k, _ in log] == ["想", "想", "发"], log
+    assert sent == ["合起来的回答。"]
+    assert log[-1][1] < 4.5, log                   # 没有再等“她发完以后”那 5 秒
+    msgs = str(CALLS[-1]["messages"])
+    assert "高兴高兴" in msgs and "好好好，不想不想" in msgs and "第一稿" not in msgs
+    h = p.get_history("private_7791")
+    assert [m["role"] for m in h] == ["user", "assistant"] and "高兴高兴" in h[0]["content"] and "好好好" in h[0]["content"]
+    assert h[1]["content"] == "合起来的回答。"
+    assert p.reply._redo_count.get(("private_7791", 7791)) is None      # 真发出去了：清零
+    # 每串最多一次：重想的那稿还在打字时对方又说了，这次照常发
+    p.reply._redo_count[("private_7791", 7791)] = 1
+    log.clear(); sent.clear(); replies = iter(["这稿照发。", "下一轮。"])
+    t0 = time.monotonic()
+    a = asyncio.create_task(p.converse(bot, pev("再来", uid=7791, mid=8203)))
+    await asyncio.sleep(0.8)
+    b = asyncio.create_task(p.converse(bot, pev("还有", uid=7791, mid=8204)))
+    await asyncio.gather(a, b)
+    assert sent[0] == "这稿照发。" and [k for k, _ in log][:2] == ["想", "发"], log
+
+
+def test_redo_conditions_1106():
+    import plugins.roleplay_chat as p
+    from types import SimpleNamespace as NS
+    ik = ("group_555", 111)
+    p.cfg.redo_on_more = True
+    p._inbox[ik].append("又一句")
+    base = dict(ik=ik, is_group=False, catchup_age=None, voice_payload=None, woke_items=None, taboo_hit=None,
+                texts=["第一句"], busy=False, event=NS(user_id=111))
+    assert p.reply.should_redo(NS(**base))
+    assert p.reply.should_redo(NS(**{**base, "is_group": True}))          # 11/06 用户定的：群里也重想
+    assert not p.reply.should_redo(NS(**{**base, "busy": True}))           # 高峰不重想
+    assert not p.reply.should_redo(NS(**{**base, "voice_payload": b"x"}))  # 语音已经合成了
+    assert not p.reply.should_redo(NS(**{**base, "taboo_hit": "平"}))       # 扣过分的不重想（免得重复扣）
+    assert not p.reply.should_redo(NS(**{**base, "catchup_age": 30.0}))
+    p._inbox[ik].clear()
+    assert not p.reply.should_redo(NS(**base))                             # 对方没再说：照发
+
+@pytest.mark.asyncio
+async def test_redo_in_group_1106(monkeypatch):
+    """11/06：群里也重想。@ 她说了一句，她还在打字，这个人又补了一句（也是在跟她说）：两句合成一轮回；
+    补的那句是水话、按概率本该不理，也不能把前一句一起扔掉"""
+    import plugins.roleplay_chat as p
+    for k in ("merge_wait", "merge_wait_complete", "merge_wait_incomplete"):
+        monkeypatch.setattr(p.cfg, k, 0.3)
+    monkeypatch.setattr(p.cfg, "redo_on_more", True)
+    monkeypatch.setattr(p.cfg, "skip_filler_prob", {k: 1.0 for k in ("disliked", "stranger", "friend", "acquaintance", "close")})
+    monkeypatch.setattr(p.cfg, "skip_by_model", False)
+    monkeypatch.setattr(p.reply, "typing_delay", lambda s: 1.5)
+    replies, n = iter(["第一稿。", "合起来的回答。"]), {"gen": 0}
+    base = fake_create("占位")
+
+    async def create(**kw):
+        if kw.get("max_tokens") != 2 and "response_format" not in kw:
+            n["gen"] += 1
+            await base(**kw)
+            return resp(next(replies))
+        return await base(**kw)
+    p.client.chat.completions.create = create
+    sent = []
+
+    class B(_PBot):
+        async def send(self, event, msg):
+            sent.append(str(msg))
+    bot = B()
+    first = asyncio.create_task(p.converse(bot, gev("我又没说错，伊蕾娜小姐很在意我吧", True, uid=7792, mid=8301, gid=556)))
+    await asyncio.sleep(0.8)
+    second = asyncio.create_task(p.converse(bot, gev("哈哈", True, uid=7792, mid=8302, gid=556)))
+    await asyncio.gather(first, second)
+    assert n["gen"] == 2 and sent == ["合起来的回答。"], sent
+    msgs = str(CALLS[-1]["messages"])
+    assert "我又没说错" in msgs and "哈哈" in msgs and "第一稿" not in msgs
+    assert ("group_556", 7792) not in p.reply._redo_pending
+
+
+
+
+
+def _fwd_ev(fid="777", text="", uid=7801, mid=8501):
+    m = Message(text) + MessageSegment("forward", {"id": fid}) if text else Message([MessageSegment("forward", {"id": fid})])
+    return PrivateMessageEvent(time=int(time.time()), self_id=123, post_type="message", sub_type="friend",
+        user_id=uid, message_type="private", message_id=mid, message=m, original_message=m, raw_message=str(m),
+        font=0, sender=Sender(user_id=uid, nickname="小周"), to_me=True)
+
+
+_FWD_NODES = [
+    {"sender": {"user_id": 1, "nickname": "阿明"}, "message": [{"type": "text", "data": {"text": "明天去爬山吗"}}]},
+    {"sender": {"user_id": 2, "nickname": "小红", "card": "红红"},
+     "message": [{"type": "text", "data": {"text": "去！带上[伊蕾娜]"}}, {"type": "image", "data": {"file": "a.png"}}]},
+    {"sender": {"user_id": 1, "nickname": "阿明"}, "message": [{"type": "forward", "data": {"id": "inner"}}]},
+]
+
+
+def test_render_forward_1106():
+    """11/06 转发的聊天记录拼成一行：谁说了什么；图片写 [图片]，套娃的写“一段聊天记录”；里面的方括号换成【】"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    got = tx.render_forward(_FWD_NODES)
+    assert got == "[聊天记录（共 3 条）：阿明：明天去爬山吗；红红：去！带上【伊蕾娜】【图片】；阿明：【一段聊天记录】]", got
+    # go-cqhttp 的写法：content 是 CQ 码字符串
+    assert "阿明：你好" in tx.render_forward([{"sender": {"nickname": "阿明"}, "content": "你好[CQ:face,id=1]"}])
+    # 太长：截断；条数太多：只看前几条
+    many = [{"sender": {"nickname": f"人{i}"}, "message": [{"type": "text", "data": {"text": "哈" * 30}}]} for i in range(20)]
+    long = tx.render_forward(many)
+    assert long.startswith("[聊天记录（共 20 条）：") and long.endswith("……]") and len(long) < 240
+    assert tx.render_forward([]) == "" and tx.render_forward(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_forward_1106():
+    """向 NapCat 要内容：要到了放进缓存，之后拼文字就能看到；要不到照旧“看不懂”"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    tx._forward_cache.clear()
+    calls = []
+
+    class FB:
+        async def call_api(self, api, **kw):
+            calls.append((api, kw))
+            if kw.get("id") == "bad" or kw.get("message_id") == "bad":
+                raise RuntimeError("没有这条")
+            return {"messages": _FWD_NODES}
+    ev = _fwd_ev("777", "你们看")
+    assert p.message_to_text(ev.get_message()) == "你们看[聊天记录（看不懂）]"
+    await tx.prefetch_forwards(FB(), ev)
+    assert calls == [("get_forward_msg", {"id": "777"})]
+    assert p.message_to_text(ev.get_message()).startswith("你们看[聊天记录（共 3 条）：阿明：明天去爬山吗")
+    await tx.prefetch_forwards(FB(), ev)
+    assert len(calls) == 1                                    # 缓存了，不再要
+    bad = _fwd_ev("bad")
+    await tx.prefetch_forwards(FB(), bad)
+    assert p.message_to_text(bad.get_message()) == "[聊天记录（看不懂）]"
+    # 消息自己带着内容的版本：不用再要
+    inline = Message([MessageSegment("forward", {"id": "inl", "content": _FWD_NODES[:1]})])
+    ev2 = _fwd_ev("x"); ev2.message = inline
+    n = len(calls)
+    await tx.prefetch_forwards(FB(), ev2)
+    assert len(calls) == n and "阿明：明天去爬山吗" in p.message_to_text(inline)
+    # 关掉：照旧看不懂
+    p.cfg.forward_read = False
+    try:
+        tx._forward_cache.clear()
+        await tx.prefetch_forwards(FB(), ev)
+        assert "看不懂" in p.message_to_text(ev.get_message())
+    finally:
+        p.cfg.forward_read = True
+        tx._forward_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_forward_in_private_reply_1106():
+    """私聊转来一段聊天记录：她看到的是里面的内容；聊天规则里说明这是别人说的话；回长回短不算这段的字数"""
+    import plugins.roleplay_chat as p
+    p.textin._forward_cache.clear()
+    p.client.chat.completions.create = fake_create("爬山啊。")
+
+    class B(_SendBot):
+        async def call_api(self, api, **kw):
+            return {"messages": _FWD_NODES}
+    bot = B()
+    await p.converse(bot, _fwd_ev("888", "你看他们"))
+    msgs = str(CALLS[-1]["messages"])
+    assert "阿明：明天去爬山吗" in msgs and "看不懂" not in msgs.split("聊天规则")[-1].split("你看他们")[-1][:80]
+    assert "转发来的一段聊天" in p.CHAT_RULES
+    th = p.turn_hints
+    fwd = p.textin._forward_cache["888"]
+    assert th.own_text("你看他们" + fwd) == "你看他们" and p.reply_mode(fwd + "哈" * 3) == "short"
+    tiny = p.SHORT_VARIANTS[0][1]
+    assert tiny not in {p.short_hint(fwd) for _ in range(200)}            # 转了聊天记录：不只回几个字
+    p.textin._forward_cache.clear()
 
 
 # ---------------------------------------------------------------- 10/23 对方像另一个机器人：放慢，还这样就一阵子不回
