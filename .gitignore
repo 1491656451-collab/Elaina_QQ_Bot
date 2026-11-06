@@ -155,3 +155,9 @@ docs/识图复杂图测试/复杂图_*.md
 待上传配图/
 待选配图/
 配图出处.json
+
+# 11/06：识图截图测试用的聊天截图（只留说明）、逐张结果和报告；测试工具里抄了她在线上聊天里的原话（部署 agent 加）
+bot/tools/识图截图/*
+!bot/tools/识图截图/说明.txt
+docs/识图截图测试/
+bot/tools/vision_shot_test.py

@@ -37,7 +37,13 @@ KNOWN = {SELF_TAG: SELF_NAME}
 # 11/05 描述只写看到的，不替发图的人猜用意（“在调侃对方”这类判断留给聊天模型结合上下文去做）。
 # 11/05 复杂的图放宽：一般 50 字以内，文字多的图（聊天截图、多格漫画……）可以写到 100 字。
 # 这里是硬上限：模型偶尔写超了，就在这个长度以内最后一个句读处截断
-DESC_MAX = 130
+DESC_MAX = 180   # 11/06 聊天截图可以写到 150 字（原话要抄全，聊天那边拿来对聊天记录），上限从 130 调到 180
+
+# 11/06 聊天截图（聊天 agent《交接-截图认出自己-识图-1106》）：看图模型只把“谁说了什么”抄清楚，原话加引号，不认哪句是她说的。
+# 先试过让它按名字、头像认出她，14 次里错了 6 次（左右弄反、把叫“伊蕾娜”的别人认成她，见《识图截图测试报告-1106》），
+# 用户 11/06 定的：认她交给聊天那边拿引号里的原话对聊天记录
+# 长条图（长比宽 ≥ 2，手机截图都是这样）：本机认人认出伊蕾娜，多半是聊天背景、头像或贴图，不直接算她的画像
+TALL_RATIO = 2.0
 
 DESCRIBE_PROMPT = (
     "用简短的中文描述这张图片，一般不超过 50 字。"
@@ -49,6 +55,11 @@ DESCRIBE_PROMPT = (
     "画出来的人物写成“画中的少女”“画中人”之类，不要用“动漫”“动画”“二次元”“番剧”“角色”这些词。"
     "如果拍的是实物（手办、人偶、玩偶、立牌、雕像之类），开头写明，比如“一尊人偶：……”“一个玩偶：……”，"
     "里面的人物写成“人偶”，不要写成“画中的少女”。"
+    "如果是聊天截图（或聊天记录的截图）：开头写明“群聊截图”或“私聊截图”，然后只写聊天内容——每条消息的文字，"
+    "消息里发的图片、表情包也简单说一下是什么（带花边、图案的气泡框只是气泡样式，里面的字照常当文字抄）；"
+    "聊天背景、手机状态栏、输入框、按钮这些都不写。可以写到 150 字。"
+    "写清每句话是谁说的，原话照抄、加引号：群聊写每条消息上方显示的名字；私聊每条消息没有名字，写“左边”“右边”，"
+    "开头写一句顶部标题（那是左边那位的名字），右边是截图的人。不要用“你”“我”“对方”来称呼截图里的人。"
     "只输出描述本身，不要加“图片中”“这是一张”之类的开头。"
 )
 SELF_HINT = (
@@ -62,6 +73,8 @@ MAYBE_HINT = (
     "但画里也可能穿便服、不戴帽子）。请仔细看：发色、眼睛和整体样子都和她一致，描述就以“伊蕾娜本人的画像”开头；"
     "不像的话就正常描述，不要提伊蕾娜。"
     "拍的是实物（人偶等）时也一样，像她就写“伊蕾娜本人的画像，是一尊人偶，……”。"
+    "如果这是手机截图（聊天界面、网页之类），伊蕾娜只出现在背景、头像或贴图里，就不要用“伊蕾娜本人的画像”开头，"
+    "照截图来写，背景不用提。"
 )
 NOT_SELF_NOTE = "（画的不是你）"
 # 10/25：伊蕾娜分数在这条线以上、又没认成她时，算“拿不准”：不说“画的不是你”，也不把别的角色名告诉看图模型。
@@ -147,6 +160,16 @@ def _readable(tag: str) -> str:
     return f"{name}（{series.replace('_', ' ')}）" if series else name
 
 
+def _is_tall(raw: bytes) -> bool:
+    """长比宽 ≥ TALL_RATIO（只读文件头，不解码）"""
+    try:
+        from PIL import Image
+        w, h = Image.open(io.BytesIO(raw)).size
+        return h >= w * TALL_RATIO
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _clip_desc(desc: str) -> str:
     """超过 DESC_MAX 时在上限以内最后一个句读处截断，免得半个词或半句引号留在里面"""
     if len(desc) <= DESC_MAX:
@@ -164,7 +187,7 @@ def sanitize(desc: str) -> str:
 
 class Vision:
     def __init__(self, client, model: str, cache_file: Path, *, tagger=None, maybe: float = 0.35,
-                 max_bytes: int = 20 * 1024 * 1024, max_tokens: int = 220, timeout: float = 30.0):
+                 max_bytes: int = 20 * 1024 * 1024, max_tokens: int = 300, timeout: float = 30.0):
         self.client = client
         self.maybe = maybe          # 伊蕾娜置信度在 maybe～门槛之间：让 deepseek-flash 再确认一次
         self.model = model
@@ -311,7 +334,10 @@ class Vision:
             entry = self._cache.setdefault(key, {})
             entry["c"], entry["t"], entry["x"] = [], 1, 1
             return tags
-        if SELF_TAG not in tags and self_score >= 0.1:
+        if SELF_TAG in tags and _is_tall(raw):
+            tags = [t for t in tags if t != SELF_TAG]
+            logger.info(f"角色识别：长条图（多半是截图），认出的伊蕾娜（{self_score:.2f}）可能只是背景或头像，交给看图模型再确认")
+        elif SELF_TAG not in tags and self_score >= 0.1:
             how = "交给看图模型再确认" if self_score >= self.maybe else "当作拿不准（不说“画的不是你”）"
             logger.info(f"角色识别：像伊蕾娜但没过门槛（{self_score:.2f}，门槛 {self.tagger.threshold}），{how}")
         if key:

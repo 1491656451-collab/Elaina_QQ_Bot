@@ -75,9 +75,9 @@ def _node_segs(node: dict) -> list[MessageSegment]:
 
 
 def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | None = None, self_id: str = "",
-                   self_names: tuple = ()) -> str:
+                   self_names: tuple = (), said_by_her=None, name_notes: dict | None = None) -> str:
     """拼成一行：[聊天记录（共 N 条）：甲：……；乙：……]。里面的方括号换成【】，免得和外面的标记混在一起。
-    她自己说的（发送人是她的 QQ）写成“你”，她认得出那是自己说过的话（11/06 用户问的）"""
+    她自己说的（发送人是她的 QQ 或昵称）写成“你自己”，她认得出那是自己说过的话（11/06 用户问的）"""
     max_nodes = max_nodes or cfg.forward_max_nodes
     max_chars = max_chars or cfg.forward_max_chars
     nodes = [n for n in nodes or [] if isinstance(n, dict)]
@@ -86,11 +86,7 @@ def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | N
         sender = node.get("sender") or {}
         uid = str(sender.get("user_id") or node.get("user_id") or "")
         nick = str(sender.get("nickname") or node.get("nickname") or "")
-        if (self_id and uid == str(self_id)) or (nick and nick in self_names):   # 聊天记录里常常没有 QQ 号，按她的昵称认
-            who = "你"
-        else:
-            who = _short(sender.get("card") or sender.get("nickname") or node.get("nickname") or uid or "某人", 12)
-        parts = []
+        parts, plain = [], []
         for seg in _node_segs(node):
             if seg.type == "forward":
                 parts.append("[一段聊天记录]")
@@ -98,7 +94,18 @@ def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | N
                 continue
             else:
                 parts.append(seg_text(seg))
+                if seg.type == "text":
+                    plain.append(seg.data.get("text", ""))
         body = re.sub(r"\s+", " ", "".join(parts)).strip() or "（空）"
+        # 认她自己：QQ 号对得上；或者昵称和她一样、而且这句话她确实说过（11/06：聊天记录里没有 QQ 号，
+        # 只按昵称会被同名的人冒充；没有文字的（图片、表情）只能按昵称）
+        said = "".join(plain).strip()
+        if (self_id and uid == str(self_id)) or (nick and nick in self_names and (not said or said_by_her is None or said_by_her(said))):
+            who = "你自己"          # 11/06 只写“你”时，她把这段读成转发的人说的（“里面是你自己说的那两句啊”）
+        else:
+            who = _short(sender.get("card") or sender.get("nickname") or node.get("nickname") or uid or "某人", 12)
+            if name_notes and nick in name_notes:
+                who += name_notes[nick]      # 11/06 按 QQ 昵称对上了群里的人 / 正在跟她说话的人
         body = body.replace("[", "【").replace("]", "】")
         lines.append(f"{who}：{body if len(body) <= 40 else body[:40] + '…'}")
     if not lines:
@@ -130,6 +137,83 @@ def _shape(got) -> str:
 
 
 _self_nick: dict[str, str] = {}
+_NORM_RE = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def _norm(t: str) -> str:
+    return _NORM_RE.sub("", t or "")
+
+
+def _her_texts():
+    """她在各个会话里说过的话（先给已经读进来的，再给硬盘上的）。聊天记录只留最近一段"""
+    from .history import _hist_path, _histories   # 放在这里，免得两个文件互相 import
+    seen = set()
+    for k, h in list(_histories.items()):
+        seen.add(k)
+        for m in h or []:
+            if m.get("role") == "assistant":
+                yield str(m.get("content") or "")
+    try:
+        for p in _hist_path("x").parent.glob("*.json"):
+            if p.stem in seen:
+                continue
+            try:
+                h = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            for m in h or []:
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    yield str(m.get("content") or "")
+    except Exception:  # noqa: BLE001
+        return
+
+
+def said_by_her(text: str) -> bool:
+    """这句话她自己说过没有（转发的聊天记录用）：去掉标点空格后，是她某次说的话的一部分"""
+    want = _norm(text)
+    if len(want) < 2:
+        return True                     # 太短（“嗯”“？”）对不出来，只能按昵称
+    return any(want in _norm(t) for t in _her_texts())
+
+
+# ---- 11/06（识图 agent《交接-截图对聊天记录-聊天-1106》，用户定的：对她在所有聊天里说过的话）
+# 聊天截图的描述里，看图模型把每句原话抄在引号里；能对上她说过的话的，后面标“（你说过）”。
+# 只在拼给她看的文字里加，不写回识图缓存
+_SHOT_QUOTE_RE = re.compile(r"“([^“”]{2,80})”|「([^「」]{2,80})」|\"([^\"]{2,80})\"")
+SHOT_MIN_CHARS = 4               # 去掉标点后不到 4 个字的（“有事？”“下午好”）不对，容易对错
+SHOT_SIMILAR = 0.8               # 看图模型偶尔抄错一两个字：相似度到这个就算
+
+
+def her_quote(q: str, texts: list[str]) -> bool:
+    import difflib
+    qn = _norm(q)
+    if len(qn) < SHOT_MIN_CHARS:
+        return False
+    for t in texts:
+        if qn in _norm(t):
+            return True
+        for line in str(t).split("\n"):
+            ln = _norm(line)
+            if len(ln) >= SHOT_MIN_CHARS and (ln in qn or difflib.SequenceMatcher(None, ln, qn).ratio() >= SHOT_SIMILAR):
+                return True
+    return False
+
+
+def mark_her_lines(desc: str) -> str:
+    """截图描述里能对上她说过的话的原话，后面加“（你说过）”"""
+    if not desc or not _SHOT_QUOTE_RE.search(desc):
+        return desc
+    texts = None
+
+    def sub(m: re.Match) -> str:
+        nonlocal texts
+        q = next(g for g in m.groups() if g is not None)
+        if len(_norm(q)) < SHOT_MIN_CHARS:
+            return m.group(0)
+        if texts is None:
+            texts = list(_her_texts())
+        return m.group(0) + "（你说过）" if her_quote(q, texts) else m.group(0)
+    return _SHOT_QUOTE_RE.sub(sub, desc)
 
 
 async def self_names(bot) -> tuple:
@@ -144,7 +228,7 @@ async def self_names(bot) -> tuple:
     return (_self_nick[sid],) if _self_nick.get(sid) else ()
 
 
-async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
+async def fetch_forward(bot, fid: str, outer_mid=None, name_notes: dict | None = None) -> str:
     """向 NapCat 要这段聊天记录的内容，拼好放进缓存；要不到返回空。
     先 get_forward_msg（id / message_id 两种参数）；还不行就 get_msg 拿外面那条消息，看转发段里有没有带着内容"""
     if not fid:
@@ -182,7 +266,8 @@ async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
                               + (f"，转发段里有 {_shape(fwd[0].get('data'))}" if fwd else ""))
         except Exception as e:  # noqa: BLE001
             shapes.append(f"get_msg 出错：{str(e)[:60]}")
-    text = render_forward(nodes, self_id=self_id, self_names=await self_names(bot) if nodes else ())
+    text = render_forward(nodes, self_id=self_id, self_names=await self_names(bot) if nodes else (), said_by_her=said_by_her,
+                          name_notes=name_notes)
     if not text:
         logger.info(f"聊天记录：要内容没要到（{fid}）：{'；'.join(shapes)[:800]}")
         return ""
@@ -193,6 +278,49 @@ async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
     return text
 
 
+# ---- 11/06 聊天记录里的人和群里的人对上（用户定的：只按 QQ 昵称对，对上了告诉她这个人在群里的群名片）
+_members: dict[int, tuple[float, dict[str, list[dict]]]] = {}   # 群号 -> (什么时候要的, QQ 昵称 -> 群成员)
+MEMBERS_TTL = 1800
+
+
+async def _group_members(bot, gid: int) -> dict[str, list[dict]]:
+    """群成员按 QQ 昵称分好（半小时内不重复要）"""
+    now = time.monotonic()
+    got = _members.get(gid)
+    if got and now - got[0] < MEMBERS_TTL:
+        return got[1]
+    by_nick: dict[str, list[dict]] = {}
+    try:
+        for m in await bot.call_api("get_group_member_list", group_id=gid) or []:
+            if isinstance(m, dict) and m.get("nickname"):
+                by_nick.setdefault(str(m["nickname"]), []).append(m)
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"聊天记录：要群成员没要到（群{gid}）：{e}")
+        return {}
+    _members[gid] = (now, by_nick)
+    return by_nick
+
+
+async def name_notes_for(bot, event: MessageEvent) -> dict[str, str]:
+    """聊天记录里的名字（QQ 昵称）→ 跟在名字后面的说明：
+    正在跟她说话的这个人 →“（就是正在跟你说话的这个人）”；群里的人 →“（群里的群名片是“……”）”/“（群里的人）”。
+    同一个昵称群里有两个人以上，不敢认，不写"""
+    notes: dict[str, str] = {}
+    try:
+        if isinstance(event, GroupMessageEvent):
+            for nick, ms in (await _group_members(bot, event.group_id)).items():
+                if len(ms) != 1 or str(ms[0].get("user_id")) == str(event.self_id):
+                    continue
+                card = str(ms[0].get("card") or "").strip()
+                notes[nick] = f"（群里的群名片是“{_short(card, 12)}”）" if card and card != nick else "（群里的人）"
+        me = str(getattr(event.sender, "nickname", "") or "").strip()
+        if me:
+            notes[me] = "（就是正在跟你说话的这个人）"
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"聊天记录：对名字出错，这次不对：{e}")
+    return notes
+
+
 async def prefetch_forwards(bot, event: MessageEvent) -> None:
     """这条消息（和它引用的消息）里有转发的聊天记录：先把内容要来，后面拼文字时就能看到"""
     if not cfg.forward_read:
@@ -201,6 +329,9 @@ async def prefetch_forwards(bot, event: MessageEvent) -> None:
     reply = getattr(event, "reply", None)
     if reply is not None and getattr(reply, "message", None):
         msgs.append((reply.message, getattr(reply, "message_id", None)))
+    if not any(seg.type == "forward" for msg, _ in msgs for seg in msg):
+        return
+    notes = await name_notes_for(bot, event)
     for msg, mid in msgs:
         for seg in msg:
             if seg.type != "forward":
@@ -209,12 +340,14 @@ async def prefetch_forwards(bot, event: MessageEvent) -> None:
             inline = seg.data.get("content")
             if fid and fid not in _forward_cache and isinstance(inline, list) and inline:
                 text = render_forward(inline, self_id=str(getattr(bot, "self_id", "") or ""),
-                                      self_names=await self_names(bot))   # 有的版本直接带着内容
+                                      self_names=await self_names(bot), said_by_her=said_by_her,
+                                      name_notes=notes)   # 有的版本直接带着内容
                 if text:
                     _forward_cache[fid] = text
+                    logger.info(f"聊天记录（消息里带着）：{text[:60]}")
                     continue
             try:
-                await fetch_forward(bot, fid, mid)
+                await fetch_forward(bot, fid, mid, notes)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"聊天记录：出错，这次不看：{e}")
 
@@ -654,7 +787,7 @@ async def _rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> 
     for seg in msg:
         if seg.type == "image" and budget > 0:
             budget -= 1
-            desc = await vision.describe(seg.data)
+            desc = mark_her_lines(await vision.describe(seg.data))     # 11/06 截图里她说过的话标出来
             parts.append(f"[图片：{desc}]" if desc else "[图片]")
         else:
             parts.append(seg_text(seg))
@@ -662,7 +795,7 @@ async def _rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> 
     reply = getattr(event, "reply", None)
     if reply is not None and budget > 0:
         quoted = [seg for seg in reply.message if seg.type == "image"][:budget]
-        descs = [await vision.describe(seg.data) for seg in quoted]
+        descs = [mark_her_lines(await vision.describe(seg.data)) for seg in quoted]
         descs = [d for d in descs if d]
         if descs:
             text += "（引用了图片：" + "；".join(descs) + "）"

@@ -6418,14 +6418,14 @@ async def test_forward_self_quote_fallback_1106():
     await tx.prefetch_forwards(FB(), ev)
     assert calls == ["get_forward_msg"] * 4 + ["get_msg"]                 # 转发编号两种、外面那条消息编号两种，都要不到再 get_msg
     got = tx._forward_cache["555"]
-    assert "你：才不。" in got and "你：你这算盘打得" in got and "小周：那干脆答应不就好啦" in got and "灰之魔女" not in got
+    assert "你自己：才不。" in got and "你自己：你这算盘打得" in got and "小周（就是正在跟你说话的这个人）：那干脆答应不就好啦" in got and "灰之魔女" not in got
     # 引用这段聊天记录说话：引用里是整段，不截成 30 字
     reply = SimpleNamespace(message=Message([MessageSegment("forward", {"id": "555"})]), message_id=8501,
                             sender=SimpleNamespace(user_id=7801))
     ev2 = _fwd_ev("x", "你这两句跟病娇一样")
     ev2.message = Message("你这两句跟病娇一样"); object.__setattr__(ev2, "reply", reply)
     note = tx.quote_note(ev2)
-    assert "小周：那干脆答应不就好啦" in note and note.startswith("（引用了这个人自己之前发的“[聊天记录")
+    assert "小周（就是正在跟你说话的这个人）：那干脆答应不就好啦" in note and note.startswith("（引用了这个人自己之前发的“[聊天记录")
     tx._forward_cache.clear()
 
 
@@ -6452,7 +6452,7 @@ async def test_forward_by_outer_message_id_1106():
 
 @pytest.mark.asyncio
 async def test_forward_no_uin_self_by_nick_1106():
-    """11/06：聊天记录里没有 QQ 号（打了 NapCat 补丁以后发送人 QQ 号是 0，只有昵称）：按她的 QQ 昵称认出自己"""
+    """11/06：聊天记录里没有 QQ 号（打了 NapCat 补丁以后发送人 QQ 号是 0，只有昵称）：昵称一样、而且这句她确实说过，才认成她自己"""
     import plugins.roleplay_chat as p
     tx = p.textin
     tx._forward_cache.clear(); tx._self_nick.clear()
@@ -6465,9 +6465,26 @@ async def test_forward_no_uin_self_by_nick_1106():
             if api == "get_login_info":
                 return {"user_id": 123, "nickname": "灰之魔女_伊蕾娜"}
             return {"messages": nodes}
+    h = p.get_history("private_7801")
+    h.append({"role": "user", "content": "答应我嘛", "ts": time.time()})
+    h.append({"role": "assistant", "content": "才不。\n你这算盘打得，隔着这么远我都听见了", "ts": time.time()})
     await tx.prefetch_forwards(FB(), _fwd_ev("321"))
     got = tx._forward_cache["321"]
-    assert "你：才不。" in got and "小周：那干脆答应不就好啦" in got, got
+    assert "你自己：才不。" in got and "小周（就是正在跟你说话的这个人）：那干脆答应不就好啦" in got, got
+    # 同名冒充：昵称一样，但这句话她没说过 → 照写昵称，不当成她
+    nodes[0]["message"] = [{"type": "text", "data": {"text": "我最喜欢吃蘑菇了"}}]
+    await tx.prefetch_forwards(FB(), _fwd_ev("322"))
+    got = tx._forward_cache["322"]
+    assert "你自己" not in got and "灰之魔女_伊蕾娜：我最喜欢吃蘑菇了" in got, got
+    # 没文字（只有图片）：只能按昵称
+    nodes[0]["message"] = [{"type": "image", "data": {"file": "x.png"}}]
+    await tx.prefetch_forwards(FB(), _fwd_ev("323"))
+    assert "你自己：【图片】" in tx._forward_cache["323"]
+    # 存在硬盘上、还没读进来的会话里说过的也算
+    p.save_history("private_7801"); p._histories.clear()
+    nodes[0]["message"] = [{"type": "text", "data": {"text": "你这算盘打得"}}]
+    await tx.prefetch_forwards(FB(), _fwd_ev("324"))
+    assert "你自己：你这算盘打得" in tx._forward_cache["324"]
     tx._forward_cache.clear(); tx._self_nick.clear()
 
 
@@ -6489,6 +6506,97 @@ def test_napcat_forward_patch_script_1106(tmp_path):
     g.write_text("别的版本", encoding="utf-8")
     r = subprocess.run([_sys.executable, str(script), str(g)], capture_output=True, text=True)
     assert r.returncode == 1 and g.read_text(encoding="utf-8") == "别的版本"
+
+
+@pytest.mark.asyncio
+async def test_forward_names_link_group_1106():
+    """11/06 用户定的：聊天记录里的人按 QQ 昵称和群里的人对上，告诉她群名片；正在跟她说话的人单独说明；同名的不认"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    tx._forward_cache.clear(); tx._members.clear(); tx._self_nick.clear()
+    nodes = [{"sender": {"user_id": 0, "nickname": "阿明"}, "message": [{"type": "text", "data": {"text": "明天爬山"}}]},
+             {"sender": {"user_id": 0, "nickname": "Rhein丶"}, "message": [{"type": "text", "data": {"text": "不懂"}}]},
+             {"sender": {"user_id": 0, "nickname": "撞名"}, "message": [{"type": "text", "data": {"text": "我也去"}}]},
+             {"sender": {"user_id": 0, "nickname": "路人"}, "message": [{"type": "text", "data": {"text": "路过"}}]},
+             {"sender": {"user_id": 0, "nickname": "小周"}, "message": [{"type": "text", "data": {"text": "成功了"}}]}]
+    calls = []
+
+    class FB:
+        self_id = "123"
+        async def call_api(self, api, **kw):
+            calls.append(api)
+            if api == "get_group_member_list":
+                return [{"user_id": 1, "nickname": "阿明", "card": "明哥"}, {"user_id": 2, "nickname": "Rhein丶", "card": ""},
+                        {"user_id": 3, "nickname": "撞名", "card": "甲"}, {"user_id": 4, "nickname": "撞名", "card": "乙"},
+                        {"user_id": 7801, "nickname": "小周", "card": "周周"}]
+            if api == "get_login_info":
+                return {"nickname": "灰之魔女_伊蕾娜"}
+            return {"messages": nodes}
+    m = Message([MessageSegment("forward", {"id": "g1"})])
+    ev = GroupMessageEvent(time=int(time.time()), self_id=123, post_type="message", sub_type="normal", user_id=7801,
+        message_type="group", message_id=8701, message=m, original_message=m, raw_message="", font=0,
+        sender=Sender(user_id=7801, nickname="小周", card="周周"), to_me=True, group_id=556)
+    await tx.prefetch_forwards(FB(), ev)
+    got = tx._forward_cache["g1"]
+    assert "阿明（群里的群名片是“明哥”）：明天爬山" in got, got
+    assert "Rhein丶（群里的人）：不懂" in got
+    assert "撞名：我也去" in got and "路人：路过" in got                      # 同名两个人不认；不在群里的照写名字
+    assert "小周（就是正在跟你说话的这个人）：成功了" in got
+    # 群成员半小时内不重复要
+    tx._forward_cache.clear()
+    await tx.prefetch_forwards(FB(), ev)
+    assert calls.count("get_group_member_list") == 1
+    # 私聊：只认正在跟她说话的人
+    tx._forward_cache.clear()
+    await tx.prefetch_forwards(FB(), _fwd_ev("p1"))
+    got = tx._forward_cache["p1"]
+    assert "小周（就是正在跟你说话的这个人）：成功了" in got and "阿明：明天爬山" in got
+    tx._forward_cache.clear(); tx._members.clear(); tx._self_nick.clear()
+
+
+def test_mark_her_lines_in_screenshot_1106():
+    """11/06（识图 agent 的交接，用户定的：对她在所有聊天里说过的话）：截图描述里引号中的原话，
+    能对上她说过的话就标“（你说过）”；太短的不对；别人的话不标；看图模型抄错一两个字也算"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    h = p.get_history("private_7811")
+    h.append({"role": "user", "content": "跟我结婚吧", "ts": time.time()})
+    h.append({"role": "assistant", "content": "这台词我听过。\n恕我拒绝。", "ts": time.time()})
+    g = p.get_history("group_5561")
+    g.append({"role": "assistant", "content": "你大哥是谁我都不认识。", "ts": time.time()})
+    p.save_history("group_5561"); p._histories.pop("group_5561")          # 在硬盘上、还没读进来的也算
+    desc = ("私聊截图，标题“灰之魔女_伊蕾娜”。右边说“跟我结婚吧”，左边说“这台词我听过”“恕我拒绝。”；"
+            "群聊里「要不你先说」说“我大哥问你话呢”，「灰之魔女_伊蕾娜」说“你大哥是谁我都不认识”，还说“有事？”")
+    got = tx.mark_her_lines(desc)
+    assert "“这台词我听过”（你说过）" in got and "“恕我拒绝。”（你说过）" in got, got
+    assert "“你大哥是谁我都不认识”（你说过）" in got
+    assert "“跟我结婚吧”（你说过）" not in got and "“我大哥问你话呢”（你说过）" not in got   # 别人说的
+    assert "“有事？”（你说过）" not in got                                    # 太短不对
+    assert "“灰之魔女_伊蕾娜”（你说过）" not in got
+    # 抄错一个字
+    assert "（你说过）" in tx.mark_her_lines("左边说“你大哥是谁我都不认得”")
+    # 没有引号、没有她的话：原样
+    assert tx.mark_her_lines("一只猫在睡觉") == "一只猫在睡觉"
+    assert p.turn_hints.own_text("[图片：左边说“这台词我听过”（你说过）]好") == "好"
+    assert "（你说过）" in p.CHAT_RULES
+
+
+@pytest.mark.asyncio
+async def test_screenshot_marked_in_rich_text_1106(monkeypatch):
+    """收到截图时，描述里她说过的话标出来；识图缓存里的描述不改"""
+    import plugins.roleplay_chat as p
+    h = p.get_history("private_7812")
+    h.append({"role": "assistant", "content": "又在装死了是吧", "ts": time.time()})
+    raw = "私聊截图，左边说“又在装死了是吧”，右边说“没有啦”"
+
+    async def describe(data):
+        return raw
+    monkeypatch.setattr(p.vision, "describe", describe)
+    monkeypatch.setattr(p.cfg, "vision_enabled", True)
+    ev = _img_pev(7812, 8801, "你看这个")
+    text = await p.textin.rich_text(ev, look=True)
+    assert "“又在装死了是吧”（你说过）" in text and "“没有啦”（你说过）" not in text
+    assert raw == "私聊截图，左边说“又在装死了是吧”，右边说“没有啦”"
 
 
 def test_life_focus_place_touched_1106():
