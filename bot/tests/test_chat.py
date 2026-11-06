@@ -6395,6 +6395,53 @@ async def test_forward_in_private_reply_1106():
     p.textin._forward_cache.clear()
 
 
+@pytest.mark.asyncio
+async def test_forward_self_quote_fallback_1106():
+    """11/06 用户测试：转了她自己说的两句，再引用这段说“你这两句跟病娇一样”。
+    她说的写成“你”；get_forward_msg 要不到时改用 get_msg 拿外面那条消息里带的内容；引用聊天记录时不截成 30 字"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    tx._forward_cache.clear()
+    nodes = [{"sender": {"user_id": 123, "nickname": "灰之魔女_伊蕾娜"}, "message": [{"type": "text", "data": {"text": "才不。"}}]},
+             {"sender": {"user_id": 123, "nickname": "灰之魔女_伊蕾娜"}, "message": [{"type": "text", "data": {"text": "你这算盘打得，隔着这么远我都听见了"}}]},
+             {"sender": {"user_id": 7801, "nickname": "小周"}, "message": [{"type": "text", "data": {"text": "那干脆答应不就好啦"}}]}]
+    calls = []
+
+    class FB:
+        self_id = "123"
+        async def call_api(self, api, **kw):
+            calls.append(api)
+            if api == "get_forward_msg":
+                return {"messages": []}                       # 线上 19:12 这样：要不到
+            return {"message": [{"type": "forward", "data": {"id": "555", "content": nodes}}]}
+    ev = _fwd_ev("555")
+    await tx.prefetch_forwards(FB(), ev)
+    assert calls == ["get_forward_msg", "get_forward_msg", "get_msg"]
+    got = tx._forward_cache["555"]
+    assert "你：才不。" in got and "你：你这算盘打得" in got and "小周：那干脆答应不就好啦" in got and "灰之魔女" not in got
+    # 引用这段聊天记录说话：引用里是整段，不截成 30 字
+    reply = SimpleNamespace(message=Message([MessageSegment("forward", {"id": "555"})]), message_id=8501,
+                            sender=SimpleNamespace(user_id=7801))
+    ev2 = _fwd_ev("x", "你这两句跟病娇一样")
+    ev2.message = Message("你这两句跟病娇一样"); object.__setattr__(ev2, "reply", reply)
+    note = tx.quote_note(ev2)
+    assert "小周：那干脆答应不就好啦" in note and note.startswith("（引用了这个人自己之前发的“[聊天记录")
+    tx._forward_cache.clear()
+
+
+def test_life_focus_place_touched_1106():
+    """11/06：“这海这么大？走了几天了都”——没直接问她在哪，但提到了海、几天：在哪要带上（以前没带，她答“我还没走到海边呢”）"""
+    import plugins.roleplay_chat as p
+    th = p.turn_hints
+    d = {"place": {"name": "另一片海边", "status": "现在", "days_here": 9}, "today": [], "related": []}
+    assert th.life_focus(d, "这海这么大？走了几天了都") is d                      # “几天”：算在问她
+    got = th.life_focus(d, "这海这么大", "我刚还想着跟你念叨两句海边的风")
+    assert got and got["place"]["name"] == "另一片海边" and "另一片海边" in th.life_hint(got)
+    assert th.life_focus(d, "你知道 aug 吗") is None                            # 不沾边：照旧不带
+    assert th.life_focus(d, "我走了，拜拜") is None
+    assert th.life_focus(d, "那后来呢", "我刚还想着跟你念叨两句海边的风") is None      # 只是前文提过海：不带
+
+
 # ---------------------------------------------------------------- 10/23 对方像另一个机器人：放慢，还这样就一阵子不回
 def _bot_round_1023(p, ik, quoted=True, gap=3.0, self_id=123):
     """她发完一轮，对方 gap 秒后来一条（quoted：引用了她的话）"""

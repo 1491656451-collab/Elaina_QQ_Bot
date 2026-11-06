@@ -239,7 +239,7 @@ def _life_item(it: dict) -> str:
 # 11/05（《人机感检查-周到型-1105》F）：【你的近况】以前每轮都带，她什么话题都要报一下自己在海边、旅馆的账。
 # 现在：对方问到她（在哪、在干嘛、最近怎样、旅行……）才整段带；别的时候只带和这几句话对得上的那一两件，在哪也不带
 _ASK_LIFE_RE = re.compile(r"在哪|哪儿|哪里|在干|干嘛|干啥|干什么|做什么|在做|忙什么|在忙|忙不忙|最近|今天|这几天|这两天|昨天|"
-                          r"旅行|旅途|旅馆|住哪|住在|去哪|上路|动身|出发|启程|还在|过得|怎么样|吃了|吃什么|天气|下雨|冷不冷|热不热")
+                          r"赶路|路上|几天|多远|到哪|下一站|打算去|旅行|旅途|旅馆|住哪|住在|去哪|上路|动身|出发|启程|还在|过得|怎么样|吃了|吃什么|天气|下雨|冷不冷|热不热")
 LIFE_MATCH_GRAMS = 2      # 不是在问她的时候：近况里的一件事和这几句话至少有几个两字词对得上才带
 
 
@@ -250,7 +250,21 @@ def life_focus(d: dict | None, text: str, recent: str = "") -> dict | None:
     q = _grams(f"{text} {recent}")
     keep = [it for it in list(d.get("today") or []) + list(d.get("related") or [])
             if _related(q, it.get("text", "")) >= LIFE_MATCH_GRAMS]
-    return {"place": None, "today": [], "related": keep} if keep else None   # 打算（plans）也不带：没问到她就别提要走的事
+    # 11/06（1491656451 问“这海这么大？走了几天了都”，没带在哪，她答“我还没走到海边呢”）：
+    # 对方这句话里提到了她所在的那种地方（海、山、镇……），在哪照样带上（只看对方这句，不看前文，免得又一直带）
+    place = d.get("place") if _place_touched(d.get("place"), text) else None
+    if not keep and not place:
+        return None
+    return {"place": place, "today": [], "related": keep}       # 打算（plans）不带：没问到她就别提要走的事
+
+
+_GEO_CHARS = "海湖河溪岛山林谷原漠镇城村港"
+
+
+def _place_touched(place: dict | None, text: str) -> bool:
+    """在哪的名字里的地形字（海、山、镇……）在这几句话里出现了"""
+    name = str((place or {}).get("name") or "")
+    return any(c in name and c in text for c in _GEO_CHARS)
 
 
 def life_hint(d: dict | None) -> str:

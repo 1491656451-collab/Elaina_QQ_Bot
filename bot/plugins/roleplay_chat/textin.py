@@ -74,15 +74,20 @@ def _node_segs(node: dict) -> list[MessageSegment]:
     return out
 
 
-def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | None = None) -> str:
-    """拼成一行：[聊天记录（共 N 条）：甲：……；乙：……]。里面的方括号换成【】，免得和外面的标记混在一起"""
+def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | None = None, self_id: str = "") -> str:
+    """拼成一行：[聊天记录（共 N 条）：甲：……；乙：……]。里面的方括号换成【】，免得和外面的标记混在一起。
+    她自己说的（发送人是她的 QQ）写成“你”，她认得出那是自己说过的话（11/06 用户问的）"""
     max_nodes = max_nodes or cfg.forward_max_nodes
     max_chars = max_chars or cfg.forward_max_chars
     nodes = [n for n in nodes or [] if isinstance(n, dict)]
     lines = []
     for node in nodes[:max_nodes]:
         sender = node.get("sender") or {}
-        who = _short(sender.get("card") or sender.get("nickname") or node.get("nickname") or sender.get("user_id") or "某人", 12)
+        uid = str(sender.get("user_id") or node.get("user_id") or "")
+        if self_id and uid == str(self_id):
+            who = "你"
+        else:
+            who = _short(sender.get("card") or sender.get("nickname") or node.get("nickname") or uid or "某人", 12)
         parts = []
         for seg in _node_segs(node):
             if seg.type == "forward":
@@ -104,22 +109,59 @@ def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | N
     return f"[聊天记录（共 {len(nodes)} 条）：{text}]"
 
 
-async def fetch_forward(bot, fid: str) -> str:
-    """向 NapCat 要这段聊天记录的内容，拼好放进缓存；要不到返回空"""
+def _nodes_of(got) -> list:
+    """get_forward_msg 返回的几种样子：{"messages": [...]}、{"message": [...]}、直接一个列表"""
+    if isinstance(got, list):
+        return got
+    if isinstance(got, dict):
+        for k in ("messages", "message", "content", "nodes"):
+            if isinstance(got.get(k), list):
+                return got[k]
+    return []
+
+
+def _shape(got) -> str:
+    """要不到内容时，记一下 NapCat 回的是什么样子（只记结构，不记内容）"""
+    if isinstance(got, dict):
+        return "{" + ", ".join(f"{k}:{type(v).__name__}" + (f"[{len(v)}]" if isinstance(v, (list, str)) else "") for k, v in list(got.items())[:8]) + "}"
+    return type(got).__name__ + (f"[{len(got)}]" if isinstance(got, (list, str)) else "")
+
+
+async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
+    """向 NapCat 要这段聊天记录的内容，拼好放进缓存；要不到返回空。
+    先 get_forward_msg（id / message_id 两种参数）；还不行就 get_msg 拿外面那条消息，看转发段里有没有带着内容"""
     if not fid:
         return ""
     if fid in _forward_cache:
         return _forward_cache[fid]
-    got = None
+    self_id = str(getattr(bot, "self_id", "") or "")
+    nodes, shapes = [], []
     for kw in ({"id": fid}, {"message_id": fid}):
         try:
             got = await bot.call_api("get_forward_msg", **kw)
-            break
         except Exception as e:  # noqa: BLE001
-            logger.info(f"聊天记录：要内容没要到（{list(kw)[0]}）：{e}")
-    nodes = (got.get("messages") or got.get("message")) if isinstance(got, dict) else got
-    text = render_forward(nodes if isinstance(nodes, list) else [])
+            shapes.append(f"get_forward_msg({list(kw)[0]}) 出错：{str(e)[:60]}")
+            continue
+        nodes = _nodes_of(got)
+        if nodes:
+            break
+        shapes.append(f"get_forward_msg({list(kw)[0]}) 回的是 {_shape(got)}")
+    if not nodes and outer_mid is not None:
+        try:
+            got = await bot.call_api("get_msg", message_id=outer_mid)
+            segs = (got or {}).get("message") if isinstance(got, dict) else None
+            for x in segs or []:
+                if isinstance(x, dict) and x.get("type") == "forward":
+                    nodes = _nodes_of((x.get("data") or {}).get("content"))
+                    if nodes:
+                        break
+            if not nodes:
+                shapes.append(f"get_msg 回的是 {_shape(got)}")
+        except Exception as e:  # noqa: BLE001
+            shapes.append(f"get_msg 出错：{str(e)[:60]}")
+    text = render_forward(nodes, self_id=self_id)
     if not text:
+        logger.info(f"聊天记录：要内容没要到（{fid}）：{'；'.join(shapes)[:300]}")
         return ""
     if len(_forward_cache) >= _FORWARD_CACHE_MAX:
         _forward_cache.pop(next(iter(_forward_cache)))
@@ -132,23 +174,23 @@ async def prefetch_forwards(bot, event: MessageEvent) -> None:
     """这条消息（和它引用的消息）里有转发的聊天记录：先把内容要来，后面拼文字时就能看到"""
     if not cfg.forward_read:
         return
-    msgs = [event.get_message()]
+    msgs = [(event.get_message(), getattr(event, "message_id", None))]
     reply = getattr(event, "reply", None)
     if reply is not None and getattr(reply, "message", None):
-        msgs.append(reply.message)
-    for msg in msgs:
+        msgs.append((reply.message, getattr(reply, "message_id", None)))
+    for msg, mid in msgs:
         for seg in msg:
             if seg.type != "forward":
                 continue
             fid = str(seg.data.get("id") or "")
             inline = seg.data.get("content")
             if fid and fid not in _forward_cache and isinstance(inline, list) and inline:
-                text = render_forward(inline)              # 有的版本直接带着内容
+                text = render_forward(inline, self_id=str(getattr(bot, "self_id", "") or ""))   # 有的版本直接带着内容
                 if text:
                     _forward_cache[fid] = text
                     continue
             try:
-                await fetch_forward(bot, fid)
+                await fetch_forward(bot, fid, mid)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"聊天记录：出错，这次不看：{e}")
 
@@ -545,8 +587,10 @@ def quote_note(event: MessageEvent) -> str:
     quoted = re.sub(r"\s+", " ", message_to_text(reply.message)).strip()
     if not quoted:
         return ""
-    if len(quoted) > QUOTE_MAX_CHARS:
-        quoted = quoted[:QUOTE_MAX_CHARS] + "…"
+    has_fwd = any(seg.type == "forward" and str(seg.data.get("id") or "") in _forward_cache for seg in reply.message)
+    cap = cfg.forward_max_chars + 30 if has_fwd else QUOTE_MAX_CHARS      # 11/06 引用的是聊天记录：整段给她看，不截成 30 字
+    if len(quoted) > cap:
+        quoted = quoted[:cap] + "…"
     quoted = clean_body(quoted)
     who = str(getattr(reply.sender, "user_id", ""))
     if who == str(event.self_id):
