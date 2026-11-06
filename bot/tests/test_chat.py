@@ -6348,19 +6348,19 @@ async def test_fetch_forward_1106():
     ev = _fwd_ev("777", "你们看")
     assert p.message_to_text(ev.get_message()) == "你们看[聊天记录（看不懂）]"
     await tx.prefetch_forwards(FB(), ev)
-    assert calls == [("get_forward_msg", {"id": "777"})]
+    assert [c for c in calls if c[0] != "get_login_info"] == [("get_forward_msg", {"id": "777"})]
     assert p.message_to_text(ev.get_message()).startswith("你们看[聊天记录（共 3 条）：阿明：明天去爬山吗")
     await tx.prefetch_forwards(FB(), ev)
-    assert len(calls) == 1                                    # 缓存了，不再要
+    assert len([c for c in calls if c[0] != "get_login_info"]) == 1      # 缓存了，不再要
     bad = _fwd_ev("bad")
     await tx.prefetch_forwards(FB(), bad)
     assert p.message_to_text(bad.get_message()) == "[聊天记录（看不懂）]"
     # 消息自己带着内容的版本：不用再要
     inline = Message([MessageSegment("forward", {"id": "inl", "content": _FWD_NODES[:1]})])
     ev2 = _fwd_ev("x"); ev2.message = inline
-    n = len(calls)
+    n = len([c for c in calls if c[0] != "get_login_info"])
     await tx.prefetch_forwards(FB(), ev2)
-    assert len(calls) == n and "阿明：明天去爬山吗" in p.message_to_text(inline)
+    assert len([c for c in calls if c[0] != "get_login_info"]) == n and "阿明：明天去爬山吗" in p.message_to_text(inline)
     # 关掉：照旧看不懂
     p.cfg.forward_read = False
     try:
@@ -6448,6 +6448,47 @@ async def test_forward_by_outer_message_id_1106():
     assert "阿明：明天去爬山吗" in tx._forward_cache["999"]
     assert seen[-1] == ("get_forward_msg", {"message_id": 8601})
     tx._forward_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_forward_no_uin_self_by_nick_1106():
+    """11/06：聊天记录里没有 QQ 号（打了 NapCat 补丁以后发送人 QQ 号是 0，只有昵称）：按她的 QQ 昵称认出自己"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    tx._forward_cache.clear(); tx._self_nick.clear()
+    nodes = [{"user_id": 0, "sender": {"user_id": 0, "nickname": "灰之魔女_伊蕾娜"}, "message": [{"type": "text", "data": {"text": "才不。"}}]},
+             {"user_id": 0, "sender": {"user_id": 0, "nickname": "小周"}, "message": [{"type": "text", "data": {"text": "那干脆答应不就好啦"}}]}]
+
+    class FB:
+        self_id = "123"
+        async def call_api(self, api, **kw):
+            if api == "get_login_info":
+                return {"user_id": 123, "nickname": "灰之魔女_伊蕾娜"}
+            return {"messages": nodes}
+    await tx.prefetch_forwards(FB(), _fwd_ev("321"))
+    got = tx._forward_cache["321"]
+    assert "你：才不。" in got and "小周：那干脆答应不就好啦" in got, got
+    tx._forward_cache.clear(); tx._self_nick.clear()
+
+
+def test_napcat_forward_patch_script_1106(tmp_path):
+    """NapCat 补丁脚本：找得到那一行才改、先备份、能恢复；找不到就什么都不改"""
+    import subprocess, sys as _sys
+    script = Path(__file__).resolve().parent / "tools" / "napcat_forward_patch.py"
+    if not script.exists():
+        script = Path(__file__).resolve().parents[1] / "tools" / "napcat_forward_patch.py"
+    src = 'x = async function(){ return (await Promise.all(e.map(async (o) => (o.parentMsgPeer = n, o.parentMsgIdList = r, o.id = rt.createUniqueMsgId(n, o.msgId), await this.parseMessage(o, "array", !0))))).filter((o) => o !== void 0); };\n'
+    f = tmp_path / "napcat.mjs"
+    f.write_text(src, encoding="utf-8")
+    r = subprocess.run([_sys.executable, str(script), str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "qqbot-forward-patch" in f.read_text(encoding="utf-8") and (tmp_path / "napcat.mjs.bak_forward").exists()
+    r = subprocess.run([_sys.executable, str(script), str(f), "--revert"], capture_output=True, text=True)
+    assert r.returncode == 0 and f.read_text(encoding="utf-8") == src
+    g = tmp_path / "other.mjs"
+    g.write_text("别的版本", encoding="utf-8")
+    r = subprocess.run([_sys.executable, str(script), str(g)], capture_output=True, text=True)
+    assert r.returncode == 1 and g.read_text(encoding="utf-8") == "别的版本"
 
 
 def test_life_focus_place_touched_1106():

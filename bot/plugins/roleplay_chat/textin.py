@@ -74,7 +74,8 @@ def _node_segs(node: dict) -> list[MessageSegment]:
     return out
 
 
-def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | None = None, self_id: str = "") -> str:
+def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | None = None, self_id: str = "",
+                   self_names: tuple = ()) -> str:
     """拼成一行：[聊天记录（共 N 条）：甲：……；乙：……]。里面的方括号换成【】，免得和外面的标记混在一起。
     她自己说的（发送人是她的 QQ）写成“你”，她认得出那是自己说过的话（11/06 用户问的）"""
     max_nodes = max_nodes or cfg.forward_max_nodes
@@ -84,7 +85,8 @@ def render_forward(nodes: list, max_nodes: int | None = None, max_chars: int | N
     for node in nodes[:max_nodes]:
         sender = node.get("sender") or {}
         uid = str(sender.get("user_id") or node.get("user_id") or "")
-        if self_id and uid == str(self_id):
+        nick = str(sender.get("nickname") or node.get("nickname") or "")
+        if (self_id and uid == str(self_id)) or (nick and nick in self_names):   # 聊天记录里常常没有 QQ 号，按她的昵称认
             who = "你"
         else:
             who = _short(sender.get("card") or sender.get("nickname") or node.get("nickname") or uid or "某人", 12)
@@ -127,6 +129,21 @@ def _shape(got) -> str:
     return type(got).__name__ + (f"[{len(got)}]" if isinstance(got, (list, str)) else "")
 
 
+_self_nick: dict[str, str] = {}
+
+
+async def self_names(bot) -> tuple:
+    """她自己的 QQ 昵称（问一次 NapCat 就记住）"""
+    sid = str(getattr(bot, "self_id", "") or "")
+    if sid not in _self_nick:
+        try:
+            info = await bot.call_api("get_login_info")
+            _self_nick[sid] = str((info or {}).get("nickname") or "")
+        except Exception:  # noqa: BLE001
+            return ()
+    return (_self_nick[sid],) if _self_nick.get(sid) else ()
+
+
 async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
     """向 NapCat 要这段聊天记录的内容，拼好放进缓存；要不到返回空。
     先 get_forward_msg（id / message_id 两种参数）；还不行就 get_msg 拿外面那条消息，看转发段里有没有带着内容"""
@@ -165,7 +182,7 @@ async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
                               + (f"，转发段里有 {_shape(fwd[0].get('data'))}" if fwd else ""))
         except Exception as e:  # noqa: BLE001
             shapes.append(f"get_msg 出错：{str(e)[:60]}")
-    text = render_forward(nodes, self_id=self_id)
+    text = render_forward(nodes, self_id=self_id, self_names=await self_names(bot) if nodes else ())
     if not text:
         logger.info(f"聊天记录：要内容没要到（{fid}）：{'；'.join(shapes)[:800]}")
         return ""
@@ -191,7 +208,8 @@ async def prefetch_forwards(bot, event: MessageEvent) -> None:
             fid = str(seg.data.get("id") or "")
             inline = seg.data.get("content")
             if fid and fid not in _forward_cache and isinstance(inline, list) and inline:
-                text = render_forward(inline, self_id=str(getattr(bot, "self_id", "") or ""))   # 有的版本直接带着内容
+                text = render_forward(inline, self_id=str(getattr(bot, "self_id", "") or ""),
+                                      self_names=await self_names(bot))   # 有的版本直接带着内容
                 if text:
                     _forward_cache[fid] = text
                     continue
