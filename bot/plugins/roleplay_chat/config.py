@@ -25,6 +25,8 @@ class Config(BaseModel):
     forward_max_nodes: int = 8            # 一段聊天记录最多给她看前几条
     forward_max_chars: int = 200          # 一段聊天记录拼出来最多多少字
     vision_in_peak: bool = False          # 高峰时段也看图吗（默认不看，省钱）
+    vision_chat_sees_image: bool = False  # 11/06 方案 A：回复这一轮把原图也给聊天模型看（描述照写，聊天记录里只存描述）；测完再开
+    vision_chat_max_images: int = 2       # 这一轮最多带几张原图
     vision_cache: str = "data/vision_cache.json"   # 同一张图只看一次
     # 本机角色识别（WD14 Tagger）：认出画里是不是伊蕾娜。第一次启动自动下载模型（约 470 MB）
     vision_tagger: bool = True

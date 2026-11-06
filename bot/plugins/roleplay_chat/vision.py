@@ -42,6 +42,10 @@ DESC_MAX = 180   # 11/06 聊天截图可以写到 150 字（原话要抄全，�
 # 11/06 聊天截图（聊天 agent《交接-截图认出自己-识图-1106》）：看图模型只把“谁说了什么”抄清楚，原话加引号，不认哪句是她说的。
 # 先试过让它按名字、头像认出她，14 次里错了 6 次（左右弄反、把叫“伊蕾娜”的别人认成她，见《识图截图测试报告-1106》），
 # 用户 11/06 定的：认她交给聊天那边拿引号里的原话对聊天记录
+# 11/06 底片比对（selfmatch.py）：和她自己表情库 / 说说图库里某张是同一张图，就算她（用户说这两个库只放她的图）。
+# 管本机认人认不出的近脸截图、便服图。相对 bot 目录；设成空列表就关掉
+SELF_LIBRARY_DIRS = ["data/stickers", "qzone/images"]
+_BOT_DIR = Path(__file__).resolve().parents[2]
 # 长条图（长比宽 ≥ 2，手机截图都是这样）：本机认人认出伊蕾娜，多半是聊天背景、头像或贴图，不直接算她的画像
 TALL_RATIO = 2.0
 
@@ -197,6 +201,8 @@ class Vision:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self._raw: OrderedDict[str, bytes] = OrderedDict()   # 最近下载过的几张图，免得刚识别完角色又重新下载
+        self.library_dirs = [_BOT_DIR / d for d in SELF_LIBRARY_DIRS]   # 底片比对用的图库（测试里可以换）
+        self._library = None
         self._cache: dict[str, dict] = {}
         try:
             data = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -337,13 +343,36 @@ class Vision:
         if SELF_TAG in tags and _is_tall(raw):
             tags = [t for t in tags if t != SELF_TAG]
             logger.info(f"角色识别：长条图（多半是截图），认出的伊蕾娜（{self_score:.2f}）可能只是背景或头像，交给看图模型再确认")
-        elif SELF_TAG not in tags and self_score >= 0.1:
+        lib_hit = None
+        if SELF_TAG not in tags:
+            lib_hit = await self._library_match(raw)
+            if lib_hit:
+                tags = [SELF_TAG] + tags
+                logger.info(f"底片比对：和她图库里的 {lib_hit[0]} 是同一张图（指纹差 {lib_hit[1]}/{lib_hit[2]} 位），算她")
+        if SELF_TAG not in tags and self_score >= 0.1:
             how = "交给看图模型再确认" if self_score >= self.maybe else "当作拿不准（不说“画的不是你”）"
             logger.info(f"角色识别：像伊蕾娜但没过门槛（{self_score:.2f}，门槛 {self.tagger.threshold}），{how}")
         if key:
             entry = self._cache.setdefault(key, {})
             entry["c"], entry["t"], entry["s"] = tags, 1, round(self_score, 3)
+            if lib_hit:
+                entry["lib"] = lib_hit[0]
+            else:
+                entry.pop("lib", None)
         return tags
+
+    async def _library_match(self, raw: bytes):
+        """底片比对：和她图库里哪张是同一张图，返回 (文件, pHash 差, dHash 差)；对不上 / 出错返回 None"""
+        if not self.library_dirs:
+            return None
+        try:
+            if self._library is None:
+                from .selfmatch import Library
+                self._library = Library(self.library_dirs, self.cache_file.with_name("self_hashes.json"), log=logger.info)
+            return await asyncio.to_thread(self._library.match, raw)
+        except Exception as e:  # noqa: BLE001   比对出错不能影响认人
+            logger.warning(f"底片比对：出错，这张跳过：{e}")
+            return None
 
     async def shows_self(self, data: dict) -> bool:
         """这张图画的是不是伊蕾娜。只用本机的角色识别，不调用 DeepSeek；识别没准备好就当“不是”"""
@@ -364,6 +393,32 @@ class Vision:
         return bool(tags) and SELF_TAG in tags
 
     # ------------------------------------------------------------ 描述
+    async def image_part(self, data: dict) -> dict | None:
+        """11/06 聊天模型直接看图（方案 A，《方案-聊天模型直接看图-1106》）：给一张图（OneBot image 段的 data），
+        返回能直接放进聊天消息的图片部分 {"type": "image_url", ...}。用的是看图时已经缩好的那份（有就不重新下载）；
+        太大、下载失败、格式不认识时返回 None，这张就只给描述。不调模型、不改缓存"""
+        key = self.cache_key(data)
+        raw = await self._get_raw(data, key)
+        mime = _mime(raw) if raw else None
+        if not mime:
+            return None
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(raw).decode()}"}}
+
+    async def image_parts(self, datas: list[dict], limit: int = 2) -> list[dict]:
+        """几张图依次取 image_part，最多 limit 张，取不到的跳过"""
+        out = []
+        for d in datas:
+            if len(out) >= limit:
+                break
+            try:
+                part = await self.image_part(d)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"识图：给聊天模型带原图失败，这张只给描述：{e}")
+                part = None
+            if part:
+                out.append(part)
+        return out
+
     async def describe(self, data: dict) -> str | None:
         """data 是 OneBot image 段的 data（含 url / file）。返回一句描述；失败返回 None。
         本机认过、确定画的不是伊蕾娜、画里又有人时，末尾加「（画的不是你）」；

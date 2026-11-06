@@ -92,7 +92,7 @@ def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) 
         done.append("语音标记")
     text = step("开头前缀", text, _PREFIX_RE.sub("", text))
     text = step("重名记号", text, re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text))     # 重名记号“小明#2”：她说出来时去掉
-    text = step("提示抄进括号", text, _META_PAREN_RE.sub("", text).strip())                   # 抄进来的提示说明
+    text = step("提示抄进括号", text, _LEN_PAREN_RE.sub("", _META_PAREN_RE.sub("", text)).strip())   # 抄进来的提示说明、篇幅说明
     no_action = re.sub(r"\n{3,}", "\n\n", _ACTION_PAREN_RE.sub("", text)).strip()
     if no_action:                         # 括号里写的纯动作（“（过了两秒）”“（打了个哈欠）”）：去掉；整条只有动作就不动
         text = step("动作括号", text, no_action)
@@ -163,6 +163,9 @@ _ACTION_PAREN_RE = re.compile(r"[（(][…\s]*(?:过了\s*(?:[一两三几半十
 
 
 _META_PAREN_RE = re.compile(r"[（(][^（）()]{0,60}(?:对方|这轮|回复|提示|系统|规则|人设)[^（）()]{0,60}[）)]")
+# 11/06 22:51 说说结尾抄了一句篇幅要求“（文字，约一百五十字。）”：括号里只是在说写了多少字、是什么文体的，也去掉
+_LEN_PAREN_RE = re.compile(r"[（(]\s*(?:(?:文字|正文|文案|篇幅|字数|全文|共|约|大约|大概)[，,、：:\s]*)*"
+                           r"(?:约|大约|大概)?\s*[\d一二两三四五六七八九十百千～~\-—至到]+\s*字(?:左右|以内|上下)?[。.]?\s*[）)]")
 
 
 # 调模型时一写到“【”就停：她的回复里本来不该有“【名字】”，写出来多半是开始照着聊天记录的格式替别人说话了（10/01）

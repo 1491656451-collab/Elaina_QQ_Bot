@@ -2785,6 +2785,37 @@ async def test_vision_only_after_decided(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_sees_image_1106(monkeypatch):
+    """11/06 方案 A：开关打开时，回复这一轮把原图附在最后那条消息里，本轮提示里加【原图】那句；
+    聊天记录里还是纯文字；开关关着照旧只给描述；下一轮不再带图"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.vision, "_download_sync", lambda url: PNG)
+    p.client.chat.completions.create = fake_create("嗯。")
+    bot = _SendBot()
+    # 关着：照旧
+    await p.converse(bot, _img_pev(8511, 4501))
+    assert CALLS[-1]["messages"][-1]["content"] == "你看[图片：一只橘猫趴在键盘上]"
+    # 打开
+    monkeypatch.setattr(p.cfg, "vision_chat_sees_image", True)
+    await p.converse(bot, _img_pev(8512, 4502))
+    last = CALLS[-1]["messages"][-1]["content"]
+    assert isinstance(last, list) and last[0] == {"type": "text", "text": "你看[图片：一只橘猫趴在键盘上]"}
+    assert last[1]["type"] == "image_url" and last[1]["image_url"]["url"].startswith("data:image/")
+    assert "【原图】" in CALLS[-1]["messages"][-2]["content"] and "伊蕾娜本人的画像" in p.prompts.VISION_SEES_HINT
+    assert p.get_history("private_8512")[0]["content"] == "你看[图片：一只橘猫趴在键盘上]"      # 记录里是文字
+    # 下一轮没发图：不带
+    await p.converse(bot, pev("那只猫好胖", uid=8512, mid=4503))
+    assert isinstance(CALLS[-1]["messages"][-1]["content"], str)
+    assert "【原图】" not in CALLS[-1]["messages"][-2]["content"]
+    # 取不到原图：只给描述
+    async def none_parts(datas, limit=2):
+        return []
+    monkeypatch.setattr(p.vision, "image_parts", none_parts)
+    await p.converse(bot, _img_pev(8513, 4504))
+    assert isinstance(CALLS[-1]["messages"][-1]["content"], str)
+
+
+@pytest.mark.asyncio
 async def test_vision_merged_messages(monkeypatch):
     import plugins.roleplay_chat as p
     monkeypatch.setattr(p.vision, "_download_sync", lambda url: PNG)
@@ -6597,6 +6628,18 @@ async def test_screenshot_marked_in_rich_text_1106(monkeypatch):
     text = await p.textin.rich_text(ev, look=True)
     assert "“又在装死了是吧”（你说过）" in text and "“没有啦”（你说过）" not in text
     assert raw == "私聊截图，左边说“又在装死了是吧”，右边说“没有啦”"
+
+
+def test_length_note_paren_removed_1106():
+    """11/06 22:51 说说结尾抄了篇幅要求“（文字，约一百五十字。）”：发前清理去掉；括号心声、别的小括号不动"""
+    import plugins.roleplay_chat as p
+    cr = p.textout.clean_reply
+    assert cr("……倒好像有点盼着下一回再被他夸了呢。（文字，约一百五十字。）") == "……倒好像有点盼着下一回再被他夸了呢。"
+    for t in ("（约150字）", "（100～200字）", "（字数：一百二十字左右）"):
+        assert cr("今天走了很远的路。" + t) == "今天走了很远的路。", t
+    assert cr("好吧（小声）") == "好吧（小声）"
+    assert "（写了好几个字）" in cr("今天写了不少（写了好几个字）")
+    assert "（这人还真敢说啊。）" in cr("是喔。（这人还真敢说啊。）")
 
 
 def test_life_focus_place_touched_1106():

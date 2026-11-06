@@ -17,10 +17,10 @@ from . import budget, commands, core, peak, quota, sleep, stickers, story, voice
 from .oocheck import ooc_words
 from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
-from .prompts import FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
+from .prompts import FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
 from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
-from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
+from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, image_datas, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
 from .textout import CHAT_STOP, clean_reply, cut_derailed, drop_ooc_sentences, is_fragment, speaker_names, split_bubbles, split_sticker
 from .quota import _active_chats, _count_sent, _crossed_mid_chat, _farewell_at, _global_window, _hour_window, _last_trigger, _refund, _wrapup, bubble_gap, in_wrapup, quota_left, rate_limited, say_farewells, say_tired, typing_delay, WRAPUP_EXTRA, WRAPUP_MINUTES
 from .voice_chat import _voice_count, split_voice_mark, tts, tts_ready, voice_day, voice_roll, voice_text, voice_wav_seconds
@@ -73,8 +73,12 @@ def has_images(event: MessageEvent) -> bool:
     return reply is not None and any(seg.type == "image" for seg in reply.message)
 
 
+_turn_images: dict[tuple[str, int], list[dict]] = {}     # 11/06 这一轮看过的图（发给聊天模型时附原图用）
+
+
 def _take_inbox(ik: tuple[str, int]) -> list[str]:
     _look_later.pop(ik, None)
+    _turn_images.pop(ik, None)
     return _inbox.pop(ik, [])
 
 
@@ -87,6 +91,7 @@ async def look_at_images(ik: tuple[str, int], drop_at: bool) -> None:
             continue
         try:
             box[pos] = await rich_text(ev, look=True, drop_at=drop_at) or box[pos]
+            _turn_images.setdefault(ik, []).extend(image_datas(ev))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"看图失败，按没看处理：{e}")
 
@@ -538,9 +543,11 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
 async def _build_prompt(turn: SimpleNamespace) -> bool:
     """② 拼提示（在会话锁里）。收件箱已经被前一条合并回复过了就返回 False"""
     event, key, ik, is_group, busy, catchup_age, target = turn.event, turn.key, turn.ik, turn.is_group, turn.busy, turn.catchup_age, turn.target
+    imgs = _turn_images.pop(ik, [])   # 先拿图（_take_inbox 会清掉）
     texts = _take_inbox(ik)
     if not texts:                     # 已经被前一条合并回复过了
         return False
+    turn.image_datas = imgs
     woke_items = _woke.pop(ik, None)              # 10/24 收件箱最前面几段是她睡着时收到的（带着收到的时间）
     woke = woke_items[0][1] if woke_items else None
     _reply_started[ik] = time.monotonic()
@@ -677,6 +684,18 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
         + recall_msg          # 长期记忆和回忆只放在本轮，不写进聊天记忆
         + new_entries[-1:]
     )
+    # 11/06 方案 A：这一轮看过的图，原图也附在最后那条消息里给她看（聊天记录里照旧只存文字描述）
+    if cfg.vision_chat_sees_image and getattr(turn, "image_datas", None):
+        try:
+            parts = await core.vision.image_parts(turn.image_datas, cfg.vision_chat_max_images)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"带原图失败，这轮只给描述：{e}")
+            parts = []
+        if parts:
+            last = messages[-1]
+            messages[-1] = {"role": last["role"], "content": [{"type": "text", "text": last["content"]}] + parts}
+            messages[-2] = {"role": "system", "content": messages[-2]["content"] + "\n\n" + VISION_SEES_HINT}
+            logger.info(f"这一轮给聊天模型带了 {len(parts)} 张原图：{key}")
     turn.__dict__.update(text=text, name=name, history=history, new_entries=new_entries, seq_at_trigger=seq_at_trigger,
                          memo=memo, mode=mode, fam=fam, bread_first=bread_first, use_sticker=use_sticker,
                          sticker_allowed=sticker_allowed, voice_auto=voice_auto, voice_memo=voice_memo, messages=messages,
@@ -894,6 +913,8 @@ def _drop_for_redo(turn: SimpleNamespace) -> None:
                 break
     save_history(key)
     _inbox[ik][:0] = turn.texts
+    if getattr(turn, "image_datas", None):
+        _turn_images[ik] = list(turn.image_datas) + _turn_images.get(ik, [])     # 重想时图也带上
     _refund(turn.stamp, turn.gid_q, turn.uid_q)
     _redo_count[ik] = _redo_count.get(ik, 0) + 1
     _redo_skip_wait.add(ik)

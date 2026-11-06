@@ -161,3 +161,12 @@ bot/tools/识图截图/*
 !bot/tools/识图截图/说明.txt
 docs/识图截图测试/
 bot/tools/vision_shot_test.py
+
+# 11/06 晚：看图对比的题目和结果引了线上私聊原话；底片比对的对照图是别人的表情包（只留说明）及逐次原始结果（部署 agent 加）
+bot/tools/image_chat_cases.json
+docs/看图对比/
+docs/看图对比报告-*.md
+bot/tools/底片比对对照图/*
+!bot/tools/底片比对对照图/说明.txt
+docs/识图底片比对测试/底片比对_*.md
+bot/data/self_hashes.json

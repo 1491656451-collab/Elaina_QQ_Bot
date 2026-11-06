@@ -757,6 +757,16 @@ def quote_note(event: MessageEvent) -> str:
     return f"（回复的是“{quoted}”）"      # 群里回复别人：是谁已经写在开头的“→ 某某（回复）”里
 
 
+def image_datas(event: MessageEvent) -> list[dict]:
+    """11/06 这条消息里会被看的那几张图（和 _rich_text 看图的顺序、张数一样：先消息里的，再引用里的）"""
+    budget = cfg.vision_max_images
+    out = [seg.data for seg in event.get_message() if seg.type == "image"][:budget]
+    reply = getattr(event, "reply", None)
+    if reply is not None and len(out) < budget:
+        out += [seg.data for seg in reply.message if seg.type == "image"][:budget - len(out)]
+    return out
+
+
 async def rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> str:
     """和 message_to_text 一样，但会“看”图片，把 [图片] 换成 [图片：描述]；引用的消息里有图也会看。
     对方回复（引用）了某句话时，前面注一句回复的是哪句。drop_at=True：去掉 @ 段（群聊里 @ 谁写在说话人后面）"""

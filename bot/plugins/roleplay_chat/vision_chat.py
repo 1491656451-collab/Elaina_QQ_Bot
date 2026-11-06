@@ -45,7 +45,7 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
     judged = "管理员指定" + ("是" if e["o"] else "不是") + "伊蕾娜" if "o" in e else ("算伊蕾娜" if vision.is_self(e) else "不算伊蕾娜")
     lines = [
         f"本机识别：{who}（伊蕾娜置信度 {e.get('s', 0):.2f}，门槛 {cfg.vision_tagger_threshold}，再确认线 {cfg.vision_tagger_maybe}）" if e.get("t") else "本机识别：还没认过（模型没准备好时看的图）",
-        f"结论：{judged}",
+        f"结论：{judged}" + (f"（底片比对：和她图库里的 {e['lib']} 是同一张图）" if e.get("lib") else ""),
         f"她看到的：{e['d']}" if e.get("d") else "她看到的：还没描述过",
     ]
     await see_cmd.finish("（" + "\n".join(lines) + "）")
