@@ -6342,7 +6342,7 @@ async def test_fetch_forward_1106():
     class FB:
         async def call_api(self, api, **kw):
             calls.append((api, kw))
-            if kw.get("id") == "bad" or kw.get("message_id") == "bad":
+            if "777" not in (kw.get("id"), kw.get("message_id")):
                 raise RuntimeError("没有这条")
             return {"messages": _FWD_NODES}
     ev = _fwd_ev("777", "你们看")
@@ -6416,7 +6416,7 @@ async def test_forward_self_quote_fallback_1106():
             return {"message": [{"type": "forward", "data": {"id": "555", "content": nodes}}]}
     ev = _fwd_ev("555")
     await tx.prefetch_forwards(FB(), ev)
-    assert calls == ["get_forward_msg", "get_forward_msg", "get_msg"]
+    assert calls == ["get_forward_msg"] * 4 + ["get_msg"]                 # 转发编号两种、外面那条消息编号两种，都要不到再 get_msg
     got = tx._forward_cache["555"]
     assert "你：才不。" in got and "你：你这算盘打得" in got and "小周：那干脆答应不就好啦" in got and "灰之魔女" not in got
     # 引用这段聊天记录说话：引用里是整段，不截成 30 字
@@ -6426,6 +6426,27 @@ async def test_forward_self_quote_fallback_1106():
     ev2.message = Message("你这两句跟病娇一样"); object.__setattr__(ev2, "reply", reply)
     note = tx.quote_note(ev2)
     assert "小周：那干脆答应不就好啦" in note and note.startswith("（引用了这个人自己之前发的“[聊天记录")
+    tx._forward_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_forward_by_outer_message_id_1106():
+    """11/06 19:36 线上：拿转发编号要，NapCat 回空列表；拿外面那条消息的编号要，才有内容"""
+    import plugins.roleplay_chat as p
+    tx = p.textin
+    tx._forward_cache.clear()
+    seen = []
+
+    class FB:
+        self_id = "123"
+        async def call_api(self, api, **kw):
+            seen.append((api, kw))
+            if api == "get_forward_msg" and kw.get("message_id") == 8601:
+                return {"messages": _FWD_NODES[:1]}
+            return {"messages": []}
+    await tx.prefetch_forwards(FB(), _fwd_ev("999", mid=8601))
+    assert "阿明：明天去爬山吗" in tx._forward_cache["999"]
+    assert seen[-1] == ("get_forward_msg", {"message_id": 8601})
     tx._forward_cache.clear()
 
 

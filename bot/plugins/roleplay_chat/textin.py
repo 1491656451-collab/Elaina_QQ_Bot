@@ -123,7 +123,7 @@ def _nodes_of(got) -> list:
 def _shape(got) -> str:
     """要不到内容时，记一下 NapCat 回的是什么样子（只记结构，不记内容）"""
     if isinstance(got, dict):
-        return "{" + ", ".join(f"{k}:{type(v).__name__}" + (f"[{len(v)}]" if isinstance(v, (list, str)) else "") for k, v in list(got.items())[:8]) + "}"
+        return "{" + ", ".join(f"{k}:{type(v).__name__}" + (f"[{len(v)}]" if isinstance(v, (list, str)) else "") for k, v in list(got.items())[:20]) + "}"
     return type(got).__name__ + (f"[{len(got)}]" if isinstance(got, (list, str)) else "")
 
 
@@ -136,16 +136,20 @@ async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
         return _forward_cache[fid]
     self_id = str(getattr(bot, "self_id", "") or "")
     nodes, shapes = [], []
-    for kw in ({"id": fid}, {"message_id": fid}):
+    # 11/06 19:36 线上：拿转发编号去要，NapCat 回的是空列表。NapCat 的 get_forward_msg 认的多半是外面那条消息的编号，也试一下
+    tries = [{"id": fid}, {"message_id": fid}]
+    if outer_mid is not None:
+        tries += [{"message_id": outer_mid}, {"id": str(outer_mid)}]
+    for kw in tries:
         try:
             got = await bot.call_api("get_forward_msg", **kw)
         except Exception as e:  # noqa: BLE001
-            shapes.append(f"get_forward_msg({list(kw)[0]}) 出错：{str(e)[:60]}")
+            shapes.append(f"get_forward_msg({kw}) 出错：{str(e)[:60]}")
             continue
         nodes = _nodes_of(got)
         if nodes:
             break
-        shapes.append(f"get_forward_msg({list(kw)[0]}) 回的是 {_shape(got)}")
+        shapes.append(f"get_forward_msg({kw}) 回的是 {_shape(got)}")
     if not nodes and outer_mid is not None:
         try:
             got = await bot.call_api("get_msg", message_id=outer_mid)
@@ -156,12 +160,14 @@ async def fetch_forward(bot, fid: str, outer_mid=None) -> str:
                     if nodes:
                         break
             if not nodes:
-                shapes.append(f"get_msg 回的是 {_shape(got)}")
+                fwd = [x for x in segs or [] if isinstance(x, dict) and x.get("type") == "forward"]
+                shapes.append(f"get_msg 回的是 {_shape(got)}，消息段 {[x.get('type') for x in segs or [] if isinstance(x, dict)]}"
+                              + (f"，转发段里有 {_shape(fwd[0].get('data'))}" if fwd else ""))
         except Exception as e:  # noqa: BLE001
             shapes.append(f"get_msg 出错：{str(e)[:60]}")
     text = render_forward(nodes, self_id=self_id)
     if not text:
-        logger.info(f"聊天记录：要内容没要到（{fid}）：{'；'.join(shapes)[:300]}")
+        logger.info(f"聊天记录：要内容没要到（{fid}）：{'；'.join(shapes)[:800]}")
         return ""
     if len(_forward_cache) >= _FORWARD_CACHE_MAX:
         _forward_cache.pop(next(iter(_forward_cache)))
