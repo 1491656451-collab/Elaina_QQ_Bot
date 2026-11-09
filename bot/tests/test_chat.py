@@ -101,6 +101,8 @@ def clean_state():
     if hasattr(p.cfg, "redo_on_more"):
         p.cfg.redo_on_more = False       # 11/06：别的测试按“发完再回下一轮”写的；测重想的测试自己打开
         p.reply._redo_count.clear(); p.reply._redo_skip_wait.clear(); p.reply._redo_pending.clear()
+    if hasattr(p.cfg, "skip_short_reply"):
+        p.cfg.skip_short_reply, p.cfg.skip_pin_short, p.cfg.skip_first_only_prob = False, False, 0.0   # 11/09：别的测试按旧的【可以不回】写的；测这个的测试自己打开
     if hasattr(p, "_recent_chat"):
         p._recent_chat.clear(); p._interject_skip_until.clear(); p._interject_busy.clear()
         p.INTERJECT_FILE.unlink(missing_ok=True)
@@ -7152,3 +7154,275 @@ def test_wake_group_only_recent_1105(monkeypatch, tmp_path):
     p.wake.note(("private_7791", 7791), e, "昨晚的事还记得吗")
     items, _ = p.wake.take(("private_7791", 7791))
     assert [t for t, _ in items] == ["昨晚的事还记得吗"]                 # 私聊 5 小时前的照旧看
+
+
+# ---------------------------------------------------------------- 11/09 聊天真实感 C
+def test_long_stay_1109(monkeypatch):
+    """待了 7 天以上、没说过要走：冒泡、写信、搭话加一句让她自己掂量；回消息不加；有打算、前几天说的、没待够都不加"""
+    import plugins.roleplay_chat as p
+    th = p.turn_hints
+    place = {"name": "另一片海边", "kind": "", "days_here": 11, "said": "今天", "status": "现在"}
+    d = {"place": place, "fresh": [], "told_here": [], "told_elsewhere": [], "plans": []}
+    h = th.life_hint_proactive(d)
+    assert "已经待了 11 天左右" in h and "待了这么些天" in h and "你自己定" in h and "有时候你会想再待几天" in h and "没走之前你还在这里" in h
+    assert "你自己定" not in th.life_hint({"place": place, "today": [], "related": [], "plans": []})
+    assert "你自己定" not in th.life_hint_proactive(dict(d, place=dict(place, days_here=3)))
+    assert "你自己定" in th.life_hint_proactive(dict(d, place=dict(place, days_here=7)))
+    assert "你自己定" not in th.life_hint_proactive(dict(d, place=dict(place, status="前几天说的")))
+    assert "你自己定" not in th.life_hint_proactive(dict(d, plans=[{"text": "往北走", "said": "昨天", "due": "后天", "status": "还没到日子"}]))
+    monkeypatch.setattr(p.cfg, "life_long_stay_days", 0)
+    assert "你自己定" not in th.life_hint_proactive(d)
+
+
+def test_elsewhere_same_kind_1109():
+    import plugins.roleplay_chat as p
+    head = p.turn_hints.LIFE_ELSEWHERE_HEAD
+    assert "捡到的、看到的、吃到的" in head and "同一类" in head and "贝壳" not in head
+
+
+def test_bubble_global_gap_1109(monkeypatch):
+    """任何群冒泡后 60 分钟内别的群不冒"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "bubble_enabled", True)
+    monkeypatch.setattr(p.core, "_in_hours", lambda r: True)
+    monkeypatch.setattr(p.core, "in_peak", lambda: False)
+    now = time.time()
+    p._histories["group_556"] = [{"role": "user", "content": "【群友】晚安", "ts": now - 5 * 3600}]
+    p._save_interject_state({"555": {"bubble_day": "2000-01-01", "bubble_count": 1, "bubble_last": now - 10 * 60}})
+    assert p.bubble_blocker(556) == "别的群刚冒过泡"
+    p._save_interject_state({"555": {"bubble_day": "2000-01-01", "bubble_count": 1, "bubble_last": now - 61 * 60}})
+    assert p.bubble_blocker(556) is None
+    monkeypatch.setattr(p.cfg, "bubble_global_min_gap_minutes", 0)
+    p._save_interject_state({"555": {"bubble_day": "2000-01-01", "bubble_count": 1, "bubble_last": now - 10 * 60}})
+    assert p.bubble_blocker(556) is None
+
+
+# ---------------------------------------------------------------- 11/09 聊天真实感 A
+@pytest.mark.asyncio
+async def test_skip_short_reply_1109(app: App, monkeypatch):
+    """可以不回的短消息：开了 SKIP_SHORT_REPLY 是三选一；抽中表情才提只甩表情；SKIP_PIN_SHORT 固定“几个字”那档；默认关着照旧"""
+    import plugins.roleplay_chat as p
+    r = p.reply
+    from plugins.roleplay_chat.config import Config
+    c = Config()
+    assert (c.skip_short_reply, c.skip_pin_short, c.skip_first_only_prob) == (True, True, 0.7)   # 用户 11/09 定的（三轮回放后）
+    p.client.chat.completions.create = fake_create("是喔。")
+    monkeypatch.setattr(p.random, "random", lambda: 0.99)
+    # 关着（测试里默认关）：还是原来那句
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("挺美好的", uid=9311, mid=5311)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是喔。", result=None, bot=bot)
+    memo = CALLS[-1]["messages"][-2]["content"]
+    assert p.prompts.SKIP_HINT in memo and "一两个字" not in memo
+    # 甲：三选一；没抽中表情不提表情
+    monkeypatch.setattr(p.cfg, "skip_short_reply", True)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("挺美好的", uid=9312, mid=5312)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是喔。", result=None, bot=bot)
+    memo = CALLS[-1]["messages"][-2]["content"]
+    assert "也可以只回一两个字；" in memo and "只甩一个表情" not in memo and p.prompts.SKIP_HINT not in memo
+    assert "几个字就好" not in memo                                    # 没开“乙”：长短照常抽（0.99 抽到最长那档）
+    # 抽中表情：提只甩表情，【表情】里也说可以一个字都不说
+    monkeypatch.setattr(r, "sticker_roll", lambda *a, **k: (True, None, ["开心", "无语"]))
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("挺美好的", uid=9313, mid=5313)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是喔。", result=None, bot=bot)
+    memo = CALLS[-1]["messages"][-2]["content"]
+    assert "只甩一个表情" in memo and "一个字都不说" in memo
+    # 乙：长短固定“几个字就好”
+    monkeypatch.setattr(p.cfg, "skip_pin_short", True)
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("挺美好的", uid=9314, mid=5314)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是喔。", result=None, bot=bot)
+    memo = CALLS[-1]["messages"][-2]["content"]
+    assert p.prompts.SKIP_PIN_HINT in memo and "“嗯。”" not in memo
+    # 问句不算：没有【可以不回】，长短也不固定
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = pev("你在哪？", uid=9315, mid=5315)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "是喔。", result=None, bot=bot)
+    memo = CALLS[-1]["messages"][-2]["content"]
+    assert "【可以不回】" not in memo and "几个字就好" not in memo
+
+
+@pytest.mark.asyncio
+async def test_skip_first_only_1109(app: App, monkeypatch):
+    """丙：可以只回一两个字的时候回了好几条、第一条很短，按概率只发第一条，聊天记录也只记第一条"""
+    import plugins.roleplay_chat as p
+    p.cfg.multi_message = True
+    try:
+        monkeypatch.setattr(p.random, "random", lambda: 0.0)
+        monkeypatch.setattr(p.cfg, "skip_short_reply", True)
+        monkeypatch.setattr(p.cfg, "skip_first_only_prob", 0.5)
+        p.client.chat.completions.create = fake_create("是喔。\n不过扫帚要是听见了会不高兴")
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = pev("挺美好的", uid=9321, mid=5321)
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "是喔", result=None, bot=bot)
+        assert p.get_history("private_9321")[-1]["content"] == "是喔"
+        # 第一条太长：不砍
+        p.client.chat.completions.create = fake_create("海边的风确实不坏\n就是帽子老被吹跑")
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = pev("挺美好的", uid=9322, mid=5322)
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "海边的风确实不坏", result=None, bot=bot)
+            ctx.should_call_send(ev, "就是帽子老被吹跑", result=None, bot=bot)
+        # 不是“可以不回”的那种（问句）：不砍
+        p.client.chat.completions.create = fake_create("是喔。\n在海边")
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = pev("你在哪？", uid=9323, mid=5323)
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "是喔", result=None, bot=bot)
+            ctx.should_call_send(ev, "在海边", result=None, bot=bot)
+        # 第一条是半截括号：不砍
+        p.client.chat.completions.create = fake_create("（……\n这敷衍的口吻听着就来气")
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = pev("挺美好的", uid=9325, mid=5325)
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "（……", result=None, bot=bot)
+            ctx.should_call_send(ev, "这敷衍的口吻听着就来气", result=None, bot=bot)
+        # 概率没抽中：不砍
+        monkeypatch.setattr(p.cfg, "skip_first_only_prob", 0.0)
+        p.client.chat.completions.create = fake_create("是喔。\n不过扫帚要是听见了会不高兴")
+        async with app.test_matcher() as ctx:
+            bot = mkbot(ctx)
+            ev = pev("挺美好的", uid=9324, mid=5324)
+            ctx.receive_event(bot, ev)
+            ctx.should_call_send(ev, "是喔", result=None, bot=bot)
+            ctx.should_call_send(ev, "不过扫帚要是听见了会不高兴", result=None, bot=bot)
+    finally:
+        p.cfg.multi_message = False
+
+
+# ---------------------------------------------------------------- 11/09 聊天真实感 B
+def test_cold_wait_1109(monkeypatch):
+    """聊冷了不秒回：上一条消息超过 COLD_REPLY_MINUTES 才抽签；这一段后面来的话等到同一个时刻"""
+    import plugins.roleplay_chat as p
+    r = p.reply
+    monkeypatch.setattr(p.cfg, "cold_reply_prob", 0.6)
+    monkeypatch.setattr(p.cfg, "cold_reply_long_prob", 0.1)
+    ik, key = ("private_9401", 9401), "private_9401"
+    r._cold_until.clear(); r._cold_since.clear()
+    p._histories[key] = [{"role": "assistant", "content": "睡吧。", "ts": time.time() - 5 * 60}]
+    monkeypatch.setattr(p.random, "random", lambda: 0.0)
+    assert r.cold_wait(ik, key) == 0 and ik not in r._cold_until                # 5 分钟前还在聊：不冷
+    p._histories[key] = [{"role": "assistant", "content": "睡吧。", "ts": time.time() - 30 * 60}]
+    w = r.cold_wait(ik, key)
+    assert 600 <= w <= 1800 and ik in r._cold_until                             # 抽到 0.0 < 0.1：等得久
+    assert abs(r.cold_wait(ik, key) - w) < 1                                     # 这一段后面来的：等到同一个时刻
+    r._cold_until.clear(); r._cold_since.clear()
+    monkeypatch.setattr(p.random, "random", lambda: 0.5)
+    assert 60 <= r.cold_wait(ik, key) <= 600                                     # 0.1～0.7：多等 1～10 分钟
+    r._cold_until.clear(); r._cold_since.clear()
+    monkeypatch.setattr(p.random, "random", lambda: 0.75)
+    assert r.cold_wait(ik, key) == 0 and ik not in r._cold_until                # 剩下 30% 照常回
+    p._histories[key] = []
+    monkeypatch.setattr(p.random, "random", lambda: 0.5)
+    assert r.cold_wait(ik, key) > 0                                              # 从没聊过也算冷
+    r._cold_until.clear(); r._cold_since.clear()
+    monkeypatch.setattr(p.cfg, "cold_reply_prob", 0)
+    monkeypatch.setattr(p.cfg, "cold_reply_long_prob", 0)
+    assert r.cold_wait(ik, key) == 0                                             # 两个概率都 0：不等
+    from plugins.roleplay_chat.config import Config
+    c = Config()
+    assert (c.cold_reply_minutes, c.cold_reply_prob, c.cold_reply_delay, c.cold_reply_long_prob, c.cold_reply_long_delay) \
+        == (20.0, 0.6, (60.0, 600.0), 0.1, (600.0, 1800.0))
+
+
+@pytest.mark.asyncio
+async def test_cold_reply_end_to_end_1109(app: App, monkeypatch):
+    """私聊聊冷了：等一会儿再回；等的时候对方又说的并进同一轮；等的时候别人找她照常回（不占“一双手”）；
+    回过以后恢复正常速度；群里不等；等够了提示里写“对方这句是 X 前发的”"""
+    import plugins.roleplay_chat as p
+    r = p.reply
+    r._cold_until.clear(); r._cold_since.clear()
+    p.client.chat.completions.create = fake_create("刚看到。")
+    sent = []
+
+    class FakeBot:
+        self_id = "123"
+        config = SimpleNamespace(superusers=set(), command_start={"/"}, nickname=set())
+        async def send(self, event, msg):
+            sent.append((event.user_id, event.message_id, str(msg), time.monotonic()))
+
+    monkeypatch.setattr(p.cfg, "cold_reply_prob", 1.0)
+    monkeypatch.setattr(p.cfg, "cold_reply_long_prob", 0.0)
+    monkeypatch.setattr(p.cfg, "cold_reply_delay", (0.6, 0.6))
+    monkeypatch.setattr(p.cfg, "cold_reply_hint_minutes", 0.005)              # 0.3 秒以上就算“等了一会儿”
+    monkeypatch.setattr(p.cfg, "merge_wait_complete", 0.05)
+    monkeypatch.setattr(p.cfg, "merge_wait_incomplete", 0.05)
+    bot = FakeBot()
+    p._histories["private_9411"] = [{"role": "assistant", "content": "睡吧。", "ts": time.time() - 3600}]
+    p._histories["private_9412"] = [{"role": "assistant", "content": "嗯。", "ts": time.time() - 10}]   # 正聊着
+
+    async def later(sec, coro):
+        await asyncio.sleep(sec)
+        await coro
+    t0 = time.monotonic()
+    await asyncio.gather(p.converse(bot, pev("在吗", uid=9411, mid=6001)),
+                         later(0.25, p.converse(bot, pev("想问你个事", uid=9411, mid=6002))),
+                         later(0.1, p.converse(bot, pev("早", uid=9412, mid=6003))))
+    a = [x for x in sent if x[0] == 9411]
+    b = [x for x in sent if x[0] == 9412]
+    assert [m for _, m, _, _ in a] == [6002]                                    # 等的时候又说的并进同一轮，只回一次
+    assert a[0][3] - t0 >= 0.55                                                  # 真的等了
+    assert b and b[0][3] < a[0][3]                                               # 别人照常回，没被卡住
+    prompts = [c["messages"] for c in CALLS if c["messages"][-1]["content"].endswith("在吗\n想问你个事")]
+    assert prompts and "【刚看到】" in prompts[-1][-2]["content"] and "不用解释为什么晚回" in prompts[-1][-2]["content"]
+    assert "理由自己想" not in prompts[-1][-2]["content"]                      # 不是 LATE_HINT
+    assert not any("【刚看到】" in c["messages"][-2]["content"] for c in CALLS if c["messages"][-1]["content"] == "早")
+    assert not r._cold_until
+    # 回过以后：恢复正常速度
+    sent.clear(); t0 = time.monotonic()
+    await p.converse(bot, pev("就是那个", uid=9411, mid=6004))
+    assert sent and sent[0][3] - t0 < 0.5
+    # 群里不等
+    p._histories["group_555"] = [{"role": "user", "content": "【阿明】早", "ts": time.time() - 3600}]
+    sent.clear(); t0 = time.monotonic()
+    await p.converse(bot, gev("[CQ:at,qq=123] 在吗", True, uid=9413, mid=6005))
+    assert sent and sent[0][3] - t0 < 0.5
+
+
+@pytest.mark.asyncio
+async def test_cold_reply_sleep_1109(app: App, monkeypatch):
+    """等的时候到了睡觉时间：交给睡醒补看（记下来，不回）"""
+    import plugins.roleplay_chat as p
+    r = p.reply
+    r._cold_until.clear(); r._cold_since.clear()
+    p.client.chat.completions.create = fake_create("嗯。")
+    sent = []
+
+    class FakeBot:
+        self_id = "123"
+        config = SimpleNamespace(superusers=set(), command_start={"/"}, nickname=set())
+        async def send(self, event, msg):
+            sent.append(str(msg))
+
+    monkeypatch.setattr(p.cfg, "cold_reply_prob", 1.0)
+    monkeypatch.setattr(p.cfg, "cold_reply_long_prob", 0.0)
+    monkeypatch.setattr(p.cfg, "cold_reply_delay", (0.3, 0.3))
+    monkeypatch.setattr(p.cfg, "merge_wait_complete", 0.05)
+    monkeypatch.setattr(p.cfg, "merge_wait_incomplete", 0.05)
+    p._histories["private_9421"] = [{"role": "assistant", "content": "睡吧。", "ts": time.time() - 3600}]
+    noted = []
+    monkeypatch.setattr(p.wake, "note", lambda ik, ev, text: noted.append((ik, text)))
+
+    async def fall_asleep():
+        await asyncio.sleep(0.15)
+        monkeypatch.setattr(p.quota, "rate_limited", lambda *a, **k: "sleep")
+        monkeypatch.setattr(r, "rate_limited", lambda *a, **k: "sleep")
+    await asyncio.gather(p.converse(FakeBot(), pev("在吗", uid=9421, mid=6101)), fall_asleep())
+    assert sent == [] and noted == [(("private_9421", 9421), "在吗")]

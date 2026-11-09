@@ -259,6 +259,9 @@ def bubble_blocker(gid: int) -> str | None:
     if time.time() - float(st.get("bubble_last", 0)) < cfg.bubble_min_gap_hours * 3600:
         return "离上次冒泡太近"
     all_st = _interject_state()
+    gap = cfg.bubble_global_min_gap_minutes * 60      # 11/09：别的群刚冒过泡的，这个群先不冒（免得几分钟里两个群讲同一类事）
+    if gap > 0 and time.time() - max((float(g.get("bubble_last", 0)) for g in all_st.values() if isinstance(g, dict)), default=0) < gap:
+        return "别的群刚冒过泡"
     today_total = sum(g.get("bubble_count", 0) for g in all_st.values() if isinstance(g, dict) and g.get("bubble_day") == today)
     if over_cap(today_total, cfg.bubble_global_daily_max):
         return "今天所有群加起来冒够了"

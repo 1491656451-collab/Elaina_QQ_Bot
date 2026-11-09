@@ -170,3 +170,15 @@ bot/tools/底片比对对照图/*
 !bot/tools/底片比对对照图/说明.txt
 docs/识图底片比对测试/底片比对_*.md
 bot/data/self_hashes.json
+
+# 11/07～11/09：聊天截图、待久／短回回放（题目和结果都是线上原话、带 QQ 号群号）、日志复核、写文章用的素材和初稿（引了大量线上原话、QQ 号）（部署 agent 加）
+docs/聊天记录/
+docs/待久回放/
+docs/待久回放报告-*.md
+docs/短回对比/
+docs/短回对比报告-*.md
+bot/tools/short_reply_cases.json
+docs/日志复核-*.md
+docs/文章初稿-*.md
+docs/文章素材与大纲-*.md
+docs/截图清单-*.md

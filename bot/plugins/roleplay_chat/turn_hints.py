@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from . import peak
 from .core import cfg
 from .memory import _grams, _related
-from .prompts import LENGTH_HINT, LIFE_CHAT_HEAD, LIFE_ELSEWHERE_HEAD, LIFE_PLAN_TEXT, LIFE_PROACTIVE_HEAD, SHORT_VARIANTS
+from .prompts import (LENGTH_HINT, LIFE_CHAT_HEAD, LIFE_ELSEWHERE_HEAD, LIFE_LONG_STAY_TEXT, LIFE_PLAN_TEXT, LIFE_PROACTIVE_HEAD,
+                      SHORT_VARIANTS)
 
 
 _LONG_HINTS = (
@@ -280,11 +281,20 @@ def life_hint(d: dict | None) -> str:
     return f"{LIFE_CHAT_HEAD}\n{body}" if body else ""
 
 
+def _long_stay(place: dict | None, plans) -> str:
+    """11/09 C：现在的地方待了 life_long_stay_days 天以上、也没说过要走（plans 空）→ 让她自己掂量走不走；0 = 不加"""
+    days = int(cfg.life_long_stay_days or 0)
+    if not days or not place or place.get("status") != "现在" or plans:
+        return ""
+    n = int(place.get("days_here") or 1)
+    return LIFE_LONG_STAY_TEXT if n >= days else ""          # 待了几天上一句已经写了，这里不重复
+
+
 def life_hint_proactive(d: dict | None) -> str:
     """冒泡、写信、搭话带的【你的近况】：self_mem.life_for_proactive 的结果"""
     if not d:
         return ""
-    parts = [_life_place(d.get("place")),
+    parts = [_life_place(d.get("place")), _long_stay(d.get("place"), d.get("plans")),
              _life_plans(d.get("plans"), ("到日子了", "过了日子还没动"))]   # 还没到日子的不带，免得天天念叨要走
     if d.get("fresh"):
         parts.append("最近说过的：" + "；".join(_life_item(it) for it in d["fresh"]) + "。")

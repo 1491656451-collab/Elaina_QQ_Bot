@@ -17,7 +17,7 @@ from . import budget, commands, core, peak, quota, sleep, stickers, story, voice
 from .oocheck import ooc_words
 from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
-from .prompts import FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
+from .prompts import COLD_HINT, FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, SKIP_HINT, SKIP_HINT_SHORT, SKIP_PIN_HINT, SKIP_STICKER_PART, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
 from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
 from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, image_datas, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
@@ -161,6 +161,31 @@ def note_sent_round(ik: tuple[str, int]) -> None:
 
 
 _woke: dict[tuple[str, int], list] = {}    # (会话, QQ) -> 这一轮收件箱最前面几段是她睡着时收到的：[(原话, 收到的时间)]（10/24，见 wake.py）
+_cold_until: dict[tuple[str, int], float] = {}   # 11/09 B：(会话, QQ) -> 这一段聊冷了要等到什么时候（monotonic）；之后来的话也等到这时一起回
+_cold_since: dict[tuple[str, int], float] = {}   # 这一段第一句来的时间（time.time()），算“对方这句是多久前发的”
+
+
+def cold_wait(ik: tuple[str, int], key: str) -> float:
+    """私聊聊冷了：这一轮还要等几秒（0 = 不等）。第一句来时抽签；这一段后面来的话等到同一个时刻"""
+    now_m = time.monotonic()
+    until = _cold_until.get(ik)
+    if until is not None:
+        return max(0.0, until - now_m)
+    history = get_history(key)
+    last = next((float(h["ts"]) for h in reversed(history) if h.get("ts")), None)
+    if last is not None and time.time() - last < cfg.cold_reply_minutes * 60:
+        return 0.0
+    r = random.random()
+    if r < cfg.cold_reply_long_prob:
+        wait = random.uniform(*cfg.cold_reply_long_delay)
+    elif r < cfg.cold_reply_long_prob + cfg.cold_reply_prob:
+        wait = random.uniform(*cfg.cold_reply_delay)
+    else:
+        return 0.0
+    _cold_until[ik] = now_m + wait
+    _cold_since[ik] = time.time()
+    logger.info(f"聊冷了（上一条是 {'从没聊过' if last is None else human_gap(time.time() - last) + '前'}），这次不秒回：{key} 等 {wait / 60:.1f} 分钟再看")
+    return wait
 _reply_owner: dict[tuple[str, int], "asyncio.Task | None"] = {}   # (会话, QQ) -> 正在回这个人的那一轮（10/23）
 
 
@@ -260,6 +285,7 @@ _FILLER_RE = re.compile(
 
 
 _SKIP_RE = re.compile(r"[\[【（(［]\s*不回\s*[\]】）)］]")
+SKIP_FIRST_MAX = 6          # 11/09 A“丙”：第一条不超过几个字才砍后面的
 
 
 def is_filler(text: str) -> bool:
@@ -403,6 +429,21 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
                 save_history(key)
         logger.info(f"对方像是另一个机器人，这阵子不回 {key} user={event.user_id}")
         return None
+    # 11/09 B：私聊聊冷了（上一条消息超过 COLD_REPLY_MINUTES 分钟）不秒回，按概率多等一会儿。
+    # 在这里等（调模型之前、不占“一双手”），等的时候对方又说的会并进来；最新那条的任务接着往下走，前面的退出
+    cold_waited = 0.0
+    if (catchup_age is None and not is_group and ik not in _woke and ik not in _redo_pending
+            and not commands.in_test_mode(event.user_id)):
+        wait = cold_wait(ik, key)
+        if wait > 0:
+            await asyncio.sleep(wait)
+            if _inbox_token.get(ik) != token:
+                return None
+        if ik in _cold_until:                    # 这一段等完了：后面的话恢复正常速度
+            _cold_until.pop(ik, None)
+            cold_waited = time.time() - _cold_since.pop(ik, time.time())
+            if cold_waited >= 1:
+                logger.info(f"聊冷了，等了 {cold_waited / 60:.1f} 分钟，现在看 {key} 的 {len(_inbox.get(ik, []))} 段话")
     # 她刚说过“我要去赶路了”：这段时间真的不在，对方的话记下来，回来以后再说
     target = _target_of(event)
     if catchup_age is None and away_left(target) > 0:
@@ -537,7 +578,7 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
         await look_at_images(ik, drop_at)
     return SimpleNamespace(bot=bot, event=event, catchup_age=catchup_age, drop_at=drop_at, key=key, is_group=is_group,
                            ik=ik, token=token, target=target, busy=busy, admitted_at=admitted_at, stamp=stamp,
-                           gid_q=gid_q, uid_q=uid_q, flooded=flooded)
+                           gid_q=gid_q, uid_q=uid_q, flooded=flooded, cold_waited=cold_waited)
 
 
 async def _build_prompt(turn: SimpleNamespace) -> bool:
@@ -632,7 +673,13 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
             logger.warning(f"空间往来：取用出错，这次不带：{e}")
     mode = "busy" if busy else reply_mode(text)
     fam = core.familiarity_of(event.user_id)
+    # 这句像随口一说：可以不回（11/09 A：开了 SKIP_SHORT_REPLY 还可以只回一两个字 / 只发表情）
+    skip_ok = bool(cfg.skip_by_model and (catchup_age is None or woke is not None) and len(text) <= 12 and not _looks_like_question(text)
+                   and not she_asked(history) and not detect_gifts(text))
+    short_ok = skip_ok and cfg.skip_short_reply
     length_hint = length_hint_for(mode, text, fam)
+    if short_ok and cfg.skip_pin_short and mode == "short":
+        length_hint = SKIP_PIN_HINT                 # 11/09 A：别一边说“三选一”、一边说“一句话，10～20 字”
     time_memo = "\n".join(x for x in (now_hint(), time_hint(history, ltm.last_seen(event.user_id), fam, ltm.get_user(event.user_id).get("last_letter"))) if x)
     if in_wrapup(target, event.user_id) or (_wrapup.get(target) or {}).get("user") == event.user_id:
         time_memo = "\n".join(x for x in (time_memo, WRAPUP_SLEEP_HINT if sleep.asleep() else WRAPUP_HINT) if x)
@@ -651,6 +698,8 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
         late_memo = WAKE_HINT.format(gap=human_gap(time.time() - woke))   # 不接 LATE_HINT：那里让她自己找理由，这里理由就是睡着了
     elif catchup_age is not None:
         late_memo = f"【刚看到】对方这几条消息是你不在的时候发的，最早一条已经是 {human_gap(catchup_age)}前了，你现在才看到。" + LATE_HINT
+    elif getattr(turn, "cold_waited", 0) >= cfg.cold_reply_hint_minutes * 60:     # 11/09 B：聊冷了多等了几分钟才看
+        late_memo = COLD_HINT.format(gap=human_gap(turn.cold_waited))
     # 对方在反问她上一句里、对方自己没提过的词（“诶？蘑菇？哪有蘑菇”）：告诉她这个词是她先说的
     echo_memo = ""
     last_a = next((i for i in range(len(history) - 1, max(-1, len(history) - 5), -1) if history[i]["role"] == "assistant"), None)
@@ -664,15 +713,15 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
         target, fam, is_group, event.group_id if is_group else None, self_image)
     sticker_memo = ""
     if use_sticker:
-        only_ok = length_hint == SHORT_VARIANTS[0][1] and random.random() < cfg.sticker_only_prob
+        only_ok = (length_hint == SHORT_VARIANTS[0][1] or short_ok) and random.random() < cfg.sticker_only_prob
         sticker_memo = sticker_hint(sticker_emotions, only_ok)
     # 语音：抽签 / 对方要她发语音时告诉她可以用传声魔法（电脑上的语音服务连着才有）
     voice_auto, voice_memo = voice_roll(fam, is_group, text)
     skip_memo = ""
-    if (cfg.skip_by_model and (catchup_age is None or woke is not None) and len(text) <= 12 and not _looks_like_question(text)
-            and not she_asked(history) and not gifts):
-        skip_memo = ("【可以不回】对方这句像是随口一说（附和、应一声、客套、道别之类）。"
-                     "如果你觉得没必要接话，就只输出「[不回]」这三个字符；想回就正常回。")
+    if short_ok:
+        skip_memo = SKIP_HINT_SHORT.format(sticker=SKIP_STICKER_PART if use_sticker else "")
+    elif skip_ok:
+        skip_memo = SKIP_HINT
     flood_memo = FLOOD_HINT.format(minutes=f"{cfg.flood_minutes:g}", n=turn.flooded) if getattr(turn, "flooded", 0) else ""
     extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, space_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo, flood_memo) if x)
     recall_msg = [{"role": "system", "content": extra}]
@@ -697,7 +746,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
             messages[-2] = {"role": "system", "content": messages[-2]["content"] + "\n\n" + VISION_SEES_HINT}
             logger.info(f"这一轮给聊天模型带了 {len(parts)} 张原图：{key}")
     turn.__dict__.update(text=text, name=name, history=history, new_entries=new_entries, seq_at_trigger=seq_at_trigger,
-                         memo=memo, mode=mode, fam=fam, bread_first=bread_first, use_sticker=use_sticker,
+                         memo=memo, mode=mode, fam=fam, bread_first=bread_first, use_sticker=use_sticker, short_ok=short_ok,
                          sticker_allowed=sticker_allowed, voice_auto=voice_auto, voice_memo=voice_memo, messages=messages,
                          target=target)
     return True
@@ -811,6 +860,14 @@ async def _finalize(turn: SimpleNamespace, reply: str, emotion: str | None) -> b
             _refund(stamp, gid_q, uid_q)
             return False
         reply, emotion = rest, None       # 写了“[不回]”又写了话：以话为准
+    # 11/09 A“丙”：可以只回一两个字的时候，她回了好几条、第一条就很短（“是喔。/ 不过……”），按概率只发第一条
+    if getattr(turn, "short_ok", False) and cfg.skip_first_only_prob > 0 and reply:
+        parts = split_bubbles(reply)
+        first_ok = bool(re.search(r"[\u4e00-\u9fffA-Za-z]", parts[0] if parts else "")) and not (parts[0][:1] in "（(【[")
+        # 11/09 第 3 轮：第一条是“（……”这种半截括号、只有标点的不砍（砍完只剩一个括号）
+        if len(parts) > 1 and first_ok and len(parts[0]) <= SKIP_FIRST_MAX and random.random() < cfg.skip_first_only_prob:
+            logger.info(f"只回一两个字：只发第一条“{parts[0]}”，后面 {len(parts) - 1} 条不发：{' / '.join(parts[1:])[:40]}")
+            reply = parts[0]
 
     # 表情：只有这轮抽中了才发；没抽中她却写了标记，就当没写
     sticker = None

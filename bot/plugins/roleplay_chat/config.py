@@ -274,6 +274,11 @@ class Config(BaseModel):
     skip_filler: bool = True
     skip_filler_prob: dict[str, float] = {"disliked": 0.9, "stranger": 0.7, "friend": 0.6, "acquaintance": 0.4, "close": 0.2}   # 明显的水话，直接不回的概率（不调用模型）
     skip_by_model: bool = True            # 短消息让她自己判断要不要接话（觉得没必要就不回）
+    # 11/09（《交接-聊天真实感三项-聊天-1109》A）：上面那种“可以不回”的短消息，允许只回一两个字 / 只甩一个表情。
+    # 三轮回放（《短回对比报告-1109_0533／0556／1902》）后用户 11/09 定了三个都开、只发第一条 0.7
+    skip_short_reply: bool = True         # 【可以不回】改成三选一（不回 / 一两个字或一个表情 / 正常回），抽中表情时也可以只发表情（回放里的“甲”）
+    skip_pin_short: bool = True           # 这种时候长短提示固定用“几个字就好”那档（不带例子的 SKIP_PIN_HINT，回放里的“丁”，要和上一项一起开）
+    skip_first_only_prob: float = 0.7     # 这种时候回了好几条、第一条不超过 6 个字，按这个概率只发第一条（回放里的“丙”）；0 = 不砍
 
     # ---- 主动插话：群里聊得正热时，她偶尔自己插一句（没人叫她）----
     interject_enabled: bool = True
@@ -307,6 +312,14 @@ class Config(BaseModel):
     botlike_slow: int = 6
     botlike_slow_delay: tuple[float, float] = (60.0, 120.0)   # 放慢时每次回之前多等几秒（在这两个数之间随机）
     botlike_window_minutes: float = 30.0
+    # 11/09（《交接-聊天真实感三项-聊天-1109》B）：私聊聊冷了（上一条消息超过这么多分钟），对方再来找她时不秒回，按概率多等一会儿；
+    # 等的时候对方又说的并进同一轮一起回；只影响这一段的第一轮。群里不做。两个概率都 0 = 不等
+    cold_reply_minutes: float = 20.0
+    cold_reply_prob: float = 0.6                              # 多等 COLD_REPLY_DELAY 秒的概率
+    cold_reply_delay: tuple[float, float] = (60.0, 600.0)
+    cold_reply_long_prob: float = 0.1                         # 等得更久（COLD_REPLY_LONG_DELAY 秒）的概率；剩下的照常回
+    cold_reply_long_delay: tuple[float, float] = (600.0, 1800.0)
+    cold_reply_hint_minutes: float = 3.0                      # 等了这么多分钟以上，提示里告诉她“对方这句是 X 前发的，你现在才看到”
     botlike_mute: int = 14
     botlike_mute_minutes: float = 60.0
     # 睡醒以后看到睡着时收到的话（10/24，聊天 agent，见 wake.py）：休息时间里来找她的话记下来，起床后过一会儿照平常的规则看要不要回
@@ -321,6 +334,8 @@ class Config(BaseModel):
     bubble_prob: float = 0.12             # 满足条件时，每次检查有多大概率冒泡（10/19 从 0.08 改）
     bubble_check_minutes: float = 20.0    # 多久检查一次
     bubble_hours: str = "10:00-22:00"     # 只在这段时间冒泡（北京时间）；高峰时段也不冒
+    bubble_global_min_gap_minutes: float = 60.0   # 任何一个群冒泡后，这么多分钟内别的群都不冒（11/09：11/07 两个群隔 4 分钟讲同一类事）；0 = 不管
+    life_long_stay_days: int = 7          # 她说的地方待了这么多天、又没说过要走，冒泡、写信、搭话时让她自己掂量走不走（11/09）；0 = 不提
 
     ignore_users: list[int] = []          # 完全不理这些 QQ（比如群里别的机器人），免得两个机器人对着聊
 
