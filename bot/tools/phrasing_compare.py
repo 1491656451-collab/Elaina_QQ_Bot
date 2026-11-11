@@ -9,6 +9,7 @@
   E B + C
   F B + 温度 1.0（10/18 第二轮加的）
   L / M / H：日常闲聊的长短提示固定成一档（10/18 第三轮）：L 现在的“可以多说两句”，M 新写法“多说一两句，说完就停”，H “一句话”
+  U 11/11 以前：聊天规则里没有“对方的心思以他这几句话为准”，回消息不带“待久了”那句，“动什么身”不算在问她（比 A，11/11 脑补“舍不得”、一直在海边）
   O 改前：人设、聊天规则、关系提示换成备份（docs\\人设打磨备份\\elaina.<PHRASING_OLD>.md.bak、prompts.<PHRASING_OLD>.py.bak，默认 1022），
     其他和 A 一样；比“改前 / 改后”用（10/22 第三批“人设减肥”，A 就是改后，也就是现在的文件）
   P 聊天主模型换成 pro（其他和 A 一样；10/22 第三批“主模型换不换 pro”用，见 主模型对比.bat）。
@@ -86,7 +87,9 @@ VARIANTS = {"A": "现在的样子", "B": "加“说人话”", "C": "放松“�
             "L": "长短固定为“可以多说两句”（现在那档）", "M": "长短固定为新写法“多说一两句，说完就停”", "H": "长短固定为“一句话”",
             "P": "主模型换成 pro", "O": "改前（备份的人设、聊天规则、关系提示）",
             "Q": "11/05 以前：【你的近况】每轮都整段带、聊天规则里没有“玩笑别当真”（11/05 第一批改动之前）",
-            "S": "长短固定为最短那档“几个字就好”（现在的说法）", "T": "长短固定为最短那档，改过的说法（去掉“蛤？”，加“先想想他指的是哪件事”）"}
+            "S": "长短固定为最短那档“几个字就好”（现在的说法）", "T": "长短固定为最短那档，改过的说法（去掉“蛤？”，加“先想想他指的是哪件事”）",
+            "U": "11/11 以前：聊天规则里没有“对方的心思以他这几句话为准”，回消息不带“待久了”那句，“动什么身”“准备离开海边了吗”不算在问她"}
+_NEW_ASK = "动什么身|什么时候走|走不走|还走吗|准备走|离开|一直在|一直待|待多久|"     # 11/11 加进 _ASK_LIFE_RE 的，U 去掉
 
 # 10/18 第三轮：怪的常是第二条（“半个月。/ 算了，你说的戏码我就当看戏”），怀疑是“可以多说两句”这档让她硬凑一句
 # 10/27（《接话回放报告-1027_1808》）：最短那档的新说法。对方那句费解时，“比如‘嗯。’‘蛤？’”会把她往“嗯？听不懂”上推
@@ -123,6 +126,14 @@ def apply_variant(p, v: str, base: dict) -> dict:
     p.cfg.deepseek_model = PRO_MODEL if v == "P" else base["model"]
     p.SHORT_VARIANTS[:] = base["short"]
     hits: dict = {}
+    th = getattr(p, "turn_hints", None)
+    if "ask_re" in base:                         # 11/11：U 用改之前的做法
+        th._ASK_LIFE_RE = base["ask_re"] if v != "U" else re.compile(base["ask_re"].pattern.replace(_NEW_ASK, ""))
+        p.cfg.life_long_stay_days = base["stay_days"] if v != "U" else 0
+    if v == "U":
+        lines = pr.CHAT_RULES.split("\n")
+        pr.CHAT_RULES = "\n".join(x for x in lines if "对方的心思以他这几句话为准" not in x)
+        hits["11/11 以前"] = f"去掉 {len(lines) - len(pr.CHAT_RULES.splitlines())} 条规则；问她的词去掉 {int(_NEW_ASK in base.get('ask_re', re.compile('')).pattern)} 组；回消息不带待久那句"
     if "life_focus" in base:                     # 11/05：Q 用改之前的做法（近况每轮整段带、没有“玩笑别当真”）
         p.reply.life_focus = base["life_focus"] if v != "Q" else (lambda d, text, recent="": d)
     if v == "Q":
@@ -332,6 +343,20 @@ async def test_phrasing(app: App, monkeypatch):
             "short": list(p.SHORT_VARIANTS), "model": p.cfg.deepseek_model}
     if hasattr(getattr(p, "reply", None), "life_focus"):
         base["life_focus"] = p.reply.life_focus
+    if hasattr(getattr(p, "turn_hints", None), "_ASK_LIFE_RE") and hasattr(p.cfg, "life_long_stay_days"):
+        base["ask_re"], base["stay_days"] = p.turn_hints._ASK_LIFE_RE, p.cfg.life_long_stay_days
+    # 11/11：题目里写了 profile（server_logs 里某人的长期记忆档案）的，回放时把这份档案给她看（别的长期记忆照旧关着）
+    real_ctx = type(p.ltm).context_for
+
+    def ctx_with_profile(qq, *a, **k):
+        if not (p.ltm.root / "users" / f"{qq}.json").exists():
+            return ""
+        p.ltm.enabled = True
+        try:
+            return real_ctx(p.ltm, qq, *a, **k)
+        finally:
+            p.ltm.enabled = False
+    monkeypatch.setattr(p.ltm, "context_for", ctx_with_profile)
     if hasattr(p.cfg, "flood_rounds"):
         monkeypatch.setattr(p.cfg, "flood_rounds", 0)    # 11/05：回放里前面几轮也会算进“一直找她”，这里不管（单独算过）
     assert "多说两句" in base["short"][2][1] and "一句话" in base["short"][1][1] and "几个字" in base["short"][0][1], "SHORT_VARIANTS 的顺序变了，L/H/S 要跟着改"
@@ -344,6 +369,17 @@ async def test_phrasing(app: App, monkeypatch):
                 events_cache[(case["log"], case["group"])] = rc.read_log(case["log"], int(case["group"]))
             if case["kind"] == "private" and (case["log"], case["user"]) not in private_cache:
                 private_cache[(case["log"], case["user"])] = read_private(case["log"], int(case["user"]))
+            shutil.rmtree(p.ltm.root / "users", ignore_errors=True)
+            if case.get("profile"):
+                (p.ltm.root / "users").mkdir(parents=True, exist_ok=True)
+                src = BOT_DIR.parent / case["profile"]
+                prof = json.loads(src.read_text(encoding="utf-8"))
+                cut = case.get("profile_before")       # 档案是事后拷的：这天及以后才记下的去掉，免得她“预知”后面的对话
+                if cut:
+                    prof["facts"] = [f for f in prof.get("facts") or [] if str(f.get("since") or "") < cut]
+                    prof["told"] = [t for t in prof.get("told") or [] if str(t.get("date") or "") < cut]
+                    prof["affection_log"] = [a for a in prof.get("affection_log") or [] if str(a)[:10] < cut]
+                (p.ltm.root / "users" / src.name).write_text(json.dumps(prof, ensure_ascii=False), encoding="utf-8")
             if case.get("life") is not None:          # 11/05：这道题当时的【你的近况】（回放环境里没有她的近况记录）
                 monkeypatch.setattr(p.core.self_mem, "life_for_chat", lambda *a, _d=case["life"], **k: _d)
             fam_map = case.get("fam")
@@ -357,6 +393,10 @@ async def test_phrasing(app: App, monkeypatch):
                     p._histories.clear(); p._passive.clear(); p._last_trigger.clear(); p._global_window.clear()
                     p._hour_window.clear(); p._group_hour.clear(); p._farewell_at.clear(); p._recent_chat.clear()
                     p._last_bot_msg.clear(); p._chat_seq.clear(); p._arrival_seq.clear(); p._private_hour.clear(); p._away.clear()
+                    # 11/11：同一题跑多次时，“对方像机器人”“一直找她”这些按人记的状态也要清掉（以前没清：同一题第 15 次起被当成机器人不理了）
+                    for _n in ("_botlike", "_flood", "_cold_until", "_cold_since", "_redo_count", "_redo_pending", "_redo_skip_wait"):
+                        getattr(getattr(p, "reply", p), _n, {}).clear()
+                    shutil.rmtree(p.spend.root, ignore_errors=True); p.spend.reset()     # 同一个人跑几十次，别被每人每天的花费上限拦住
                     rc.set_plugin_attr(p, "time", real_time_mod); rc.set_plugin_attr(p, "datetime", real_dt)
                     shutil.rmtree("data/history", ignore_errors=True)
                     Path("data/history").mkdir(parents=True, exist_ok=True)

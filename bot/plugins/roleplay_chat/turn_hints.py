@@ -239,15 +239,16 @@ def _life_item(it: dict) -> str:
 
 # 11/05（《人机感检查-周到型-1105》F）：【你的近况】以前每轮都带，她什么话题都要报一下自己在海边、旅馆的账。
 # 现在：对方问到她（在哪、在干嘛、最近怎样、旅行……）才整段带；别的时候只带和这几句话对得上的那一两件，在哪也不带
+# 11/11：“动什么身？”“准备一直在海边了”“准备离开海边了吗”以前都不算在问她（“动身”中间隔了字），近况整段没带，她就自己编了“下一片海岸”
 _ASK_LIFE_RE = re.compile(r"在哪|哪儿|哪里|在干|干嘛|干啥|干什么|做什么|在做|忙什么|在忙|忙不忙|最近|今天|这几天|这两天|昨天|"
-                          r"赶路|路上|几天|多远|到哪|下一站|打算去|旅行|旅途|旅馆|住哪|住在|去哪|上路|动身|出发|启程|还在|过得|怎么样|吃了|吃什么|天气|下雨|冷不冷|热不热")
+                          r"赶路|路上|几天|多远|到哪|下一站|打算去|动什么身|什么时候走|走不走|还走吗|准备走|离开|一直在|一直待|待多久|旅行|旅途|旅馆|住哪|住在|去哪|上路|动身|出发|启程|还在|过得|怎么样|吃了|吃什么|天气|下雨|冷不冷|热不热")
 LIFE_MATCH_GRAMS = 2      # 不是在问她的时候：近况里的一件事和这几句话至少有几个两字词对得上才带
 
 
 def life_focus(d: dict | None, text: str, recent: str = "") -> dict | None:
     """挑这一轮要带的近况：对方在问她 → 原样；没问 → 只留和这几句话（含她上一句）对得上的事，不带在哪"""
     if not d or _ASK_LIFE_RE.search(text or ""):
-        return d
+        return dict(d, asked=True) if d else d             # 11/11：问到她了，回消息也带“待久了”那句
     q = _grams(f"{text} {recent}")
     keep = [it for it in list(d.get("today") or []) + list(d.get("related") or [])
             if _related(q, it.get("text", "")) >= LIFE_MATCH_GRAMS]
@@ -272,7 +273,7 @@ def life_hint(d: dict | None) -> str:
     """每轮回消息带的【你的近况】：self_mem.life_for_chat 的结果拼成一段；什么都没有返回空"""
     if not d:
         return ""
-    parts = [_life_place(d.get("place"))]
+    parts = [_life_place(d.get("place")), _long_stay(d.get("place"), d.get("plans")) if d.get("asked") else ""]
     items = list(d.get("today") or []) + list(d.get("related") or [])
     if items:
         parts.append("你说过的：" + "；".join(_life_item(it) for it in items) + "。")

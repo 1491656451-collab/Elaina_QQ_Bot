@@ -443,3 +443,28 @@ def test_plans_due_and_done(tmp_path):
     # 整理聊天时给的也收
     sm.apply_from_chat("private_5", {"plans": [{"text": "去下一个国家", "when": "过两天"}]}, {}, "过两天我就去下一个国家", at=_noon())
     assert sm._load()["plans"][0]["due"] == _bjday(2) and sm._load()["plans"][0]["key"] == "private_5"
+
+
+def test_plan_when_by_meaning(tmp_path):
+    """11/11《交接-打算日子对不上-记忆-1111》：原话和模型写的日子按意思对，不按字面；“待了两天”照样不算"""
+    sm = _sm(tmp_path)
+    sm._move_to("另一片海边", "野外")
+    plan = lambda: [(p["when"], p["due"], p["to"]) for p in sm._load()["plans"]]
+    # 线上 11/11 17:42、18:06 没记上的两句
+    _said(sm, "group_1", _noon(), text="傍晚的浪比白天更凉了，我坐在礁石上看它一层层退下去，打算这两天就动身",
+          plans=[{"text": "动身离开这片海边", "when": "过两天"}])
+    assert plan() == [("过两天", _bjday(2), "")]
+    _said(sm, "private_1", _noon(), source="聊天", text="你那副舍不得的样子都写脸上了\n明早走，往内陆去",
+          plans=[{"text": "动身往内陆去", "when": "明天", "to": "内陆"}])
+    assert plan() == [("明天", _bjday(1), "内陆")]
+    # 模型照抄了原话的说法（“这两天”“明儿”）也认
+    _said(sm, "group_1", _noon(), text="这两天就走", plans=[{"text": "走", "when": "这两天"}])
+    assert plan()[0][:2] == ("过两天", _bjday(2))
+    _said(sm, "group_1", _noon(), text="明儿一早动身", plans=[{"text": "动身", "when": "明儿"}])
+    assert plan()[0][:2] == ("明天", _bjday(1))
+    # 这些还是不记：已经待的天数、字面像但意思不对、日子对不上
+    sm._load()["plans"] = []
+    for text, when in [("待了两天，差不多该走了", "过两天"), ("明白了，那我先走一步", "明天"),
+                       ("大后天再动身", "后天"), ("后天就动身", "明天"), ("在这儿待了好几天了，该走了", "过几天")]:
+        _said(sm, "group_1", _noon(), text=text, plans=[{"text": "动身", "when": when}])
+        assert sm._load()["plans"] == [], text

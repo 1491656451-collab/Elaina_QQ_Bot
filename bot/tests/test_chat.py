@@ -4085,7 +4085,7 @@ def test_rules_merged_0929():
     """9/29 规则合并：24 条 → 12 条；意思都还在（“喜好别硬扯”21:30 删过，22:10 回归测试面包变多，又加回来）"""
     import plugins.roleplay_chat as p
     rules = [x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]
-    assert len(rules) == 13          # 11/05 加了“玩笑别当真”一条
+    assert len(rules) == 14          # 11/05 加了“玩笑别当真”一条；11/11 加了“对方的心思以他这几句话为准”
     for must in ("（群友）", "#2", "（过了 X）", "Markdown", "只用中文", "最多三条", "群聊旁听记录", "伊蕾娜本人的画像",
                  "[表情:情绪]", "OOC", "→ 别人", "那个人说", "叫你一声", "说岔了", "有主见", "硬扯", "男是女"):
         assert must in p.CHAT_RULES, must
@@ -4952,7 +4952,7 @@ def test_promise_direction_2010():
     import plugins.roleplay_chat as p
     assert "别说成你请对方" in p.NUDGE_PROMPT and "别随口许下" in p.NUDGE_PROMPT
     assert "别把对方答应你的说成你答应对方的" in p.CHAT_RULES
-    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 13   # 11/05 加了“玩笑别当真”
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 14   # 11/05 加了“玩笑别当真”；11/11 加了“对方的心思以他这几句话为准”
 
 
 @pytest.mark.asyncio
@@ -5100,7 +5100,7 @@ def test_chat_stop_and_rule_0100():
     import plugins.roleplay_chat as p
     assert p.CHAT_STOP == ["\n【"]
     assert "只写你自己这一轮要说的话" in p.CHAT_RULES
-    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 13   # 11/05 加了“玩笑别当真”
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 14   # 11/05 加了“玩笑别当真”；11/11 加了“对方的心思以他这几句话为准”
 
 
 @pytest.mark.asyncio
@@ -5180,7 +5180,7 @@ def test_watch_gaps_and_caller_mark_0140():
     assert p.caller_lead_start(buf, 1, now) == 1
     assert p.caller_lead_start(buf, 2, now) is None
     assert p.caller_lead_start([(1, "A", "【A → B】你说呢", now - 5)], 1, now) is None
-    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 13   # 11/05 +1
+    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 14   # 11/05 +1；11/11 +1
 
 
 @pytest.mark.asyncio
@@ -6649,7 +6649,7 @@ def test_life_focus_place_touched_1106():
     import plugins.roleplay_chat as p
     th = p.turn_hints
     d = {"place": {"name": "另一片海边", "status": "现在", "days_here": 9}, "today": [], "related": []}
-    assert th.life_focus(d, "这海这么大？走了几天了都") is d                      # “几天”：算在问她
+    assert th.life_focus(d, "这海这么大？走了几天了都") == dict(d, asked=True)                      # “几天”：算在问她
     got = th.life_focus(d, "这海这么大", "我刚还想着跟你念叨两句海边的风")
     assert got and got["place"]["name"] == "另一片海边" and "另一片海边" in th.life_hint(got)
     assert th.life_focus(d, "你知道 aug 吗") is None                            # 不沾边：照旧不带
@@ -7082,8 +7082,8 @@ def test_life_focus_1105():
          "today": [{"text": "在海边捡到一枚螺旋反着的怪贝壳", "when": "今天下午"}],
          "related": [{"text": "在旅馆泡澡很舒服，舍不得走", "when": "昨天"}]}
     th = p.turn_hints
-    assert th.life_focus(d, "你最近在哪呀") is d
-    assert th.life_focus(d, "今天干嘛了") is d
+    assert th.life_focus(d, "你最近在哪呀") == dict(d, asked=True)
+    assert th.life_focus(d, "今天干嘛了") == dict(d, asked=True)
     assert th.life_focus(d, "你知道 aug 吗") is None                       # 不沾边：一条都不带
     got = th.life_focus(d, "那个贝壳后来呢", "今天我在海边捡到一枚纹路是反着拧的贝壳")
     assert got == {"place": None, "today": [], "related": [d["today"][0]]}
@@ -7164,8 +7164,15 @@ def test_long_stay_1109(monkeypatch):
     place = {"name": "另一片海边", "kind": "", "days_here": 11, "said": "今天", "status": "现在"}
     d = {"place": place, "fresh": [], "told_here": [], "told_elsewhere": [], "plans": []}
     h = th.life_hint_proactive(d)
-    assert "已经待了 11 天左右" in h and "待了这么些天" in h and "你自己定" in h and "有时候你会想再待几天" in h and "没走之前你还在这里" in h
+    assert "已经待了 11 天左右" in h and "国家、城镇" in h and "有人住的" in h and "你自己定" in h and "有时候你会想再待几天" in h and "没走之前你还在这里" in h
     assert "你自己定" not in th.life_hint({"place": place, "today": [], "related": [], "plans": []})
+    # 11/11：回消息时对方问到她（动什么身、下一站……）也带；没问到不带
+    assert "你自己定" in th.life_hint(th.life_focus({"place": place, "today": [], "related": [], "plans": []}, "动什么身？"))
+    assert "你自己定" not in th.life_hint(th.life_focus({"place": place, "today": [], "related": [], "plans": []}, "这海真大"))
+    assert "你自己定" not in th.life_hint(th.life_focus({"place": place, "today": [], "related": [],
+                                                        "plans": [{"text": "往北走", "said": "昨天", "due": "后天", "status": "还没到日子"}]}, "动什么身？"))
+    for q in ("你这是准备一直在海边了", "所以呢，准备离开海边了吗", "什么时候走"):
+        assert th.life_focus({"place": place, "today": [], "related": []}, q).get("asked"), q
     assert "你自己定" not in th.life_hint_proactive(dict(d, place=dict(place, days_here=3)))
     assert "你自己定" in th.life_hint_proactive(dict(d, place=dict(place, days_here=7)))
     assert "你自己定" not in th.life_hint_proactive(dict(d, place=dict(place, status="前几天说的")))
@@ -7426,3 +7433,9 @@ async def test_cold_reply_sleep_1109(app: App, monkeypatch):
         monkeypatch.setattr(r, "rate_limited", lambda *a, **k: "sleep")
     await asyncio.gather(p.converse(FakeBot(), pev("在吗", uid=9421, mid=6101)), fall_asleep())
     assert sent == [] and noted == [(("private_9421", 9421), "在吗")]
+
+
+def test_no_mind_reading_rule_1111():
+    """11/11：对方没表现出来的情绪别替他说成有；看不到对方的脸"""
+    import plugins.roleplay_chat as p
+    assert "对方的心思以他这几句话为准" in p.CHAT_RULES and "舍不得" in p.CHAT_RULES and "写在脸上了" in p.CHAT_RULES

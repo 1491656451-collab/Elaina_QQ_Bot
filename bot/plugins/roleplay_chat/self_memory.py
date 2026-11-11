@@ -39,6 +39,24 @@ PRO_RECENT_DAYS = 3             # 主动说话：最近这么多天在任何地�
 TOLD_ELSEWHERE_MAX = 3          # 主动说话：“这几天在别处讲过的”给几条
 ASKED_MIN_GRAMS = 1             # 今天这里讲过的那件，对方这句话里提到它（“帽子追回来了吗”）就照样带
 PLAN_WHEN = {"今天": 0, "今晚": 0, "明天": 1, "明早": 1, "明晚": 1, "后天": 2, "大后天": 3, "过两天": 2, "过几天": 3}
+# 11/11（《交接-打算日子对不上-记忆-1111》）：原话里怎么说都算这个日子。按意思对、不按字面：
+# 原话“这两天就动身”模型写“过两天”、原话“明早走”模型写“明天”，以前都因为字面不一样没记上。
+# 只放往后说的：“待了两天”里的“两天”是已经待的天数，不算（11/05 那条防误记）
+_PLAN_SAID = {
+    "今天": r"今天|今儿|今日", "今晚": r"今晚|今夜|今天晚上",
+    "明天": r"明天|明早|明晚|明儿|明日|明个", "后天": r"(?<!大)后天", "大后天": r"大后天",
+    "过两天": r"过两天|这两天|再过两天|再待两天|过个两天|两天后|两天以后",
+    "过几天": r"过几天|这几天|再过几天|再待几天|过个几天|过些天|几天后|几天以后",
+}
+_PLAN_SAID["明早"] = _PLAN_SAID["明晚"] = _PLAN_SAID["明天"]
+PLAN_SAID_RE = {k: re.compile(v) for k, v in _PLAN_SAID.items()}
+
+
+def _plan_when(when: str) -> str:
+    """模型写的日子换成 PLAN_WHEN 里的说法（它写了“这两天”“明儿”这类也认）；认不出返回空"""
+    if when in PLAN_WHEN:
+        return when
+    return next((k for k, rx in PLAN_SAID_RE.items() if rx.fullmatch(when)), "")
 PLAN_GRACE_DAYS = 2             # 过了日子几天还没换地方：标“过了日子还没动”；再往后就不提了
 _SHOP_RE = re.compile(r"(店|馆|堂|铺|屋|房间|集市|市场|摊)$")               # 只是一家店、一间屋子，不算“在哪”
 _PLACE_CHARS = "镇城国村林山谷湖河岛"
@@ -56,7 +74,7 @@ SAID_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人，正�
    - 以前、小说里的往事里的地方（“以前在……的时候”）；
    - 用户消息里给你的“她之前说自己在哪”：原话里没再提，就不要照抄过来。
 5. fits：new 里每件事和她现在在哪对不对得上。她这次说了换地方的，按新的地方看；没说换地方，人在野外、森林里却讲“刚在镇上的店里……”，就是对不上，写 false。说的是前几天在上一个地方的事，也算对得上。
-6. plans：她在原话里说了**哪天**要动身、离开、换地方（“明天就动身”“后天去别的海岸看看”“过两天往北走”），写 [{"text": "要做什么，不超过 20 字，例如“动身去别的海岸”", "when": "今天、今晚、明天、后天、大后天、过两天、过几天 选一个，照她的原话", "to": "要去哪，没说就空着"}]。只收要离开现在待的地方、换地方的打算（一路上本来就在赶路的“明天还得赶路”不算）；没说哪天的（“以后想去……”“有机会再去”）、别的打算（明天去集市、晚上吃什么）、玩笑、假设、小说里以前的事都不写。没有就不写 plans。
+6. plans：她在原话里说了**哪天**要动身、离开、换地方（“明天就动身”“后天去别的海岸看看”“过两天往北走”），写 [{"text": "要做什么，不超过 20 字，例如“动身去别的海岸”", "when": "今天、今晚、明天、后天、大后天、过两天、过几天 选意思最接近的一个（“这两天”算过两天，“明早”“明儿”算明天）", "to": "要去哪，没说就空着"}]。只收要离开现在待的地方、换地方的打算（一路上本来就在赶路的“明天还得赶路”不算）；没说哪天的（“以后想去……”“有机会再去”）、别的打算（明天去集市、晚上吃什么）、玩笑、假设、小说里以前的事都不写。没有就不写 plans。
 7. 什么都没有就输出空的。
 
 格式：{"same": [3], "new": [{"text": "……", "mood": "好笑", "fits": true}], "place": {"name": "……", "kind": "城镇", "moved": true}, "plans": [{"text": "……", "when": "后天", "to": ""}]}"""
@@ -373,14 +391,15 @@ class SelfMemory:
         at = float(s.get("at") or _now())
         for x in _as_list_of_dict(plans)[:1]:
             text, when = _clean_text(x.get("text"), 20), str(x.get("when") or "").strip()
+            when = _plan_when(when) or when
             if not text or when not in PLAN_WHEN:
                 if text:
                     logger.info(f"近况：打算“{text}”没说哪天（{when or '空'}），不记")
                 continue
             said = str(s.get("text") or "")
-            if said and when not in said and not (when in ("明早", "明晚") and "明" in said):
-                # 11/05 回放：“待了两天，差不多该走了”被写成“过两天动身”。原话里得真有这个日子的说法
-                logger.info(f"近况：原话里没有“{when}”，打算“{text}”不记")
+            if said and not PLAN_SAID_RE[when].search(said):
+                # 11/05 回放：“待了两天，差不多该走了”被写成“过两天动身”。原话里得真有这个日子的说法（按意思对，见 _PLAN_SAID）
+                logger.info(f"近况：原话里没有“{when}”这类说法，打算“{text}”不记")
                 continue
             due = (_bj(at).date() + timedelta(days=PLAN_WHEN[when])).isoformat()
             plan = {"text": text, "to": _clean_text(x.get("to"), 15), "when": when, "said": _day_of(at), "due": due,

@@ -46,7 +46,7 @@ FAKE = os.environ.get("REPLAY_FAKE") == "1"
 HOUR = int(os.environ.get("LIFESTAY_HOUR") or 15)   # 11/09 第 1 轮是凌晨 4 点半跑的，冒泡全在说“这个点”，第 2 轮起固定成下午
 DATA_DAY = date(2026, 11, 9)          # self.json 是这天拷下来的
 VARIANTS = {"N": "现在的代码", "O": "改前（对照）",
-            "M1": "“待够了”说法（11/09 第 3 轮候选）", "M2": "“有时想再待、有时想走”说法（11/09 第 3 轮候选）"}
+            "M1": "“待够了”说法（11/09 第 3 轮候选）", "M2": "“有时想再待、有时想走”说法（11/09 定的，11/11 以前线上的）"}
 ONLY_V = [x for x in os.environ.get("LIFESTAY_VARIANTS", "").split(",") if x]
 _STAY_HEAD = "在一个地方待了这么些天，接下来是接着待，还是动身去别处，你自己定"
 _STAY_TAIL = "没走之前你还在这里，别说成已经换了地方。"
@@ -68,6 +68,9 @@ LEAVE_RE = re.compile(r"动身|启程|上路|出发|离开|收拾|换个地方|�
                       r"待腻|待够|待了.{0,4}(天|日)|住腻|看腻|多待|再待|接着待|继续待")
 SEA_RE = re.compile(r"海|浪|潮|礁|贝|蟹|沙滩|海鸥|海风|渔")
 PICK_RE = re.compile(r"捡|拾到|捞到|摸到")
+# 11/11：要走的话往哪去（她 11/11 在群里说“动身去下一片海岸”）
+TOWN_RE = re.compile(r"(去|往|到|找)[^，。；！？\n]{0,8}(镇|城|国|村|内陆|集市)")
+COAST_RE = re.compile(r"(去|往|到|找)[^，。；！？\n]{0,8}(海岸|海边|海湾|港|另一片海|下一片海)")
 DATE_RE = re.compile(r"^(\d{4}-\d\d-\d\d)")
 
 
@@ -106,6 +109,10 @@ def _flags(reply: str) -> list[str]:
         out.append("还在讲海边")
     if PICK_RE.search(reply):
         out.append("捡到东西")
+    if TOWN_RE.search(reply):
+        out.append("往城镇 / 国家：" + TOWN_RE.search(reply).group(0))
+    if COAST_RE.search(reply):
+        out.append("往别的海边：" + COAST_RE.search(reply).group(0))
     return out
 
 
@@ -217,13 +224,13 @@ async def test_life_stay(monkeypatch):
           + ("**程序自测（假模型）**" if FAKE else ""),
           f"> 提示里的“现在”按 {HOUR} 点算。" if HOUR >= 0 else "> 提示里的“现在”是真的时间。",
           "> 自动标记只是关键词：“提到走 / 待久”包括“再待几天”这种说不走的，要人看原话。", "",
-          "## 汇总", "", "| 题目 | 做法 | 次数 | 提到走 / 待久 | 还在讲海边 | 捡到东西 |", "|---|---|---|---|---|---|"]
+          "## 汇总", "", "| 题目 | 做法 | 次数 | 提到走 / 待久 | 还在讲海边 | 捡到东西 | 往城镇 / 国家 | 往别的海边 |", "|---|---|---|---|---|---|---|---|"]
     for cid, kind, stay, other, runs in CASES:
         for var in runs:
             rs = [r for r in results if r["id"] == cid and r["variant"] == var]
             if rs:
                 cnt = lambda pre: sum(any(f.startswith(pre) for f in r["flags"]) for r in rs)
-                md.append(f"| {cid} | {var} | {len(rs)} | {cnt('提到走')} | {cnt('还在讲海边')} | {cnt('捡到东西')} |")
+                md.append(f"| {cid} | {var} | {len(rs)} | {cnt('提到走')} | {cnt('还在讲海边')} | {cnt('捡到东西')} | {cnt('往城镇')} | {cnt('往别的海边')} |")
     md.append("")
     for cid, kind, stay, other, runs in CASES:
         rs = [r for r in results if r["id"] == cid]
