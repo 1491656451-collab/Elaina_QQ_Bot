@@ -9,6 +9,7 @@
   E B + C
   F B + 温度 1.0（10/18 第二轮加的）
   L / M / H：日常闲聊的长短提示固定成一档（10/18 第三轮）：L 现在的“可以多说两句”，M 新写法“多说一两句，说完就停”，H “一句话”
+  V 11/13 以前：聊冷了以后的提示开头是“【刚看到】”（题目里写 cold_gap 的才有这句）
   U 11/11 以前：聊天规则里没有“对方的心思以他这几句话为准”，回消息不带“待久了”那句，“动什么身”不算在问她（比 A，11/11 脑补“舍不得”、一直在海边）
   O 改前：人设、聊天规则、关系提示换成备份（docs\\人设打磨备份\\elaina.<PHRASING_OLD>.md.bak、prompts.<PHRASING_OLD>.py.bak，默认 1022），
     其他和 A 一样；比“改前 / 改后”用（10/22 第三批“人设减肥”，A 就是改后，也就是现在的文件）
@@ -88,7 +89,9 @@ VARIANTS = {"A": "现在的样子", "B": "加“说人话”", "C": "放松“�
             "P": "主模型换成 pro", "O": "改前（备份的人设、聊天规则、关系提示）",
             "Q": "11/05 以前：【你的近况】每轮都整段带、聊天规则里没有“玩笑别当真”（11/05 第一批改动之前）",
             "S": "长短固定为最短那档“几个字就好”（现在的说法）", "T": "长短固定为最短那档，改过的说法（去掉“蛤？”，加“先想想他指的是哪件事”）",
-            "U": "11/11 以前：聊天规则里没有“对方的心思以他这几句话为准”，回消息不带“待久了”那句，“动什么身”“准备离开海边了吗”不算在问她"}
+            "U": "11/11 以前：聊天规则里没有“对方的心思以他这几句话为准”，回消息不带“待久了”那句，“动什么身”“准备离开海边了吗”不算在问她",
+            "V": "11/13 以前：聊冷了以后的提示开头是“【刚看到】”"}
+_OLD_COLD_HINT = "【刚看到】对方这句是 {gap}前发的，你现在才看到。要不要提一句刚看到随你，不用解释为什么晚回。"
 _NEW_ASK = "动什么身|什么时候走|走不走|还走吗|准备走|离开|一直在|一直待|待多久|"     # 11/11 加进 _ASK_LIFE_RE 的，U 去掉
 
 # 10/18 第三轮：怪的常是第二条（“半个月。/ 算了，你说的戏码我就当看戏”），怀疑是“可以多说两句”这档让她硬凑一句
@@ -127,6 +130,10 @@ def apply_variant(p, v: str, base: dict) -> dict:
     p.SHORT_VARIANTS[:] = base["short"]
     hits: dict = {}
     th = getattr(p, "turn_hints", None)
+    if "cold_hint" in base:                      # 11/13：V 用以前那句（开头“【刚看到】”）
+        p.reply.COLD_HINT = _OLD_COLD_HINT if v == "V" else base["cold_hint"]
+        if v == "V":
+            hits["11/13 以前"] = "聊冷了的提示换回“【刚看到】……”"
     if "ask_re" in base:                         # 11/11：U 用改之前的做法
         th._ASK_LIFE_RE = base["ask_re"] if v != "U" else re.compile(base["ask_re"].pattern.replace(_NEW_ASK, ""))
         p.cfg.life_long_stay_days = base["stay_days"] if v != "U" else 0
@@ -248,7 +255,12 @@ async def replay_private(p, case: dict, lines: list, real) -> dict:
         if kw.get("max_tokens") == 2:
             return rc._resp("是")
         state["prompt"] = kw.get("messages")
-        return await real(**kw)
+        resp = await real(**kw)
+        try:
+            state["raw"] = resp.choices[0].message.content      # 11/13：模型原话（发前清理之前），看它写了什么被清掉了
+        except (AttributeError, IndexError):
+            pass
+        return resp
     p.client.chat.completions.create = create
     text = "\n".join(x[2] for x in burst)
     msg = Message(text)
@@ -258,7 +270,7 @@ async def replay_private(p, case: dict, lines: list, real) -> dict:
     bot = _Bot()
     await p.converse(bot, ev)
     sent = [re.sub(r"\[CQ:reply,id=\d+\]|\[reply:id=\d+\]", "", s).strip() for s in bot.sent]
-    return {"reply": "\n".join(x for x in sent if x), "prompt": state["prompt"]}
+    return {"reply": "\n".join(x for x in sent if x), "prompt": state["prompt"], "raw": state.get("raw", "")}
 
 
 def context_lines(case: dict, events_cache: dict) -> list[str]:
@@ -345,6 +357,22 @@ async def test_phrasing(app: App, monkeypatch):
         base["life_focus"] = p.reply.life_focus
     if hasattr(getattr(p, "turn_hints", None), "_ASK_LIFE_RE") and hasattr(p.cfg, "life_long_stay_days"):
         base["ask_re"], base["stay_days"] = p.turn_hints._ASK_LIFE_RE, p.cfg.life_long_stay_days
+    if hasattr(getattr(p, "reply", None), "COLD_HINT"):
+        base["cold_hint"] = p.reply.COLD_HINT
+    # 11/13：题目里写了 cold_gap（秒）的，当成“聊冷了，她隔了这么久才看到”这一轮（不真的等）
+    real_cold = getattr(getattr(p, "reply", None), "cold_wait", None)
+    cold_case: dict = {}
+
+    def fake_cold(ik, key):
+        gap = cold_case.get("gap")
+        if not gap:
+            return 0.0
+        if ik not in p.reply._cold_until:
+            p.reply._cold_until[ik] = p.reply.time.monotonic()
+            p.reply._cold_since[ik] = p.reply.time.time() - gap
+        return 0.0
+    if real_cold:
+        monkeypatch.setattr(p.reply, "cold_wait", fake_cold)
     # 11/11：题目里写了 profile（server_logs 里某人的长期记忆档案）的，回放时把这份档案给她看（别的长期记忆照旧关着）
     real_ctx = type(p.ltm).context_for
 
@@ -369,6 +397,7 @@ async def test_phrasing(app: App, monkeypatch):
                 events_cache[(case["log"], case["group"])] = rc.read_log(case["log"], int(case["group"]))
             if case["kind"] == "private" and (case["log"], case["user"]) not in private_cache:
                 private_cache[(case["log"], case["user"])] = read_private(case["log"], int(case["user"]))
+            cold_case["gap"] = case.get("cold_gap")
             shutil.rmtree(p.ltm.root / "users", ignore_errors=True)
             if case.get("profile"):
                 (p.ltm.root / "users").mkdir(parents=True, exist_ok=True)
@@ -413,7 +442,7 @@ async def test_phrasing(app: App, monkeypatch):
                         r = await rc.replay_once(app, p, c, events, sends, real, nicks)
                     else:
                         r = await replay_private(p, case, private_cache[(case["log"], case["user"])], real)
-                    row = {"id": case["id"], "variant": v, "sample": k, "reply": r["reply"], "model": p.cfg.deepseek_model,
+                    row = {"id": case["id"], "variant": v, "sample": k, "reply": r["reply"], "raw": r.get("raw", ""), "model": p.cfg.deepseek_model,
                            "secs": round(sum(timing), 2), "calls": len(timing)}
                     # 10/27：每次都记下这轮抽到的回复长短提示（“这轮随意点回：几个字就好”这类），看接不接得上和它有没有关系
                     sys_tail = " ".join(str(m["content"]) for m in (r["prompt"] or [])[-3:] if m.get("role") == "system")

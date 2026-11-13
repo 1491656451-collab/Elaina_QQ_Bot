@@ -7388,9 +7388,10 @@ async def test_cold_reply_end_to_end_1109(app: App, monkeypatch):
     assert a[0][3] - t0 >= 0.55                                                  # 真的等了
     assert b and b[0][3] < a[0][3]                                               # 别人照常回，没被卡住
     prompts = [c["messages"] for c in CALLS if c["messages"][-1]["content"].endswith("在吗\n想问你个事")]
-    assert prompts and "【刚看到】" in prompts[-1][-2]["content"] and "不用解释为什么晚回" in prompts[-1][-2]["content"]
+    assert prompts and "你隔了一会儿才看到" in prompts[-1][-2]["content"] and "不用解释为什么晚回" in prompts[-1][-2]["content"]
+    assert "【刚看到】" not in prompts[-1][-2]["content"]                    # 11/13：不带标题，免得她写成“（刚看到）”
     assert "理由自己想" not in prompts[-1][-2]["content"]                      # 不是 LATE_HINT
-    assert not any("【刚看到】" in c["messages"][-2]["content"] for c in CALLS if c["messages"][-1]["content"] == "早")
+    assert not any("你隔了一会儿才看到" in c["messages"][-2]["content"] for c in CALLS if c["messages"][-1]["content"] == "早")
     assert not r._cold_until
     # 回过以后：恢复正常速度
     sent.clear(); t0 = time.monotonic()
@@ -7439,3 +7440,171 @@ def test_no_mind_reading_rule_1111():
     """11/11：对方没表现出来的情绪别替他说成有；看不到对方的脸"""
     import plugins.roleplay_chat as p
     assert "对方的心思以他这几句话为准" in p.CHAT_RULES and "舍不得" in p.CHAT_RULES and "写在脸上了" in p.CHAT_RULES
+
+
+def test_cold_reply_fixes_1113(monkeypatch):
+    """11/13：① 回复开头的“（刚看到）”这类状态括号去掉；② 刚在群里和这个人聊过，转到私聊不算冷"""
+    import plugins.roleplay_chat as p
+    r = p.reply
+    assert p.clean_reply("（刚看到）你不是还有精神在这儿说胡话吗") == "你不是还有精神在这儿说胡话吗"
+    assert p.clean_reply("(刚刚看到) 嗯，在") == "嗯，在"
+    assert p.clean_reply("（刚看到）") == "（刚看到）"                          # 整条只有这个就不动（后面的检查会处理）
+    assert p.clean_reply("我刚看到（真的）") == "我刚看到（真的）"              # 不在开头的不管
+    monkeypatch.setattr(p.cfg, "cold_reply_prob", 1.0)
+    monkeypatch.setattr(p.cfg, "cold_reply_long_prob", 0.0)
+    monkeypatch.setattr(p.random, "random", lambda: 0.5)
+    r._cold_until.clear(); r._cold_since.clear()
+    ik, key = ("private_9431", 9431), "private_9431"
+    now = time.time()
+    p._histories[key] = [{"role": "assistant", "content": "睡吧。", "ts": now - 3 * 86400}]
+    p._histories["group_555"] = [{"role": "user", "content": "【阿明】小虫子不会爬到身上吗", "uid": 9431, "ts": now - 15 * 60},
+                                 {"role": "assistant", "content": "爬上来就冻成冰了", "ts": now - 14 * 60}]
+    assert r.cold_wait(ik, key) == 0                                            # 15 分钟前刚在群里聊过：不冷
+    p._histories["group_555"][0]["ts"] = p._histories["group_555"][1]["ts"] = now - 40 * 60
+    assert r.cold_wait(ik, key) > 0                                             # 40 分钟前：算冷
+    r._cold_until.clear(); r._cold_since.clear()
+    p._histories["group_555"] = [{"role": "user", "content": "【阿明】在吗", "uid": 9431, "ts": now - 5 * 60}]
+    assert r.cold_wait(ik, key) > 0                                             # 他在群里说了、她没在那儿说话：还是算冷
+    r._cold_until.clear(); r._cold_since.clear()
+
+
+# ---------------------------------------------------------------- 11/13 她自己定作息
+def _sleep_setup(monkeypatch, tmp_path):
+    import plugins.roleplay_chat as p
+    from plugins.roleplay_chat import sleep_plan
+    sl = p.sleep
+    monkeypatch.setattr(sl, "plan_file", lambda: tmp_path / "sleep_plan.json")
+    monkeypatch.setattr(sl, "_plans", None)
+    sleep_plan._asked.clear(); sleep_plan._next_try.clear(); sleep_plan._usual.clear()
+    monkeypatch.setattr(p.cfg, "sleep_enabled", True)
+    monkeypatch.setattr(p.cfg, "sleep_by_model", True)
+    return p, sl, sleep_plan
+
+
+def test_sleep_plan_clamp_1113(monkeypatch, tmp_path):
+    p, sl, _ = _sleep_setup(monkeypatch, tmp_path)
+    hm = lambda t: int(t[:2]) * 60 + int(t[3:])
+    c = lambda a, b: (sl._hhmm(sl.clamp_plan(hm(a), hm(b))[0]), sl._hhmm(sl.clamp_plan(hm(a), hm(b))[1]))
+    assert c("22:50", "07:10") == ("22:50", "07:10") and sl.clamp_plan(hm("22:50"), hm("07:10"))[2] == []
+    assert c("00:40", "08:30") == ("00:40", "08:30")                   # 跨午夜
+    assert c("03:00", "09:00") == ("01:30", "09:00")                   # 太晚睡：收到 01:30
+    assert c("23:00", "11:00") == ("23:00", "09:00")                   # 起太晚：收到 09:30，再按最多 10 小时挪到 09:00
+    assert c("01:30", "05:00") == ("01:30", "07:30")                   # 睡不够 6 小时：起床挪后
+    assert c("21:00", "06:30") == ("22:00", "06:30")                   # 太早睡：收到 22:00
+    assert c("22:00", "09:30") == ("22:00", "08:00")                   # 睡 11.5 小时：挪到 10 小时
+
+
+def test_sleep_plan_window_1113(monkeypatch, tmp_path):
+    p, sl, _ = _sleep_setup(monkeypatch, tmp_path)
+    from datetime import datetime
+    night = "2026-11-13"
+    monkeypatch.setattr(p.cfg, "sleep_by_model", False)
+    old = sl.sleep_window(night)
+    sl.save_plan(night, {"start": 630, "end": 1150, "why": "露宿"})       # 22:30～07:10
+    assert sl.sleep_window(night) == old                                # 开关关着：和以前一模一样
+    monkeypatch.setattr(p.cfg, "sleep_by_model", True)
+    w = sl.sleep_window(night)
+    assert (w[0].strftime("%m-%d %H:%M"), w[1].strftime("%m-%d %H:%M")) == ("11-13 22:30", "11-14 07:10")
+    bj = p.peak.BEIJING
+    assert sl.asleep(datetime(2026, 11, 13, 22, 40, tzinfo=bj)) and not sl.asleep(datetime(2026, 11, 13, 22, 20, tzinfo=bj))
+    assert sl.asleep(datetime(2026, 11, 14, 7, 0, tzinfo=bj)) and not sl.asleep(datetime(2026, 11, 14, 7, 20, tzinfo=bj))
+    # 重启：从文件读回来
+    monkeypatch.setattr(sl, "_plans", None)
+    assert sl.sleep_window(night) == w
+    # 只留最近 14 晚
+    for i in range(20):
+        sl.save_plan(f"2026-10-{i + 1:02d}", {"start": 630, "end": 1150})
+    assert len(sl.plans()) == 14 and night in sl.plans()
+    # 计划坏了：照老办法
+    sl.plans()[night] = {"start": "x", "end": 1150}
+    monkeypatch.setattr(p.cfg, "sleep_by_model", False)
+    old2 = sl.sleep_window(night)
+    monkeypatch.setattr(p.cfg, "sleep_by_model", True)
+    assert sl.sleep_window(night) == old2
+
+
+@pytest.mark.asyncio
+async def test_sleep_plan_ask_1113(monkeypatch, tmp_path):
+    p, sl, sp = _sleep_setup(monkeypatch, tmp_path)
+    from datetime import datetime
+    bj = p.peak.BEIJING
+    calls = []
+    answer = {"text": '{"sleep": "22:40", "wake": "06:50", "why": "在野外露宿，天黑就睡"}'}
+
+    async def create(**kw):
+        calls.append(kw)
+        return rc_resp(answer["text"])
+    monkeypatch.setattr(p.core.client.chat.completions, "create", create)
+    monkeypatch.setattr(p.core.self_mem, "life_for_proactive", lambda *a, **k: {
+        "place": {"name": "往内陆的路上", "kind": "野外", "days_here": 1, "status": "现在"},
+        "fresh": [{"text": "收拾东西动身往内陆走", "when": "今天中午"}], "told_elsewhere": []})
+    assert await sp.maybe_plan(datetime(2026, 11, 13, 19, 50, tzinfo=bj)) is None and not calls     # 还没到 20:00
+    plan = await sp.maybe_plan(datetime(2026, 11, 13, 20, 1, tzinfo=bj))
+    assert plan and (sl._hhmm(plan["start"]), sl._hhmm(plan["end"])) == ("22:40", "06:50") and plan["why"]
+    prompt = calls[-1]["messages"][0]["content"]
+    assert "往内陆的路上" in prompt and "收拾东西动身往内陆走" in prompt and "11 月 13 日" in prompt
+    assert "过了零点也行" in prompt and "没提过的别自己添" in prompt and "日记写完" not in prompt and "还没说过自己做了什么" not in prompt
+    assert await sp.maybe_plan(datetime(2026, 11, 13, 20, 30, tzinfo=bj)) is None and len(calls) == 1   # 一晚只问一次
+    # 第二晚：带上前一晚的；已经过了 22:00 才启动的不问
+    assert await sp.maybe_plan(datetime(2026, 11, 14, 22, 5, tzinfo=bj)) is None and len(calls) == 1
+    plan2 = await sp.maybe_plan(datetime(2026, 11, 15, 21, 0, tzinfo=bj))
+    assert plan2 and "前两晚" in calls[-1]["messages"][0]["content"] and "22:40 睡" in calls[-1]["messages"][0]["content"]
+    # 回的不是时间：不存，照老办法；隔一会儿再问，最多 3 次
+    answer["text"] = '{"sleep": "十一点", "wake": "七点"}'
+    assert await sp.maybe_plan(datetime(2026, 11, 16, 20, 0, tzinfo=bj)) is None and "2026-11-16" not in sl.plans()
+    n = len(calls)
+    assert await sp.maybe_plan(datetime(2026, 11, 16, 20, 5, tzinfo=bj)) is None and len(calls) == n      # 10 分钟内不重问
+    sp._next_try.clear()
+    await sp.maybe_plan(datetime(2026, 11, 16, 20, 20, tzinfo=bj)); sp._next_try.clear()
+    await sp.maybe_plan(datetime(2026, 11, 16, 20, 40, tzinfo=bj)); sp._next_try.clear()
+    await sp.maybe_plan(datetime(2026, 11, 16, 21, 0, tzinfo=bj))
+    assert len(calls) == n + 2                                                                          # 一共 3 次
+    # 什么都没说过：写明“还没说过”，免得她照例子编
+    monkeypatch.setattr(p.core.self_mem, "life_for_proactive", lambda *a, **k: {"place": {}, "fresh": [], "told_elsewhere": []})
+    answer["text"] = '{"sleep": "23:10", "wake": "07:20", "why": "没什么特别的"}'
+    assert await sp.maybe_plan(datetime(2026, 11, 18, 20, 0, tzinfo=bj))
+    assert "今天还没说过自己做了什么。" in calls[-1]["messages"][0]["content"]
+    # 开关关着：不问
+    monkeypatch.setattr(p.cfg, "sleep_by_model", False)
+    assert await sp.maybe_plan(datetime(2026, 11, 17, 20, 0, tzinfo=bj)) is None
+    monkeypatch.setattr(p.cfg, "sleep_by_model", True)
+    assert "自己定作息：开" in sp.describe(datetime(2026, 11, 15, 23, 0, tzinfo=bj)) and "天黑就睡" in sp.describe(datetime(2026, 11, 15, 23, 0, tzinfo=bj))
+
+
+async def test_sleep_plan_usual_1113(monkeypatch, tmp_path):
+    """第 3 轮：每晚程序抽一个“今天的平常”写进提示，她在上面早点晚点"""
+    p, sl, sp = _sleep_setup(monkeypatch, tmp_path)
+    from datetime import datetime
+    bj = p.peak.BEIJING
+    hm = lambda t: int(t[:2]) * 60 + int(t[3:])
+    seen = set()
+    for i in range(200):
+        a, b = sp.usual(f"2027-01-{i % 28 + 1:02d}-{i}")
+        assert sl._off(hm("23:00")) <= a <= sl._off(hm("00:30")) and sl._off(hm("07:00")) <= b <= sl._off(hm("08:30"))
+        assert (a + 720) % 5 == 0 and (b + 720) % 5 == 0
+        seen.add(a)
+    assert len(seen) > 5 and any(x > sl._off(hm("23:59")) for x in seen)                                         # 会抽到零点以后的
+    sp._usual.clear()
+    assert sp.usual("2026-11-20") == sp.usual("2026-11-20")                                   # 同一晚重问不变
+    monkeypatch.setattr(p.cfg, "sleep_usual_start", "乱写"); monkeypatch.setattr(p.cfg, "sleep_usual_end", "")
+    sp._usual.clear()
+    assert sp.usual("2026-11-21") == (sl._off(hm("23:30")), sl._off(hm("07:30")))            # 配错了用 23:30 / 7:30
+    monkeypatch.setattr(p.cfg, "sleep_usual_start", "23:00-00:30"); monkeypatch.setattr(p.cfg, "sleep_usual_end", "07:00-08:30")
+    sp._usual.clear()
+    sp._usual["2026-11-22"] = (sl._off(hm("23:50")), sl._off(hm("07:40")))
+    calls = []
+
+    async def create(**kw):
+        calls.append(kw)
+        return rc_resp('{"sleep": "00:20", "wake": "08:10", "why": "夜市还没散"}')
+    monkeypatch.setattr(p.core.client.chat.completions, "create", create)
+    monkeypatch.setattr(p.core.self_mem, "life_for_proactive", lambda *a, **k: {"place": {}, "fresh": [], "told_elsewhere": []})
+    plan = await sp.maybe_plan(datetime(2026, 11, 22, 20, 0, tzinfo=bj))
+    prompt = calls[-1]["messages"][0]["content"]
+    assert "今晚差不多 23:50 前后会犯困，明早 07:40 前后会醒" in prompt and "{usual" not in prompt and "过了零点也行" in prompt
+    assert plan["usual"] == "23:50-07:40" and (sl._hhmm(plan["start"]), sl._hhmm(plan["end"])) == ("00:20", "08:10")
+    assert "平常 23:50-07:40" in sp.describe(datetime(2026, 11, 22, 23, 0, tzinfo=bj))
+
+
+def rc_resp(content):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason="stop")], usage=None)

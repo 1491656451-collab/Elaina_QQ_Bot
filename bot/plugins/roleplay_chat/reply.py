@@ -165,6 +165,21 @@ _cold_until: dict[tuple[str, int], float] = {}   # 11/09 B：(会话, QQ) -> 这
 _cold_since: dict[tuple[str, int], float] = {}   # 这一段第一句来的时间（time.time()），算“对方这句是多久前发的”
 
 
+def _talked_elsewhere(uid: int, key: str) -> bool:
+    """11/13（《日志复核-1113》）：这个人 COLD_REPLY_MINUTES 分钟内在别的会话（群里）说过话、她也在那儿说过话：
+    不算聊冷了（11/12 23:04 刚在群里和她聊着，23:19 转到私聊，她“聊冷了”等了 5 分钟）"""
+    since = time.time() - cfg.cold_reply_minutes * 60
+    from .history import _histories
+    for k, h in list(_histories.items()):
+        if k == key or not h:
+            continue
+        he = any(e.get("uid") == uid and float(e.get("ts") or 0) >= since for e in h[-40:] if e.get("role") == "user")
+        she = any(float(e.get("ts") or 0) >= since for e in h[-40:] if e.get("role") == "assistant")
+        if he and she:
+            return True
+    return False
+
+
 def cold_wait(ik: tuple[str, int], key: str) -> float:
     """私聊聊冷了：这一轮还要等几秒（0 = 不等）。第一句来时抽签；这一段后面来的话等到同一个时刻"""
     now_m = time.monotonic()
@@ -174,6 +189,8 @@ def cold_wait(ik: tuple[str, int], key: str) -> float:
     history = get_history(key)
     last = next((float(h["ts"]) for h in reversed(history) if h.get("ts")), None)
     if last is not None and time.time() - last < cfg.cold_reply_minutes * 60:
+        return 0.0
+    if _talked_elsewhere(ik[1], key):           # 11/13：刚在群里和这个人聊过，转到私聊不算冷
         return 0.0
     r = random.random()
     if r < cfg.cold_reply_long_prob:

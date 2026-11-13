@@ -5,7 +5,7 @@ import time
 
 from nonebot import get_bots, logger
 
-from . import sleep, wake
+from . import sleep, sleep_plan, wake
 from .core import _hands, cfg
 from .history import _inbox, get_history
 from .sleep import _goodnight, night_key, sleep_window
@@ -50,9 +50,12 @@ async def _sleep_loop() -> None:
         await asyncio.sleep(30)
         try:
             night = night_key()
+            if await sleep_plan.maybe_plan():        # 11/13：到点问她今晚几点睡（SLEEP_BY_MODEL），定了就重新报一次
+                told = None
             if told != night and (w := sleep_window(night)):
                 told = night
-                logger.info(f"今晚 {w[0]:%H:%M} 睡，明早 {w[1]:%H:%M} 起（SLEEP_HOURS {cfg.sleep_hours}，前后浮动 {cfg.sleep_jitter_minutes:g} 分钟）")
+                how = "她自己定的" if sleep.planned(night) else f"SLEEP_HOURS {cfg.sleep_hours}，前后浮动 {cfg.sleep_jitter_minutes:g} 分钟"
+                logger.info(f"今晚 {w[0]:%H:%M} 睡，明早 {w[1]:%H:%M} 起（{how}）")
             if sleep.asleep() and done_night != night:
                 done_night = night
                 await goodnight_now()

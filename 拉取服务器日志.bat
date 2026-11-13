@@ -18,6 +18,8 @@ echo [1/6] 机器人日志
 scp %SERVER%:QQBot/bot/data/logs/bot_*.log "%OUT%"
 if not exist "%OUT%\bot_*.log" echo   ！！没下载到机器人日志，请把这个窗口截图发给 Claude
 scp -q %SERVER%:QQBot/bot/data/logs/memlog.log "%OUT%" 2>nul
+rem 11/12：NapCat 停更后要守住 QQ 版本——看 QQ 有没有自己下载热更新（正常应该是“没有 versions 目录”）
+ssh %SERVER% "grep -m1 '\"version\"' ~/Napcat/opt/QQ/resources/app/package.json; ls -la ~/.config/QQ/versions 2>&1" > "%OUT%\qq_version.txt"
 echo [2/6] 风控记录
 scp %SERVER%:QQBot/bot/data/risk_events.log "%OUT%"
 echo [3/6] 空间日志

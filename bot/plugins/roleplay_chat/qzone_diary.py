@@ -28,6 +28,7 @@ from nonebot.permission import SUPERUSER
 from nonebot.rule import to_me
 
 from . import budget
+from . import sleep as sleep_mod
 from . import (
     BOT_DIR, FAMILIARITY_HINT, tier_value, alert_admins, api_messages, cfg, classify_error, clean_reply, client, clip_input,
     drop_ooc_sentences, familiarity_of, get_history, in_peak, ltm, now_hint, ooc_words, peak, rate_limited, save_history,
@@ -318,10 +319,10 @@ def choose_moments(moments: list[dict]) -> list[dict]:
 def _tier_hint(m: dict) -> str:
     tier = m["tier"]
     if tier == "close":
-        name = ltm.get_user(int(m["qq"])).get("name") or ""
-        call = f"（对方的称呼：{name}）" if name else ""
+        # 11/13：原来把 QQ 昵称原文当“称呼”给她，11/05 那条把“そう、わたし私です”整个写进了正文。
+        # 现在只让她用平时的叫法或“老熟人”之类，QQ 网名进了 banned，写出来会被查出来重写
         return ("对方是你很熟的人：这件事可以写得分量重一点，嘴硬但看得出你在意。可以让对方一看就知道是在说他："
-                f"用对方的称呼{call}，或者写“某个老熟人”“那个总来烦我的家伙”之类。")
+                "用你平时对他的叫法，或者写“某个老熟人”“那个总来烦我的家伙”之类；不要写他的 QQ 网名，也不要写外文。")
     if tier == "acquaintance":
         return "对方是熟人：随口一提，带点调侃，写成“一个熟人”“之前认识的某人”，不写名字。"
     if tier == "friend":
@@ -342,15 +343,37 @@ DIARY_PROMPT = """【这次不是聊天，是写旅行日记，发在 QQ 空间�
 这条日记会被很多人看到。配图是今天的你：{desc}
 今天用传信魔法聊过天的人，都是你旅途中“新认识的人”或者熟人（不要把他们叫作“旅人”）。
 {moments}
+这次想怎么写（只是个起点，觉得不合适可以换别的写法）：{way}
 写作要求：
-- 文案要和配图对得上：可以写图里的场景、你在做什么、你的心情。
-- 篇幅：{length}。
-- 用你写旅行日记时的口吻（和聊天时不一样）：冷静的第一人称旁白，吐槽写在叙述里，自恋、嘴硬、有点毒舌，偶尔流露一点真心。像随手写的日记，不要写成文章。
-- 日记里才会用的习惯可以偶尔用上，但大多数时候一样都不用；用的话一条最多一样，别和最近几条用同一样（“话虽如此”尤其容易用多，要少用）：先把自己描述一番再自问自答（“……那位魔女究竟是谁？没错，就是我。”）、“话虽如此”“顺带一提”“原来如此原来如此”“可喜可贺可喜可贺”、结尾一句淡淡的感想（比如“卑鄙跟温柔果然挺类似的呢。”）。
+- 一条只讲一件事。写见闻就专心写见闻，配图里的样子最多顺带一句；没有合适的见闻，就写图里的场景和心情。别把几件不相干的事拼在一起，句子和句子之间要接得上。
+- 见闻是你自己对这件事的概括，细节记不清了就别写细节：见闻里没写的事别添（谁请了什么、你替他做了什么、他说了什么原话），也别写对方的表情和动作——你们是隔着传信魔法聊的，看不到对方。
+- 篇幅：{length}。写不满就少写，别为了凑字数编情节。
+- 口吻随意，像真人随手发的说说：可以是冷静的旁白、一句吐槽、没头没尾的碎碎念，都行；还是你的性格，自恋、嘴硬、有点毒舌，偶尔流露一点真心。不要写成文章。
+{habits}
 - 不写任何人的 QQ 号、群名，不写别人私事的细节；除了上面明确允许的称呼，不写任何人的名字。
 - 不落款（不要写“——伊蕾娜”），不加“#话题”，最多一个颜文字，也可以不加。不要出现“日记”“说说”“配图”“画像”这些字眼。
 - 别和最近几条重复开头、句式和话题。最近几条：{recent}
 只输出正文。"""
+
+# 11/14：写法多样一点（用户：“可以写的更多样随意一点”）。每次抽一个方向当起点，她可以不照着写。
+# (写法, 有见闻时的权重, 没见闻时的权重)
+WRITE_WAYS = [
+    ("记今天聊天里的一件事", 4, 0),
+    ("隔空对今天聊过的某个人说一句话（不点名，对方看了知道是在说他）", 2, 0),
+    ("一句话吐槽，或者没头没尾的碎碎念，不用交代前因后果", 2, 3),
+    ("写吃到的东西、路过的地方、今天的天气", 1, 3),
+    ("自言自语，写突然想到的一个念头", 1, 2),
+    ("问看说说的人一个问题", 1, 1),
+    ("只写心情，不写发生了什么", 1, 2),
+    ("写图里的样子和当时在做什么", 1, 2),
+]
+
+
+def pick_way(has_moments: bool) -> str:
+    ways = [(w, a if has_moments else b) for w, a, b in WRITE_WAYS]
+    ways = [(w, x) for w, x in ways if x > 0]
+    return random.choices([w for w, _ in ways], weights=[x for _, x in ways])[0]
+
 
 NO_MOMENT = ("今天没什么特别想写的见闻：就写旅途中的一件小事（在哪个国家或小镇、看到了什么、吃了什么），"
              "随手编一件就好，不要搬出书里有名有姓的人物和事件；也可以只写图里的场景和心情。")
@@ -375,6 +398,66 @@ def privacy_problems(text: str, banned_names: set[str]) -> list[str]:
     return bad
 
 
+# 11/13：日记里的口头习惯（原作里她就爱说，不限制用不用）。只管两件事：一条里最多一样（11/05、11/13 都塞了两样，读着乱）；
+# 别和上一条用同一样（“……就是我”11/12、11/13 连着两天）。写完再查一遍
+HABITS = [
+    ("就是我", "先把自己描述一番再自问自答（“……那位魔女究竟是谁？没错，就是我。”）",
+     re.compile(r"(究竟|到底)是谁|魔女[^。！？\n]{0,12}就是我")),
+    ("话虽如此", "“话虽如此”", re.compile(r"话虽如此")),
+    ("顺带一提", "“顺带一提”", re.compile(r"顺带一提|顺便一提")),
+    ("原来如此", "“原来如此原来如此”", re.compile(r"原来如此原来如此")),
+    ("可喜可贺", "“可喜可贺可喜可贺”", re.compile(r"可喜可贺")),
+    ("结尾感想", "结尾一句淡淡的感想（比如“卑鄙跟温柔果然挺类似的呢。”）", None),
+]
+_HABIT_TEXT = {k: t for k, t, _ in HABITS}
+
+
+def habits_in(text: str) -> list[str]:
+    return [k for k, _, rx in HABITS if rx is not None and rx.search(text or "")]
+
+
+def habits_recent(n: int = 1) -> set[str]:
+    return {h for p in recent_posts(n) for h in habits_in(p.get("text", ""))}
+
+
+def habit_rule(has_moments: bool, used: set[str]) -> str:
+    allowed = [k for k, _, _ in HABITS if k not in used]
+    line = "- 你写日记时爱用的几句可以用，但一条最多用一样：" + "、".join(_HABIT_TEXT[k] for k in allowed) + "。"
+    if used:
+        line += "上一条用过" + "、".join(_HABIT_TEXT[k] for k in used) + "，这条换一样或者不用。"
+    return line
+
+
+# 11/06 那条结尾多出“（文字，约一百五十字。）”：把长度要求原样写进了正文
+_LEAK_RE = re.compile(r"[（(][^（）()\n]{0,16}?[一二三四五六七八九十百千两\d]+\s*(个)?字[^（）()\n]{0,8}[）)]")
+_KANA_RE = re.compile(r"[\u3040-\u30ff]")
+
+
+def strip_leaks(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", _LEAK_RE.sub("", text)).strip()
+
+
+def _name_parts(name: str) -> set[str]:
+    """QQ 网名本身，再加上按标点拆开的每一段（“そう、わたし私です”→ そう、わたし私です）"""
+    name = re.sub(r"[\u2060-\u206f\u200b-\u200f]", "", name or "").strip()
+    parts = {name} | {x for x in re.split(r"[\s、，,。.・·~～!！?？()（）\[\]【】]+", name)}
+    return {x for x in parts if len(x) >= 2}
+
+
+def diary_problems(text: str, banned: set[str], used: set[str], has_moments: bool) -> list[str]:
+    """写完再查一遍：出戏、写了名字号码、日文、口头习惯用多了 / 用了最近用过的"""
+    bad = ooc_words(text, "") + privacy_problems(text, banned)
+    if _KANA_RE.search(text):
+        bad.append("日文")
+    hs = habits_in(text)
+    if len(hs) >= 2:
+        bad.append(f"一条里用了 {len(hs)} 样口头习惯（{'、'.join(hs)}）")
+    for h in hs:
+        if h in used:
+            bad.append(f"“{h}”上一条刚用过")
+    return bad
+
+
 async def make_post() -> dict:
     """生成一条说说草稿：{text, image, desc, moments}；失败抛异常"""
     if not cfg.deepseek_api_key:
@@ -386,22 +469,29 @@ async def make_post() -> dict:
     if not img:
         raise RuntimeError(f"图库里没有可用的图（{gallery.image_dir}）")
 
-    lw = list(cfg.qzone_length_weights) + [0] * (3 - len(cfg.qzone_length_weights))
-    length, max_tokens = random.choices(LENGTHS, weights=lw[:3])[0]
+    lw = (list(cfg.qzone_length_weights) + [0] * 3)[:3]
+    if len(moments) < 2:
+        lw[2] = 0          # 11/13：素材不到两件不写长的（第三档 4 条里 4 条都在凑字数、编情节、硬拼）
+    if not any(lw):
+        lw = [1, 1, 0]
+    length, max_tokens = random.choices(LENGTHS, weights=lw)[0]
     if moments:
-        lines = ["今天想写进去的事（挑着写，不用全写，也可以只写其中一件）："]
+        lines = ["今天记下的事（想写就挑一件；这次的写法用不上就不写）："]
         for m in moments:
             lines.append(f"- {m['event']}（你的感受：{m.get('mood') or '说不上来'}）——{_tier_hint(m)}")
         moment_text = "\n".join(lines)
     else:
         moment_text = NO_MOMENT
     recent = "；".join(f"「{p['text'][:30]}」" for p in recent_posts()) or "（还没有）"
+    used = habits_recent()
     now = _now()
     prompt = DIARY_PROMPT.format(date=f"{now.month}月{now.day}日", weekday=WEEKDAYS[now.weekday()],
                                  period=_period(now), desc=img["desc"], moments=moment_text,
-                                 length=length, recent=recent)
-    banned = {ltm.get_user(int(m["qq"])).get("name", "") for m in today_moments()
-              if familiarity_of(int(m["qq"])) != "close"}
+                                 length=length, recent=recent, habits=habit_rule(bool(moments), used),
+                                 way=pick_way(bool(moments)))
+    banned = set()        # 11/13 起很熟的人的 QQ 网名也不许写（原来很熟的不查）
+    for m in today_moments():
+        banned |= _name_parts(ltm.get_user(int(m["qq"])).get("name", ""))
     messages = [{"role": "system", "content": system_prompt()}, {"role": "system", "content": prompt}]
 
     async def ask(extra: list[dict]) -> str:
@@ -416,16 +506,19 @@ async def make_post() -> dict:
         t = clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length")
         return re.sub(r"\n*\s*[—-]{1,2}\s*伊蕾娜\s*$", "", t).strip()
 
-    text = await ask([])
-    bad = ooc_words(text, "") + privacy_problems(text, banned)
+    text = strip_leaks(await ask([]))
+    bad = diary_problems(text, banned, used, bool(moments))
     if bad:
         logger.info(f"说说文案有问题（{bad}），重写：{text[:40]}")
-        text = await ask([{"role": "assistant", "content": text},
-                          {"role": "system", "content": f"刚才写的有问题（出现了：{'、'.join(bad)}）。伊蕾娜不知道这些东西，"
-                                                        "也不能写出别人的名字和号码。请完全按要求重写，只输出正文。"}])
-        if ooc_words(text, "") or privacy_problems(text, banned):
+        text = strip_leaks(await ask([{"role": "assistant", "content": text},
+                          {"role": "system", "content": f"刚才写的有问题：{'；'.join(bad)}。伊蕾娜不知道书外的东西，"
+                                                        "不能写出别人的名字、网名和号码，不写日文，口头习惯一条最多一样、别和上一条用同一样。"
+                                                        "请完全按要求重写，只输出正文。"}]))
+        if diary_problems(text, banned, used, bool(moments)):
+            logger.info(f"说说重写后还有问题（{diary_problems(text, banned, used, bool(moments))}），删掉有问题的句子")
             parts = re.split(r"(?<=[。！？!?…~\n])", text)
-            text = "".join(p for p in parts if not ooc_words(p, "") and not privacy_problems(p, banned)).strip()
+            text = "".join(p for p in parts if not ooc_words(p, "") and not privacy_problems(p, banned)
+                           and not _KANA_RE.search(p)).strip()
     if not text:
         raise RuntimeError("文案写出来有问题，删完就没了")
     return {"text": text, "image": img["file"], "desc": img["desc"],
@@ -699,13 +792,15 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
     return re.sub(r"\s*\n+\s*", "，", reply).strip()[:150]
 
 
-def _remember_action(uin: int, nick: str, said: str, where: str) -> None:
-    """她在空间里做了件事但没说话（比如只点了个赞）：只记一行“对方 + 她做了什么”，不编她说的话"""
+def _remember_action(uin: int, nick: str, said: str, where: str, pending: bool = True) -> None:
+    """空间里发生了件没人说话的事（她只点了个赞、别人给她点了赞）：只记一行，不编谁说的话。
+    pending=False：只记空间记录，不交给长期记忆整理（11/14：给她点赞的陌生人不为这个新建档案）"""
     key = f"qzone_{uin}"
     line = f"【{nick}】（{where}）{said}"
     get_history(key).append({"role": "user", "content": line, "uid": uin, "name": nick, "ts": time.time()})
     save_history(key)
-    ltm.add_pending(key, [{"role": "user", "content": line, "uid": uin, "name": nick}])
+    if pending:
+        ltm.add_pending(key, [{"role": "user", "content": line, "uid": uin, "name": nick}])
 
 
 def _remember(uin: int, nick: str, said: str, reply: str, where: str, taboo: bool = True) -> None:
@@ -892,7 +987,37 @@ async def poll_comments(force: bool = False) -> str:
             _round["n"] += 1                                  # 可能其实发出去了：本轮额度照算，今天的上限不算
         else:
             skipped += 1
-    return f"自己的说说：查了 {len(posts)} 条，新评论 {len(todo)} 条，回了 {replied} 条，不理 {skipped} 条"
+    liked = await _note_likers(me, posts)
+    return (f"自己的说说：查了 {len(posts)} 条，新评论 {len(todo)} 条，回了 {replied} 条，不理 {skipped} 条"
+            + (f"，新点赞 {liked} 人" if liked else ""))
+
+
+async def _note_likers(me: int, posts: list[dict]) -> int:
+    """11/14：看看谁给她最近的说说点了赞，新点赞的人记进他的空间记录（私聊时她知道、长期记忆也能整理进去）。
+    只看 2 天内的最多 2 条，每条一次读请求；出错不影响别的"""
+    if not cfg.qzone_note_likers:
+        return 0
+    recent = [p for p in posts if time.time() - int(p.get("created_time") or 0) < 2 * 86400][:2]
+    n = 0
+    for p in recent:
+        tid = str(p.get("tid"))
+        try:
+            people = await qz.likers(tid)
+        except QzoneError as e:
+            if e.kind in ("api", "format", "page", "network"):
+                logger.info(f"空间：查谁赞了说说没成功（{e}），下一轮再看")
+                continue
+            raise
+        known = next((x for x in _read(POSTS_FILE, []) if x["tid"] == tid), None)
+        text = plain_text((known or {}).get("text") or str(p.get("content") or ""))
+        new = [(u, nick) for u, nick in people if f"liker|{tid}|{u}" not in _seen()]
+        for u, nick in new:
+            _remember_action(u, nick or str(u), f"你那条日记写的是「{text[:30]}」", "给你的日记点了个赞",
+                             pending=bool(ltm.get_user(u).get("talks")))      # 聊过天的才交给长期记忆
+        _mark_seen([f"liker|{tid}|{u}" for u, _ in new])
+        n += len(new)
+        await asyncio.sleep(random.uniform(1, 3))
+    return n
 
 
 async def find_mentions(me: int) -> tuple[list[dict], list[str]]:
@@ -1270,8 +1395,11 @@ async def poll_all() -> str:
 
 # ------------------------------------------------------------------ 定时
 def _new_day_state(day: str) -> dict:
-    (a, b), = peak.parse_ranges(cfg.qzone_post_window)[:1] or [(1230, 1350)]
-    m = random.randint(a, max(a, b - 1))
+    (a, b), = peak.parse_ranges(cfg.qzone_post_window)[:1] or [(570, 1410)]
+    lo = a
+    if random.random() < 0.4 and b - 60 > max(a, 19 * 60):
+        lo = max(a, 19 * 60)          # 11/14：时间放宽到白天，但晚上稍微多一点（晚上见闻多）
+    m = random.randint(lo, max(lo, b - 1))
     old = _read(STATE_FILE, {})
     return {"date": day, "post_at": f"{m // 60:02d}:{m % 60:02d}", "posted": False, "post_tries": 0,
             "summary_done": False, "paused": old.get("paused", False), "last_poll": old.get("last_poll", 0),
@@ -1356,11 +1484,10 @@ async def tick() -> None:
 
     if not st["posted"] and _hm(st["post_at"]) <= minute < end + 60 and st.get("post_tries", 0) < 3:
         last = recent_posts(1)
-        if last and time.time() - last[-1]["ts"] < cfg.qzone_post_min_gap_hours * 3600:
-            st["posted"] = True          # 离上一条（比如手动发的）还不到 12 小时：今天这条不发了
-            save_state(st)
-            logger.info(f"QQ 空间：离上一条说说不到 {cfg.qzone_post_min_gap_hours:g} 小时，今天的定时说说跳过")
-            return
+        if last and now.timestamp() - last[-1]["ts"] < cfg.qzone_post_min_gap_hours * 3600:
+            return                       # 离上一条还不到 12 小时：等到满了再发（11/14 起不再直接跳过，白天也能发了）；过了时间段就算了
+        if sleep_mod.asleep(now):
+            return                       # 11/14：她睡着了不发，醒了还在时间段里再发
         if write_block():
             await _warm_cookie()
             return                   # 到点了但现在还不能写：过几分钟再来，不算失败次数
@@ -1380,8 +1507,8 @@ async def tick() -> None:
             save_state(st)
         st["post_tries"] = st.get("post_tries", 0) + 1
         save_state(st)
-        if not st["summary_done"]:
-            st["summary_done"] = True
+        if not st["summary_done"] and minute >= _hm(cfg.qzone_daily_summary_at):
+            st["summary_done"] = True     # 晚上发之前先日结；白天发的不提前日结（晚上的聊天还要留给日结）
             save_state(st)
             await daily_summary()
         try:

@@ -569,6 +569,25 @@ class Qzone:
     def _like_key(owner: int, tid: str) -> str:
         return f"http://user.qzone.qq.com/{owner}/mood/{tid}"
 
+    async def likers(self, tid: str, owner: int | None = None) -> list[tuple[int, str]]:
+        """谁给这条说说点过赞（11/14 加：让她知道谁赞了她的日记）。返回 [(QQ, 昵称)]，最多 60 个，不含她自己"""
+        c = await self.ctx()
+        owner = owner or c.uin
+        text = await self._req("查谁赞过", "GET", URL_LIKE_LIST, raw=True, params={
+            "uin": c.uin, "unikey": self._like_key(owner, tid), "begin_uin": 0, "query_count": 60,
+            "if_first_page": 1, "g_tk": c.gtk,
+        })
+        out = []
+        for m in re.finditer(r'"fuin"\s*:\s*(\d+)\s*,\s*"nick"\s*:\s*"((?:[^"\\]|\\.)*)"', text):
+            uin = int(m.group(1))
+            if uin != c.uin:
+                try:
+                    nick = json.loads(f'"{m.group(2)}"')
+                except ValueError:
+                    nick = m.group(2)
+                out.append((uin, nick))
+        return out
+
     async def liked_by_me(self, tid: str, owner: int) -> bool:
         """这条说说她赞过没有（读“谁赞过”列表，看里面有没有她）"""
         c = await self.ctx()

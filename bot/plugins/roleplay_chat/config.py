@@ -196,7 +196,7 @@ class Config(BaseModel):
 
     # ---- QQ 空间日记：每天一条说说（图 + 文案），回复说说下的评论 ----
     qzone_enabled: bool = False           # 总开关。先用 /空间测试 测通接口，再在 .env 里改成 true
-    qzone_post_window: str = "20:30-22:30"   # 每天在这段时间里随机挑一个时刻发（北京时间）
+    qzone_post_window: str = "09:30-23:30"   # 每天在这段时间里随机挑一个时刻发（北京时间；晚上稍多一点；她睡着时不发）。11/14 从 20:30-22:30 放宽
     qzone_daily_summary_at: str = "20:00"    # “日结”：把白天还没整理的聊天先整理成见闻
     qzone_image_dir: str = "qzone/images"    # 图库（相对 bot 目录）
     qzone_data_dir: str = "data/qzone"
@@ -227,6 +227,7 @@ class Config(BaseModel):
     # 10/24 起评不评由她自己看了再决定，不再按关系抽签（原来的 QZONE_FRIEND_COMMENT_PROB 去掉了）
     qzone_friend_like: bool = False       # 给好友的说说点赞（她看完自己决定点不点；只赞说说本身）。10/24 加，接口还没实测：先用 /说说 点赞 手动试一次，没问题再改成 true
     qzone_friend_like_daily_max: int = 10 # 每天最多点几个赞
+    qzone_note_likers: bool = True        # 看谁给她最近的说说点了赞，记进那个人的空间记录（11/14）
     qzone_self_like: bool = True          # 自己发完说说，过几分钟给自己点个赞（10/27 用户要的）
     qzone_space_memo_hours: float = 48.0  # 私聊时告诉她最近这么多小时里和对方在空间的往来（评论、点赞）；0 = 不告诉
     qzone_friend_comment_daily_max: int = 5    # 每天最多评论几条好友的说说（单独算，不占上面回评论的条数；9/29 从 2 调到 5）
@@ -381,6 +382,15 @@ class Config(BaseModel):
     sleep_hours: str = "23:30-07:30"      # 休息时段（北京时间，可以跨午夜）；只看第一段
     sleep_winddown_minutes: float = 20.0  # 离睡觉还有这么多分钟时，提示她慢慢流露困意、把话题往收尾靠（不突然说再见）；0 = 不提示
     sleep_jitter_minutes: float = 20.0    # 每天睡、起的时间在上面的基础上前后浮动几分钟（每晚随机一次，重启不变）
+    # 11/13（《方案-她自己定作息-1113》）：每天傍晚问她今晚几点睡、明早几点起，按她定的来；问不到就用上面的 SLEEP_HOURS
+    sleep_by_model: bool = False
+    sleep_plan_at: str = "20:00"          # 几点问她（北京时间）；这之后才启动的，没过入睡最早时间就补问一次
+    sleep_start_range: str = "22:00-01:30"   # 几点睡只能在这段里，超出就收到边上
+    sleep_end_range: str = "06:00-09:30"     # 几点起只能在这段里
+    sleep_usual_start: str = "23:00-00:30"   # “今天的平常”：每晚在这段里随机抽一个几点犯困，写进提示，她按今天的情况在上面早点晚点（11/13 第 3 轮）
+    sleep_usual_end: str = "07:00-08:30"     # 同上，几点醒
+    sleep_min_hours: float = 6.0          # 睡多久的上下限，超出就挪起床时间
+    sleep_max_hours: float = 10.0
     farewell_on_limit: bool = True        # 限额（今天的钱 / 这个人、这个群的份额）用完时，补一句“我要上路了”之类的告别（不调用模型）
     farewell_active_minutes: float = 10.0 # 今天的钱用完时，这么多分钟内她说过话的群和私聊都会收到告别
     reply_delay_min: float = 1.5          # 回复前随机“打字”延迟（秒）

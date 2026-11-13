@@ -186,3 +186,16 @@ docs/截图清单-*.md
 # 11/11：脑补和海边回放报告引了 11/11 群聊原话；交接里也引了线上原话（部署 agent 加）
 docs/脑补和海边回放报告-*.md
 docs/交接-打算日子对不上-*.md
+
+# 11/12：NapCat 整份备份和安装脚本留底（部署 agent 加）
+Napcat_*.tgz
+napcat_install_*.sh
+
+# 11/13～11/14：说说、作息、“刚看到”回放的题目结果和报告（真实网名、私聊原话），说说语言混乱的交接（原话、QQ 号），说说回放工具里写了真实 QQ 号（部署 agent 加）
+docs/说说回放/
+docs/说说回放报告-*.md
+docs/作息回放/
+docs/作息回放报告-*.md
+docs/刚看到回放报告-*.md
+docs/交接-说说语言混乱-*.md
+bot/tools/diary_replay.py

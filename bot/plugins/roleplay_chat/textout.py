@@ -14,6 +14,8 @@ from .textin import sender_label
 
 
 _PREFIX_RE = re.compile(r"^\s*(?:【[^】]{1,40}】|[^\s【】]{1,16}\s*→\s*[^\s：:]{1,16}\s*[:：])\s*[:：]?\s*")
+# 11/13（《日志复核-1113》）：“（刚看到）你不是还有精神在这儿说胡话吗”——照着提示里“刚看到”写成括号放在开头。开头这种状态括号去掉
+_STATE_PAREN_RE = re.compile(r"^\s*[（(]\s*(?:刚刚?(?:才)?看到|才看到|刚睡醒|刚醒|刚回来)[^（）()\n]{0,6}[）)]\s*")
 
 
 # 语音标记（10/20）：她可能写「【传声】」（照着提示的标题写）、「[发了语音] ……」（照着聊天记录写）、
@@ -91,6 +93,7 @@ def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) 
     if voice_wish or text != before.strip():
         done.append("语音标记")
     text = step("开头前缀", text, _PREFIX_RE.sub("", text))
+    text = step("开头状态括号", text, _STATE_PAREN_RE.sub("", text) or text)
     text = step("重名记号", text, re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text))     # 重名记号“小明#2”：她说出来时去掉
     text = step("提示抄进括号", text, _LEN_PAREN_RE.sub("", _META_PAREN_RE.sub("", text)).strip())   # 抄进来的提示说明、篇幅说明
     no_action = re.sub(r"\n{3,}", "\n\n", _ACTION_PAREN_RE.sub("", text)).strip()
