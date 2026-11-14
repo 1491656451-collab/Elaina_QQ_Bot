@@ -15,6 +15,11 @@ from .textin import sender_label
 
 _PREFIX_RE = re.compile(r"^\s*(?:【[^】]{1,40}】|[^\s【】]{1,16}\s*→\s*[^\s：:]{1,16}\s*[:：])\s*[:：]?\s*")
 # 11/13（《日志复核-1113》）：“（刚看到）你不是还有精神在这儿说胡话吗”——照着提示里“刚看到”写成括号放在开头。开头这种状态括号去掉
+# 11/14：心声前面多写了标签——“（心里补一句：……）”“（心里一句：……）”“心里话：……”。括号里的去掉标签留心声；
+# 一行开头没括号的，去掉标签、把这行放进括号（她说出口的话不会带“心里话：”）
+_THOUGHT_LABEL = r"(?:心里|心中|心底|内心|心声|心想|暗想|默默想|小声)(?:再|又|补|默默)?(?:一句|话|说|想|嘀咕|吐槽|默念|独白|OS|os)?\s*[：:]\s*"
+_THOUGHT_IN_PAREN_RE = re.compile(r"([（(])\s*" + _THOUGHT_LABEL)
+_THOUGHT_LINE_RE = re.compile(r"(?m)^([ \t]*)" + _THOUGHT_LABEL + r"([^\n]+?)\s*$")
 _STATE_PAREN_RE = re.compile(r"^\s*[（(]\s*(?:刚刚?(?:才)?看到|才看到|刚睡醒|刚醒|刚回来)[^（）()\n]{0,6}[）)]\s*")
 
 
@@ -76,6 +81,12 @@ _PSEUDO_TAG_RE = re.compile(r"[\[［](?:CQ:)?[A-Za-z_]{1,16}\s*[=:：][^\]］\n]
 _TIME_MARK_LINE_RE = re.compile(r"\n[ \t]*[（(]\s*(?:过了|隔了|\d+\s*(?:秒|分钟?|小时|天)后)[^（）()\n]{0,12}[）)][ \t]*(?=[^\s])")
 
 
+def _strip_thought_label(text: str) -> str:
+    text = _THOUGHT_IN_PAREN_RE.sub(r"\1", text)
+    text = _THOUGHT_LINE_RE.sub(lambda m: f"{m.group(1)}（{m.group(2).strip('（）() ')}）", text)
+    return re.sub(r"[（(]\s*[）)]", "", text).strip()
+
+
 def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) -> str:
     done: list[str] = []                  # 10/23：这次清理改了什么，最后汇总写一行日志（没改就不写）
 
@@ -94,6 +105,7 @@ def clean_reply(text: str, truncated: bool = False, keep_sticker: bool = False) 
         done.append("语音标记")
     text = step("开头前缀", text, _PREFIX_RE.sub("", text))
     text = step("开头状态括号", text, _STATE_PAREN_RE.sub("", text) or text)
+    text = step("心声标签", text, _strip_thought_label(text))
     text = step("重名记号", text, re.sub(r"(?<=[^\s\d#])#\d{1,2}(?![\d])", "", text))     # 重名记号“小明#2”：她说出来时去掉
     text = step("提示抄进括号", text, _LEN_PAREN_RE.sub("", _META_PAREN_RE.sub("", text)).strip())   # 抄进来的提示说明、篇幅说明
     no_action = re.sub(r"\n{3,}", "\n\n", _ACTION_PAREN_RE.sub("", text)).strip()

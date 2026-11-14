@@ -7606,5 +7606,20 @@ async def test_sleep_plan_usual_1113(monkeypatch, tmp_path):
     assert "平常 23:50-07:40" in sp.describe(datetime(2026, 11, 22, 23, 0, tzinfo=bj))
 
 
+def test_thought_label_1114():
+    """11/14：心声前面的“心里补一句：”“心里一句：”“心里话：”这类标签去掉，心声本身留着"""
+    import plugins.roleplay_chat as p
+    c = p.clean_reply
+    assert c("是喔。那你平时的作息还挺像普通人。（心里补一句：怎么听着像在跟我辩白）") == "是喔。那你平时的作息还挺像普通人。（怎么听着像在跟我辩白）"
+    assert c("刚醒就看到这句，你这毛病还真是一点没改。\n\n（心里一句：一天到晚净整这套）") == "刚醒就看到这句，你这毛病还真是一点没改。\n\n（一天到晚净整这套）"
+    assert c("好啊。(心想:又来了)") == "好啊。(又来了)"
+    assert c("（内心OS：真是的……）还行吧") == "（真是的……）还行吧"
+    assert c("心里话：这人真烦。\n算了，晚安。") == "（这人真烦。）\n算了，晚安。"           # 没括号的整行：放进括号
+    assert c("心声：（已经括号了）\n嗯。") == "（已经括号了）\n嗯。"
+    assert c("（心里：）就这样") == "就这样"                                                   # 只剩空括号就删掉
+    for keep in ("我心里有话不想说。", "你说的心里话：我听见了", "（真是的……）", "嗯，心里想着别的事。"):
+        assert c(keep) == keep                                                                 # 不是标签的不动
+
+
 def rc_resp(content):
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason="stop")], usage=None)
