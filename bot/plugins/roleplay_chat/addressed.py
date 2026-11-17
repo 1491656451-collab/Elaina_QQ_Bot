@@ -150,9 +150,12 @@ async def _addressed(bot: Bot, event: MessageEvent) -> bool:
     text = message_to_text(event.get_message())
     if not text or text.startswith(tuple(bot.config.command_start or {"/"})):
         return False
-    # 群里没 @ 她的纯图片 / 纯表情：不当成在跟她说话（不回复，只进旁听，显示为 [图片]）。
-    # 例外：本机角色识别认出图里画的是她，她可能看一眼、说一句
+    # 群里没 @ 她的纯图片 / 纯表情：一般不当成在跟她说话（不回复，只进旁听，显示为 [图片]）。
+    # 例外：① 11/17 她刚回过这个人、这期间群里没别人说话，这个人接着甩来一张图 / 一个表情：是在对她刚说的话做反应，
+    # 算接她的话（看不看、接不接由她定，提示里会说这是表情包）；② 本机角色识别认出图里画的是她，她可能看一眼、说一句
     if not re.sub(r"\[(图片|语音|视频|表情[^\]]*)\]|\s", "", text):
+        if _media_followup(event, now):
+            return True
         return await _self_image_react(event)
     gid = event.group_id
     names = [n for n in list(cfg.smart_names) + list(bot.config.nickname or []) if n]
@@ -217,6 +220,23 @@ _last_self_react: dict[int, float] = {}
 
 
 _self_react_seen: dict[str, float] = {}   # 图片 -> 上次为它搭话的时间（同一张表情包一天只搭一次）
+
+
+def _media_followup(event: GroupMessageEvent, now: float) -> bool:
+    """11/17：纯图片 / 纯表情，是不是在接她的话：她回完这个人 FOLLOWUP_JUDGE_WINDOW 秒内（高峰时只算 FOLLOWUP_WINDOW 秒内），
+    这期间群里没别人说话。语音、视频她看不了，不算"""
+    if not cfg.media_followup or not any(seg.type in ("image", "face", "mface") for seg in event.get_message()):
+        return False
+    gid, uid = event.group_id, event.user_id
+    replied = _replied_at.get((gid, uid))
+    if replied is None:
+        return False
+    window = cfg.followup_window if core.in_peak() else max(cfg.followup_window, cfg.followup_judge_window)
+    if now - replied > window or others_spoke_since(gid, uid, replied):
+        return False
+    _engaged[(gid, uid)] = now
+    logger.info(f"刚回过这个人，他接着甩来图 / 表情（隔了 {now - replied:.0f} 秒），算接她的话：群{gid} {sender_name(event)}")
+    return True
 
 
 async def _self_image_react(event: GroupMessageEvent) -> bool:

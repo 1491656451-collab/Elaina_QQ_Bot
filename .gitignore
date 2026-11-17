@@ -199,3 +199,16 @@ docs/作息回放报告-*.md
 docs/刚看到回放报告-*.md
 docs/交接-说说语言混乱-*.md
 bot/tools/diary_replay.py
+
+# 11/17：表情包回放的题目（私聊原话）、结果和报告；测试用的表情包、动图（别人的图，只留说明）；动图拼图和逐张原始结果（部署 agent 加）
+bot/tools/sticker_cases.json
+bot/tools/表情包对比/*
+!bot/tools/表情包对比/说明.txt
+bot/tools/识图动图/*
+!bot/tools/识图动图/说明.txt
+docs/表情包回放/
+docs/表情包回放报告-*.md
+docs/识图动图测试/拼图/
+docs/识图动图测试/动图_*.md
+docs/识图表情测试/表情_*.md
+docs/识图表情测试/复测_*.md

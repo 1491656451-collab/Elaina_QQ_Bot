@@ -22,6 +22,21 @@ def _strip_her_names(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# 11/17：别人拿来当表情发的图。QQ 收藏 / 动画表情是 sub_type=1，贴图 7，表情搜索出来的动图 11……普通照片、截图是 0；
+# 表情一般还带说明（summary=“[动画表情]”“[我去]”）。gif 也多半是表情。拿不准的（sub_type=0、没说明的静图）不算，交给提示让她自己看
+STICKER_NOTE = "（是表情包）"
+
+
+def is_sticker_image(data: dict) -> bool:
+    sub = str(data.get("sub_type") if data.get("sub_type") is not None else "").strip()
+    if sub not in ("", "0", "None"):
+        return True
+    if re.sub(r"[\[\]\s]", "", str(data.get("summary") or "")):
+        return True
+    name = str(data.get("file") or "").split("?")[0].lower()
+    return name.endswith(".gif")
+
+
 def seg_text(seg: MessageSegment) -> str:
     if seg.type == "text":
         return seg.data.get("text", "")
@@ -788,7 +803,7 @@ async def _rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> 
         parts = []
         for seg in msg:
             if seg.type == "image" and await vision.shows_self(seg.data):
-                parts.append("[图片：伊蕾娜本人的画像]")
+                parts.append("[图片：伊蕾娜本人的画像" + (STICKER_NOTE if is_sticker_image(seg.data) else "") + "]")
             else:
                 parts.append(seg_text(seg))
         return "".join(parts).strip()
@@ -798,7 +813,8 @@ async def _rich_text(event: MessageEvent, look: bool, drop_at: bool = False) -> 
         if seg.type == "image" and budget > 0:
             budget -= 1
             desc = mark_her_lines(await vision.describe(seg.data))     # 11/06 截图里她说过的话标出来
-            parts.append(f"[图片：{desc}]" if desc else "[图片]")
+            note = STICKER_NOTE if is_sticker_image(seg.data) else ""     # 11/17 当表情发的：告诉她这是表情包
+            parts.append(f"[图片：{desc}{note}]" if desc else f"[图片{note}]")
         else:
             parts.append(seg_text(seg))
     text = "".join(parts).strip()

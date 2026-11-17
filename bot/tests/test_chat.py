@@ -764,7 +764,8 @@ async def test_group_images_not_read_unless_addressed(app: App, monkeypatch):
         ctx.receive_event(bot, gev(img(1), False, uid=2601, mid=1400))
     assert VISION["calls"] == 0 and CALLS == []
     assert any(t.endswith("[图片]") for _, _, t, _ in p._passive[555])
-    # 2) 刚 @ 过她的人，紧接着只发一张图（没配文字）：也不当成在跟她说话
+    # 2) 刚 @ 过她的人，她回完、群里没别人说话，接着只发一张图（没配文字）：11/17 起算接她的话，看图、回
+    #    （以前是不当成在跟她说话；用户 11/17 定的：别人常拿图当表情回她）
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
         ev = gev("伊蕾娜", True, uid=2602, mid=1401)
@@ -772,8 +773,19 @@ async def test_group_images_not_read_unless_addressed(app: App, monkeypatch):
         ctx.should_call_send(ev, "嗯。", result=None, bot=bot)
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
-        ctx.receive_event(bot, gev(img(2), False, uid=2602, mid=1402))
-    assert VISION["calls"] == 0 and len(CALLS) == 1
+        ev = gev(img(2), False, uid=2602, mid=1402)
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "嗯。", result=None, bot=bot)
+    assert VISION["calls"] == 1 and len(CALLS) == 2
+    assert "【只发了图】" in str(CALLS[-1])                 # 普通图片（没标表情）：只发了图的提示
+    # 2b) 她回完以后群里有别人说过话，再发图：不算接她的话
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev("今天好冷", False, uid=2609, mid=1404))
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev(img(4), False, uid=2602, mid=1405))
+    assert VISION["calls"] == 1 and len(CALLS) == 2
     # 3) @ 她并附图：要回复，所以看图
     async with app.test_matcher() as ctx:
         bot = mkbot(ctx)
@@ -781,7 +793,8 @@ async def test_group_images_not_read_unless_addressed(app: App, monkeypatch):
         ev = gev(m, True, uid=2603, mid=1403)
         ctx.receive_event(bot, ev)
         ctx.should_call_send(ev, "嗯。", result=None, bot=bot)
-    assert VISION["calls"] == 1
+    assert VISION["calls"] == 2
+    assert "【只发了图】" not in str(CALLS[-1]) and "【表情包】" not in str(CALLS[-1])     # 配了文字：不加
 
 
 # ---------------------------------------------------------------- 分条发送 / 长短变化
@@ -7619,6 +7632,119 @@ def test_thought_label_1114():
     assert c("（心里：）就这样") == "就这样"                                                   # 只剩空括号就删掉
     for keep in ("我心里有话不想说。", "你说的心里话：我听见了", "（真是的……）", "嗯，心里想着别的事。"):
         assert c(keep) == keep                                                                 # 不是标签的不动
+
+
+def test_sticker_image_kind_1117():
+    """11/17：哪些图算别人拿来当表情发的"""
+    import plugins.roleplay_chat as p
+    k = p.textin.is_sticker_image
+    assert k({"sub_type": 1, "summary": "[动画表情]", "file": "a.jpg"})                  # 收藏 / 动画表情
+    assert k({"sub_type": "7", "summary": "[我去]", "file": "a.jpg"})                    # 贴图
+    assert k({"sub_type": "11", "summary": "", "file": "BA8D.gif"})                      # 11/17 13:38 那张灵梦
+    assert k({"summary": "", "file": "x.GIF?x=1"})                                       # 动图
+    assert not k({"sub_type": "0", "summary": "", "file": "EC3B.jpg"})                   # 11/16 20:58 那盘咖喱饭
+    assert not k({"file": "a.png"}) and not k({"sub_type": 0, "summary": "[]", "file": "a.jpg"})
+
+
+def test_media_hint_1117():
+    import plugins.roleplay_chat as p
+    h = p.reply.media_hint
+    S, B = p.prompts.STICKER_IN_HINT, p.prompts.BARE_IMAGE_HINT
+    assert h("[图片：红白巫女服的少女捂嘴坏笑（画的不是你）（是表情包）]") == S
+    assert h("[图片（是表情包）]") == S
+    assert h("[表情：偷感]") == S and h("[表情]") == S                                    # QQ 表情 / 商城表情
+    assert h("（回复你说的“又在说这个”）[图片：一只猫瘫在地上（是表情包）]") == S
+    assert h("[图片：一盘咖喱猪排饭]") == B and h("[图片]") == B
+    # 11/17 第 2 轮：QQ 当普通图片发、没配字，画的是人物的表情动作（回放 K4）：按反应图
+    R = p.prompts.REACTION_IMAGE_HINT
+    assert h("[图片：画中的少女留着白色短发、戴黑发箍，半睁绿眼、撇嘴，表情无语嫌弃，抬手做出拒绝手势。（画的不是你）]") == R
+    assert h("[图片：一只橘猫瞪大眼睛，一脸震惊]") == R
+    assert h("[图片：一只橘猫趴在键盘上]") == B                                               # 没有表情动作
+    assert h("[图片：私聊截图，左边说“这台词我听过”，右边发了个捂脸的表情]") == B               # 截图不算
+    assert h("[图片：四格漫画：少女先得意地笑，最后一格哭了]") == B
+    assert h("[图片：夕阳下的海边，远处有几个人在散步]") == B
+    assert h("[图片：少女撇嘴嫌弃][图片：少女在哭]") == B                                     # 好几张：多半是在分享
+    assert h("哈哈[图片：一只猫瘫在地上（是表情包）]") == ""                                # 配了字：不加
+    assert h("你看这个[图片：一盘咖喱猪排饭]") == "" and h("早上好") == "" and h("[语音]") == ""
+
+
+@pytest.mark.asyncio
+async def test_sticker_label_in_text_1117(monkeypatch):
+    """看图时，当表情发的图在描述后面标“（是表情包）”；普通图片不标"""
+    import plugins.roleplay_chat as p
+    async def describe(data):
+        return "红白巫女服的少女捂嘴坏笑"
+    monkeypatch.setattr(p.core.vision, "describe", describe)
+    monkeypatch.setattr(p.cfg, "vision_enabled", True)
+    seg = MessageSegment.image(file="BA8D.gif"); seg.data.update(sub_type="11", summary="")
+    ev = PrivateMessageEvent(time=int(time.time()), self_id=123, post_type="message", sub_type="friend", user_id=5, message_type="private",
+                             message_id=1, message=Message([seg]), original_message=Message([seg]), raw_message="", font=0,
+                             sender=Sender(user_id=5, nickname="x"), to_me=True)
+    assert await p.textin.rich_text(ev, look=True) == "[图片：红白巫女服的少女捂嘴坏笑（是表情包）]"
+    seg2 = MessageSegment.image(file="EC3B.jpg"); seg2.data.update(sub_type="0", summary="")
+    ev2 = ev.model_copy(update={"message": Message([seg2]), "original_message": Message([seg2])})
+    assert await p.textin.rich_text(ev2, look=True) == "[图片：红白巫女服的少女捂嘴坏笑]"
+
+
+def test_sticker_follows_reply_1117(monkeypatch):
+    """她回完了、对方隔一阵才甩来的表情是在对她做反应，照常当一轮；紧跟着对方自己上一条的表情才并进去"""
+    import plugins.roleplay_chat as p
+    r = p.reply
+    ik = ("group_555", 42)
+    now = time.monotonic()
+    r._reply_started[ik], r._reply_done[ik] = now - 12, now - 8          # 她 8 秒前回完
+    assert r.sticker_follows_reply(ik, now - 3)                          # 对方 3 秒前刚说了一句、又补个表情：并进去
+    assert not r.sticker_follows_reply(ik, now - 40)                     # 对方上一条是 40 秒前（她回的就是那条）：是反应
+    assert r.sticker_follows_reply(ik, None)                             # 不知道上一条什么时候：照旧
+    r._reply_started[ik] = now - 2                                       # 她正在回：照旧并进去
+    assert r.sticker_follows_reply(ik, now - 40)
+    r._reply_started[ik], r._reply_done[ik] = now - 60, now - 50         # 回完 50 秒了：照旧不并
+    assert not r.sticker_follows_reply(ik, now - 3)
+
+
+@pytest.mark.asyncio
+async def test_group_sticker_after_her_reply_1117(app: App, monkeypatch):
+    """11/17 13:38：她回完群鲨鱼 74 秒后，他没 @、单独甩来一张灵梦动图。以前当成不是跟她说话、丢掉；
+    现在算接她的话，看图、带【表情包】提示；她可以只输出 [不回]"""
+    import plugins.roleplay_chat as p
+    VISION["answer"] = "红白巫女服的少女捂嘴坏笑"; VISION["calls"] = 0; CALLS.clear()
+    p.client.chat.completions.create = fake_create("笑什么笑。")
+    monkeypatch.setattr(p.vision, "_download_sync", lambda url: PNG)
+    def gif():
+        seg = MessageSegment.image(file="BA8D.gif"); seg.data.update(url="https://x/y", sub_type="11", summary=""); return Message(seg)
+    now = time.monotonic()
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = now - 74
+    p._last_bot_msg[555] = (now - 74, 1491, "又在说这个。你嘴里就没别的话了是吧。")
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ev = gev(gif(), False, uid=1491, mid=11701, card="群鲨鱼")
+        ctx.receive_event(bot, ev)
+        ctx.should_call_send(ev, "笑什么笑。", result=None, bot=bot)
+    msgs = str(CALLS[-1]["messages"])
+    assert "（是表情包）" in msgs and "【表情包】" in msgs and "【只发了图】" not in msgs
+    # 她觉得不用接：只输出 [不回]，不发，图记进聊天记录
+    p.client.chat.completions.create = fake_create("[不回]")
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = time.monotonic() - 30
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev(gif(), False, uid=1491, mid=11702, card="群鲨鱼"))
+    assert any("（是表情包）" in x["content"] for x in p.get_history("group_555") if x["role"] == "user")
+    # 高峰时段：只认 60 秒内的
+    p.client.chat.completions.create = fake_create("不该回"); CALLS.clear()
+    monkeypatch.setattr(p.core, "in_peak", lambda *a, **k: True)
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = time.monotonic() - 100
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev(gif(), False, uid=1491, mid=11703, card="群鲨鱼"))
+    assert CALLS == []
+    # 关掉 MEDIA_FOLLOWUP：照旧不理
+    monkeypatch.setattr(p.core, "in_peak", lambda *a, **k: False)
+    monkeypatch.setattr(p.cfg, "media_followup", False)
+    p._engaged[(555, 1491)] = p._replied_at[(555, 1491)] = time.monotonic() - 30
+    async with app.test_matcher() as ctx:
+        bot = mkbot(ctx)
+        ctx.receive_event(bot, gev(gif(), False, uid=1491, mid=11704, card="群鲨鱼"))
+    assert CALLS == []
 
 
 def rc_resp(content):

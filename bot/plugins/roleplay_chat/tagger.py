@@ -7,6 +7,8 @@
   下载期间和下载失败时，识图照常工作，只是认不出角色。
 - 也可以手动下载 model.onnx 和 selected_tags.csv，放进 data/models/<模型名>/ 文件夹。
 - 依赖 onnxruntime、numpy、Pillow；没装的话只会在日志里提示一次，不影响机器人其他功能。
+- 表情特征（11/17）：同一次识别顺便读出画面上的表情标签（闭眼、张嘴、微笑、汗滴、眼泪……），给看图模型当参考。
+  看图模型自己看二次元的嘴和眼泪常看偏（K3 张嘴笑写成吐舌、汗滴写成眼泪），这个模型就是按这类图训练的，准得多。不多花时间。
 - 内存记录（10/23）：每认一张图看一眼机器人占的内存，创了当天新高就在日志里记一行；每天 05:00 再汇总一行
   前一天的识图张数和内存峰值。只在 Linux（服务器）上记，Windows 上什么都不做。见 _MemWatch。
 """
@@ -15,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import hashlib
 import threading
 import time
+from collections import OrderedDict
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,6 +33,26 @@ CHARACTER = 4       # selected_tags.csv 里 category=4 表示角色标签
 SELF_TAG = "elaina_(majo_no_tabitabi)"
 MAX_PIXELS = 16_000_000    # 超过约 1600 万像素（比如 4000×4000）的图不识别：解码一张就要几百 MB 内存
 MIN_MODEL_BYTES = 100 * 1024 * 1024   # v3 系列模型都在 300 MB 以上，比这小肯定是没下完整
+# 11/17 表情标签 -> 中文。门槛一般 0.5；眼泪、吐舌、汗滴这几个看图模型最常看错，门槛放低到 0.35，有一点迹象就告诉它
+EXPR_TAGS = {
+    "closed_eyes": "闭眼", "half-closed_eyes": "半眯眼", "jitome": "半睁眼斜看（死鱼眼）", "><": "眼睛闭成“><”",
+    "wide-eyed": "睁大眼", "heart-shaped_pupils": "爱心眼", "sparkling_eyes": "眼睛发光",
+    "open_mouth": "张嘴", "closed_mouth": "闭嘴", ":o": "嘴张成圆形", ":<": "嘴角下撇", "wavy_mouth": "嘴抿成波浪",
+    "smile": "笑", "grin": "咧嘴笑", ":d": "张嘴笑", "laughing": "大笑", "smug": "得意",
+    "tongue_out": "吐舌", ":p": "吐舌", "drooling": "流口水",
+    "pout": "嘟嘴", ":t": "鼓腮嘟嘴", "puffy_cheeks": "鼓腮",
+    "tears": "眼泪", "crying": "哭", "streaming_tears": "流泪", "crying_with_eyes_open": "睁着眼哭",
+    "sweatdrop": "汗滴", "nervous_sweating": "冒冷汗", "blush": "脸红",
+    "frown": "皱眉", "furrowed_brow": "皱眉", "angry": "生气", "anger_vein": "头上有怒气符号", "shaded_face": "脸色发黑",
+    "surprised": "惊讶", "scared": "害怕", "sad": "难过", "expressionless": "面无表情", "trembling": "发抖",
+    "thumbs_up": "竖大拇指", "hand_on_own_chin": "手托下巴", "clenched_hand": "握拳",
+}
+EXPR_MIN = 0.5
+EXPR_LOW = {"tears": 0.35, "crying": 0.35, "streaming_tears": 0.35, "tongue_out": 0.35, ":p": 0.35, "sweatdrop": 0.35}
+# 带情绪的标签把握不大时注明“不太确定”：G5（闭眼张嘴、一脸无奈）被读出“笑 0.57”，看图模型照着写成了笑；
+# K3 真在笑也只有 0.54，分不开。干脆不说的话 K3 又被写回“无奈嫌弃”（复测 11-17 15:41），所以说，但让看图模型自己再看
+EXPR_SURE = 0.75
+EXPR_MOOD = {"smile", "grin", ":d", "laughing", "smug", "angry", "sad", "surprised", "scared", "expressionless"}
 
 
 DAY_START_HOUR = 5          # 和花费账本一样，凌晨 5 点算新的一天
@@ -156,6 +180,8 @@ class Tagger:
         self._size = SIZE
         self._chars: list[tuple[int, str]] = []    # (输出下标, 标签名)，只留角色标签
         self._self_idx: int | None = None          # 伊蕾娜这个标签在输出里的下标
+        self._expr_idx: list[tuple[int, str, float]] = []   # (输出下标, 表情标签, 门槛)
+        self._expr: OrderedDict[str, list[str]] = OrderedDict()   # 图的 md5 -> 最近一次识别出的表情（中文，去重）
         self._lock = threading.Lock()
         self._task: asyncio.Task | None = None
         self._mem_task: asyncio.Task | None = None
@@ -278,6 +304,8 @@ class Tagger:
         with open(self.dir / "selected_tags.csv", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         self._chars = [(i, r["name"]) for i, r in enumerate(rows) if r.get("category") == str(CHARACTER)]
+        self._expr_idx = [(i, r["name"], EXPR_LOW.get(r["name"], EXPR_MIN)) for i, r in enumerate(rows)
+                          if r.get("name") in EXPR_TAGS]
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = max(1, self.threads)   # 少占几个核，别让 QQ 卡
         opts.inter_op_num_threads = 1
@@ -336,6 +364,13 @@ class Tagger:
             except Exception as e:  # noqa: BLE001   记录出错不能影响识图
                 logger.warning(f"角色识别：内存记录出错：{e}")
         found = [(name, float(probs[i])) for i, name in self._chars if probs[i] >= self.threshold]
+        expr = sorted(((float(probs[i]), EXPR_TAGS[n] + ("（不太确定）" if n in EXPR_MOOD and probs[i] < EXPR_SURE else ""))
+                       for i, n, lim in self._expr_idx if probs[i] >= lim), reverse=True)
+        words = list(dict.fromkeys(w for _, w in expr))
+        with self._lock:
+            self._expr[hashlib.md5(raw).hexdigest()] = words
+            while len(self._expr) > 64:
+                self._expr.popitem(last=False)
         self_score = float(probs[self._self_idx]) if self._self_idx is not None else 0.0
         return sorted(found, key=lambda t: -t[1])[:3], self_score
 
@@ -352,6 +387,11 @@ class Tagger:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"角色识别：这张图识别失败：{e}")
             return None
+
+    def expressions(self, raw: bytes) -> list[str] | None:
+        """这张图上一次识别时读出的表情（中文，按把握从高到低）；没识别过返回 None"""
+        with self._lock:
+            return self._expr.get(hashlib.md5(raw).hexdigest())
 
     async def detect(self, raw: bytes) -> list[tuple[str, float]] | None:
         """返回 [(角色标签, 置信度)]；模型没准备好或出错时返回 None（和“没认出人”区分开）"""

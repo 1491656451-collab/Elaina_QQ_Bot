@@ -17,10 +17,10 @@ from . import budget, commands, core, peak, quota, sleep, stickers, story, voice
 from .oocheck import ooc_words
 from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
-from .prompts import COLD_HINT, FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, SKIP_HINT, SKIP_HINT_SHORT, SKIP_PIN_HINT, SKIP_STICKER_PART, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
+from .prompts import BARE_IMAGE_HINT, REACTION_IMAGE_HINT, STICKER_IN_HINT, COLD_HINT, FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, SKIP_HINT, SKIP_HINT_SHORT, SKIP_PIN_HINT, SKIP_STICKER_PART, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
-from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, reply_mode, time_hint, unprompted_hits
-from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, caller_lead_start, clean_body, clip_input, gap_line, image_datas, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
+from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, own_text, reply_mode, time_hint, unprompted_hits
+from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, STICKER_NOTE, is_sticker_image, caller_lead_start, clean_body, clip_input, gap_line, image_datas, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
 from .textout import CHAT_STOP, clean_reply, cut_derailed, drop_ooc_sentences, is_fragment, speaker_names, split_bubbles, split_sticker
 from .quota import _active_chats, _count_sent, _crossed_mid_chat, _farewell_at, _global_window, _hour_window, _last_trigger, _refund, _wrapup, bubble_gap, in_wrapup, quota_left, rate_limited, say_farewells, say_tired, typing_delay, WRAPUP_EXTRA, WRAPUP_MINUTES
 from .voice_chat import _voice_count, split_voice_mark, tts, tts_ready, voice_day, voice_roll, voice_text, voice_wav_seconds
@@ -213,16 +213,51 @@ def is_sticker_only(event: MessageEvent) -> bool:
     def sticker(x) -> bool:
         if x.type in ("face", "mface"):
             return True
-        return x.type == "image" and (str(x.data.get("sub_type")) == "1" or "表情" in str(x.data.get("summary", "")))
+        return x.type == "image" and is_sticker_image(x.data)     # 11/17 起和 textin 用同一套认法
     return bool(segs) and all(sticker(x) for x in segs)
 
 
-def sticker_follows_reply(ik: tuple[str, int]) -> bool:
-    """她正在回这个人，或者刚回完：这时单独来的表情，算对方上一条消息的一部分"""
+_MEDIA_MARK_RE = re.compile(r"\[(?:图片|表情|语音|视频)[^\]]*\]|^（回复[^）]*）|@\S+|[\s，。！？!?…~、,.]")
+
+
+# 11/17 第 2 轮：看图描述里主要是一个人物 / 小动物的表情动作（不是截图、照片里的饭菜风景），多半是反应图
+_REACT_WHO_RE = re.compile(r"少女|少年|女孩|男孩|小人|人物|画中|角色|女子|男子|小孩|猫|狗|兔|熊|企鹅|仓鼠")
+_REACT_FACE_RE = re.compile(r"表情|神情|撇嘴|嘟嘴|吐舌|白眼|嫌弃|得意|坏笑|鄙视|无语|无奈|委屈|哭|流泪|捂脸|生气|瞪|震惊|惊讶|"
+                            r"害羞|脸红|叉腰|摊手|拒绝|比心|大拇指|斜眼|眯眼|憋气|握拳")
+_REACT_NOT_RE = re.compile(r"截图|聊天记录|对话框|界面|消息|文字较多|四格|漫画分格|海报")
+
+
+def media_hint(text: str) -> str:
+    """11/17：这轮对方只发了表情 / 图、没打字：表情包提示；只有普通图片：画的是人物表情的按反应图提示，别的按“只发了图”；有字就不加"""
+    rest = _MEDIA_MARK_RE.sub("", own_text(text))
+    if rest or not re.search(r"\[(?:图片|表情)", text):
+        return ""
+    sticker = STICKER_NOTE in text or bool(re.search(r"\[表情", own_text(text)))
+    if sticker:
+        return STICKER_IN_HINT
+    descs = re.findall(r"\[图片[：:]([^\]]*)\]", text)
+    if len(descs) == 1 and text.count("[图片") == 1 and _REACT_WHO_RE.search(descs[0]) \
+            and _REACT_FACE_RE.search(descs[0]) and not _REACT_NOT_RE.search(descs[0]):     # 只认一张图：好几张多半是在分享
+        return REACTION_IMAGE_HINT
+    return BARE_IMAGE_HINT
+
+
+_last_in: dict[tuple[str, int], float] = {}        # (会话, QQ) -> 这个人上一条消息到的时间（11/17）
+STICKER_TAIL_SECONDS = 15.0                         # 表情离他自己上一条不到这么久，才算是跟着那条发的
+
+
+def sticker_follows_reply(ik: tuple[str, int], prev_in: float | None = None) -> bool:
+    """她正在回这个人，或者刚回完：这时单独来的表情，算对方上一条消息的一部分。
+    11/17：她已经回完了的话，还要这个表情紧跟着对方自己的上一条（STICKER_TAIL_SECONDS 内）；
+    隔了一阵才来的，是在对她刚说的话做反应，照常当一轮"""
     now = time.monotonic()
     started, done = _reply_started.get(ik, -1e9), _reply_done.get(ik, -1e9)
     replying = started > done and now - started < 120
-    return replying or now - done <= cfg.sticker_follow_seconds
+    if replying:
+        return True
+    if now - done > cfg.sticker_follow_seconds:
+        return False
+    return prev_in is None or now - prev_in <= STICKER_TAIL_SECONDS
 
 
 async def wait_own_reply(ik: tuple[str, int], token: int) -> int | None:
@@ -381,11 +416,13 @@ async def _admit(bot: Bot, event: MessageEvent, catchup_age: float | None) -> "S
 
     # 连续发送：先把这条放进收件箱，等几秒；期间同一个人又发了，就交给最新那条一起回复
     ik = (key, event.user_id)
+    prev_in = _last_in.get(ik)
     if catchup_age is None:
         note_round(ik, event, int(bot.self_id))       # 10/23：对方是不是她一发完就引用着回（像机器人）
+        _last_in[ik] = time.monotonic()
     # 消息发完接一个表情：她已经在回（或者刚回完）上一条了，这个表情算同一条，不单独回
     if (catchup_age is None and cfg.sticker_follow_seconds > 0 and is_sticker_only(event)
-            and not _inbox.get(ik) and sticker_follows_reply(ik)):
+            and not _inbox.get(ik) and sticker_follows_reply(ik, prev_in)):
         async with _locks[key]:
             history = get_history(key)
             name = sender_label(event)
@@ -739,8 +776,9 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
         skip_memo = SKIP_HINT_SHORT.format(sticker=SKIP_STICKER_PART if use_sticker else "")
     elif skip_ok:
         skip_memo = SKIP_HINT
+    media_memo = media_hint(text)
     flood_memo = FLOOD_HINT.format(minutes=f"{cfg.flood_minutes:g}", n=turn.flooded) if getattr(turn, "flooded", 0) else ""
-    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, space_memo, late_memo, echo_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo, flood_memo) if x)
+    extra = "\n\n".join(x for x in (long_memo, life_memo, memo, time_memo, gender_memo, diary_memo, space_memo, late_memo, echo_memo, media_memo, gift_memo, FAMILIARITY_HINT[fam] + length_hint, sticker_memo, voice_memo, skip_memo, flood_memo) if x)
     recall_msg = [{"role": "system", "content": extra}]
 
     messages = api_messages(
