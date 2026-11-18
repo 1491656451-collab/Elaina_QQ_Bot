@@ -18,7 +18,7 @@ copy /y tools\diary_replay.py "%T%\test_diaryreplay.py" >nul
 set "REPLAY_BOT=%~dp0."
 set "DIARY_SAMPLES=5"
 pushd "%T%"
-"%~dp0.venv\Scripts\python" -m pytest -q -s -p no:cacheprovider test_diaryreplay.py
+"%~dp0.venv\Scripts\python" -m pytest -q -s -p no:cacheprovider test_diaryreplay.py -k test_diary_replay
 popd
 echo.
 echo 跑完了，告诉我一声就行

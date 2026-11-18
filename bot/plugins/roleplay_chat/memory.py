@@ -436,7 +436,8 @@ SUMMARIZE_PROMPT = """你是“伊蕾娜”（一个 QQ 角色扮演机器人）
 
 六、今日见闻 today_moments：伊蕾娜晚上会写旅行日记（会公开给很多人看）。从这段记录里挑 0～2 件她会想写进日记的事：有趣的话题、有人关心她、有人惹她烦、好笑或让她在意的事。寒暄、没内容的闲聊不算，没有就返回空列表。每件写：
    - qq：主要相关的那个人（必须是档案列表里的人）
-   - event：只写话题层面，不超过 25 字，不写名字、QQ 号，不写具体的私事细节（例如写“聊了工作上的烦心事”，不写“被老板骂了”）
+   - event：只写话题层面，不超过 30 字，不写名字、QQ 号，不写具体的私事细节（例如写“聊了工作上的烦心事”，不写“被老板骂了”）。
+     要写清是谁做的、谁说的、谁怎么想：伊蕾娜自己写“我”，上面 qq 那个人写“对方”（例如“对方怂恿我用魔法打飞挡路的猫，我没舍得”“刷到对方吐槽专业课的说说，我评论说听着寂寞”，不要只写“聊到要不要用魔法打飞猫”）。分不清是谁的，就照记录里的“伊蕾娜（她自己）：”和别人的话对一遍，别把她说的安到对方头上，也别反过来
    - mood：她的感受，一两个词（开心、得意、无语、烦、在意、好笑……）
    - keywords：2～4 个关键词，用来给日记挑配图（例如 面包、下雨、读书、猫）
 
@@ -556,7 +557,7 @@ class LongTermMemory(AffectionMixin):
         self._retry_at: dict[str, float] = {}     # 会话 -> 失败后，这个时间之前先不再试
         self._migrating = False
         self._migrate_fail: dict[int, float] = {}  # QQ -> 迁移失败后，这个时间之前先不再试
-        # 整理出“今日见闻”后交给谁保存（QQ 空间日记用）：moment_sink(会话, 见闻列表, {QQ: 昵称})
+        # 整理出“今日见闻”后交给谁保存（QQ 空间日记用）：moment_sink(会话, 见闻列表, {QQ: 昵称}, entries=这批聊天记录)（entries 11/18 加）
         self.moment_sink = None
         try:
             self.backup_once()                     # 9/30 换了档案格式：开机先把旧格式的原样备份一份
@@ -1084,7 +1085,8 @@ class LongTermMemory(AffectionMixin):
             if self.moment_sink and data.get("today_moments"):
                 try:
                     self.moment_sink(key, [x for x in _as_list(data.get("today_moments")) if isinstance(x, dict)],
-                                     {q: _DUP_MARK_RE.sub("", n).strip() for q, n in people.items()})
+                                     {q: _DUP_MARK_RE.sub("", n).strip() for q, n in people.items()},
+                                     entries=entries)      # 11/18 空间要当时的几句（分清是谁做的），不用再去读待整理文件
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"今日见闻保存失败：{e}")
         except Exception as e:  # noqa: BLE001   模型给的格式怪、合并时出错：这批一个都不写，按失败处理（隔一阵再试，不会每条消息都重花一次钱）

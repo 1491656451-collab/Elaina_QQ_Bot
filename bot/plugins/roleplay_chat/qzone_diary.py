@@ -235,8 +235,106 @@ def _day_file(day: str):
     return DAILY_DIR / f"{day}.json"
 
 
-def save_moments(key: str, moments: list, people: dict) -> None:
-    """长期记忆整理完调用：把“今日见闻”记下来"""
+# ------------------------------------------------------------------ 见闻当时的几句（11/18）
+_CTX_HEAD_RE = re.compile(r"^【[^】]*】")
+_CTX_IMG_RE = re.compile(r"\[(图片|表情|动画表情)[:：][^\]]*\]")
+CTX_MAX_LINES = 6
+CTX_LINE_CHARS = 40
+
+
+def _source_entries(key: str, entries: list[dict] | None) -> list[dict]:
+    if entries:
+        return entries
+    try:
+        pend = _read(ltm._pending_path(key), [])      # 整理完、删掉之前调的这里，这批原文还在
+    except Exception:  # noqa: BLE001
+        pend = []
+    if pend:
+        return pend
+    try:
+        from .history import get_history
+        return list(get_history(key))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _ctx_clean(text: str) -> str:
+    t = _CTX_HEAD_RE.sub("", str(text or "").strip())
+    t = _CTX_IMG_RE.sub(lambda m: f"[{m.group(1)}]", t)
+    t = re.sub(r"\s*\n\s*", "／", t).strip("／ ")
+    return t[:CTX_LINE_CHARS] + ("…" if len(t) > CTX_LINE_CHARS else "")
+
+
+def _bigrams(s: str) -> set[str]:
+    s = re.sub(r"[\s，。！？、,.!?…~“”\"'（）()【】]", "", s)
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def moment_ctx(entries: list[dict], qq: int, event: str, keywords: list[str]) -> list[str]:
+    """从聊天记录里找出这件见闻当时的几句：只留这个人说的、她回他的（或她先说、他接的），最多 6 行。
+    按见闻和关键词的字给每句打分，对得上的都要，再补它们前后的句子；一句都对不上就不给"""
+    def uid_of(e: dict) -> int:
+        try:
+            return int(e.get("uid") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    entries = list(entries or [])
+    lines: list[tuple[str, str]] = []
+    last = None                                    # 上一句不是她说的那句是谁说的
+    for i, e in enumerate(entries):
+        if e.get("role") == "assistant":
+            # 她回这个人的；或者她先开口、下一句就是这个人接的（11/18 猫的事是她冒泡先说的）
+            nxt = next((uid_of(x) for x in entries[i + 1:] if x.get("role") != "assistant"), None)
+            if last == qq or nxt == qq:
+                lines.append(("你", _ctx_clean(e.get("content"))))
+            continue
+        last = uid_of(e)
+        if last == qq:
+            lines.append(("对方", _ctx_clean(e.get("content"))))
+    lines = [x for x in lines if x[1]]
+    if not lines:
+        return []
+    want = _bigrams(event)
+    singles = set()
+    for k in keywords or []:
+        k = str(k).strip()
+        if len(k) == 1:
+            singles.add(k)                         # “猫”这种一个字的关键词按字算
+        want |= _bigrams(k)
+    scores = [len(_bigrams(t) & want) + sum(c in t for c in singles) for _, t in lines]
+    if max(scores) == 0:
+        return []
+    # 对得上的句子都要（多了留分高的），再补每句后面那句（多半是回话）、前面那句，凑到 6 行
+    hit = sorted(range(len(lines)), key=lambda i: (-scores[i], i))
+    keep = {i for i in hit[:CTX_MAX_LINES] if scores[i] > 0}
+    for step in (1, -1):
+        for i in sorted(keep, key=lambda i: -scores[i]):
+            j = i + step
+            if len(keep) >= CTX_MAX_LINES:
+                break
+            if 0 <= j < len(lines):
+                keep.add(j)
+    return [f"{lines[i][0]}：{lines[i][1]}" for i in sorted(keep)]
+
+
+def ctx_copied(text: str, ctx: list[str], n: int = 8) -> bool:
+    """说说里有没有照抄对方的原话（连续 n 个字一样）"""
+    body = re.sub(r"\s", "", text)
+    for line in ctx or []:
+        if not line.startswith("对方："):
+            continue
+        src = re.sub(r"\s", "", line[3:]).rstrip("…")
+        for j in range(0, max(len(src) - n + 1, 0)):
+            if src[j:j + n] in body:
+                return True
+    return False
+
+
+def save_moments(key: str, moments: list, people: dict, entries: list[dict] | None = None) -> None:
+    """长期记忆整理完调用：把“今日见闻”记下来。
+    11/18 起顺带记下当时的几句（ctx）：见闻只有一句概括时，写说说的模型分不清是谁做的（“舍不得打飞猫”的是她，写成了对方）。
+    entries：这次整理用的聊天记录；没传就去读还没删的待整理记录，再没有就读聊天记录"""
     if key.startswith("group_"):
         src = "group"
     elif key.startswith("private_"):
@@ -264,11 +362,17 @@ def save_moments(key: str, moments: list, people: dict) -> None:
         event = str(m.get("event") or "").strip()[:30]
         if not event or any(event == x.get("event") for x in items):
             continue
-        items.append({
-            "qq": qq, "event": event, "mood": str(m.get("mood") or "").strip()[:8],
-            "keywords": [str(k).strip()[:8] for k in (m.get("keywords") or []) if str(k).strip()][:4],
-            "src": src, "ts": int(time.time()),
-        })
+        kws = [str(k).strip()[:8] for k in (m.get("keywords") or []) if str(k).strip()][:4]
+        item = {"qq": qq, "event": event, "mood": str(m.get("mood") or "").strip()[:8],
+                "keywords": kws, "src": src, "ts": int(time.time())}
+        try:
+            ctx = moment_ctx(_source_entries(key, entries), qq, event, kws)
+        except Exception as e:  # noqa: BLE001   取不到原话不影响记见闻
+            logger.warning(f"今日见闻：取当时的原话出错：{e}")
+            ctx = []
+        if ctx:
+            item["ctx"] = ctx
+        items.append(item)
         added += 1
     if added:
         _write(_day_file(day), items[-40:])
@@ -321,7 +425,7 @@ def _tier_hint(m: dict) -> str:
     if tier == "close":
         # 11/13：原来把 QQ 昵称原文当“称呼”给她，11/05 那条把“そう、わたし私です”整个写进了正文。
         # 现在只让她用平时的叫法或“老熟人”之类，QQ 网名进了 banned，写出来会被查出来重写
-        return ("对方是你很熟的人：这件事可以写得分量重一点，嘴硬但看得出你在意。可以让对方一看就知道是在说他："
+        return ("对方是你很熟的人：这件事可以写得分量重一点，嘴硬但看得出你在意。可以让对方一看就知道你写的是和他聊的这件事："
                 "用你平时对他的叫法，或者写“某个老熟人”“那个总来烦我的家伙”之类；不要写他的 QQ 网名，也不要写外文。")
     if tier == "acquaintance":
         return "对方是熟人：随口一提，带点调侃，写成“一个熟人”“之前认识的某人”，不写名字。"
@@ -347,6 +451,7 @@ DIARY_PROMPT = """【这次不是聊天，是写旅行日记，发在 QQ 空间�
 写作要求：
 - 一条只讲一件事。写见闻就专心写见闻，配图里的样子最多顺带一句；没有合适的见闻，就写图里的场景和心情。别把几件不相干的事拼在一起，句子和句子之间要接得上。
 - 见闻是你自己对这件事的概括，细节记不清了就别写细节：见闻里没写的事别添（谁请了什么、你替他做了什么、他说了什么原话），也别写对方的表情和动作——你们是隔着传信魔法聊的，看不到对方。
+- 谁说了什么、谁做了什么、谁怎么想，照见闻和“当时的几句”来，别把你自己的话和想法安到对方头上，也别反过来；看不出是谁的，就别写成是谁的。
 - 篇幅：{length}。写不满就少写，别为了凑字数编情节。
 - 口吻随意，像真人随手发的说说：可以是冷静的旁白、一句吐槽、没头没尾的碎碎念，都行；还是你的性格，自恋、嘴硬、有点毒舌，偶尔流露一点真心。不要写成文章。
 {habits}
@@ -444,7 +549,7 @@ def _name_parts(name: str) -> set[str]:
     return {x for x in parts if len(x) >= 2}
 
 
-def diary_problems(text: str, banned: set[str], used: set[str], has_moments: bool) -> list[str]:
+def diary_problems(text: str, banned: set[str], used: set[str], has_moments: bool, ctx: list[str] | None = None) -> list[str]:
     """写完再查一遍：出戏、写了名字号码、日文、口头习惯用多了 / 用了最近用过的"""
     bad = ooc_words(text, "") + privacy_problems(text, banned)
     if _KANA_RE.search(text):
@@ -455,6 +560,8 @@ def diary_problems(text: str, banned: set[str], used: set[str], has_moments: boo
     for h in hs:
         if h in used:
             bad.append(f"“{h}”上一条刚用过")
+    if ctx and ctx_copied(text, ctx):
+        bad.append("照抄了对方的原话")
     return bad
 
 
@@ -479,6 +586,9 @@ async def make_post() -> dict:
         lines = ["今天记下的事（想写就挑一件；这次的写法用不上就不写）："]
         for m in moments:
             lines.append(f"- {m['event']}（你的感受：{m.get('mood') or '说不上来'}）——{_tier_hint(m)}")
+            if m.get("ctx"):
+                lines.append("  当时的几句（只用来弄清是谁说的、谁做的；别照抄，也别引用原话）：")
+                lines += [f"    {c}" for c in m["ctx"]]
         moment_text = "\n".join(lines)
     else:
         moment_text = NO_MOMENT
@@ -492,6 +602,7 @@ async def make_post() -> dict:
     banned = set()        # 11/13 起很熟的人的 QQ 网名也不许写（原来很熟的不查）
     for m in today_moments():
         banned |= _name_parts(ltm.get_user(int(m["qq"])).get("name", ""))
+    ctx_all = [c for m in moments for c in m.get("ctx") or []]
     messages = [{"role": "system", "content": system_prompt()}, {"role": "system", "content": prompt}]
 
     async def ask(extra: list[dict]) -> str:
@@ -507,18 +618,18 @@ async def make_post() -> dict:
         return re.sub(r"\n*\s*[—-]{1,2}\s*伊蕾娜\s*$", "", t).strip()
 
     text = strip_leaks(await ask([]))
-    bad = diary_problems(text, banned, used, bool(moments))
+    bad = diary_problems(text, banned, used, bool(moments), ctx_all)
     if bad:
         logger.info(f"说说文案有问题（{bad}），重写：{text[:40]}")
         text = strip_leaks(await ask([{"role": "assistant", "content": text},
                           {"role": "system", "content": f"刚才写的有问题：{'；'.join(bad)}。伊蕾娜不知道书外的东西，"
-                                                        "不能写出别人的名字、网名和号码，不写日文，口头习惯一条最多一样、别和上一条用同一样。"
+                                                        "不能写出别人的名字、网名和号码，不写日文，口头习惯一条最多一样、别和上一条用同一样，不照抄别人的原话，谁说的谁做的别弄反。"
                                                         "请完全按要求重写，只输出正文。"}]))
-        if diary_problems(text, banned, used, bool(moments)):
-            logger.info(f"说说重写后还有问题（{diary_problems(text, banned, used, bool(moments))}），删掉有问题的句子")
+        if diary_problems(text, banned, used, bool(moments), ctx_all):
+            logger.info(f"说说重写后还有问题（{diary_problems(text, banned, used, bool(moments), ctx_all)}），删掉有问题的句子")
             parts = re.split(r"(?<=[。！？!?…~\n])", text)
             text = "".join(p for p in parts if not ooc_words(p, "") and not privacy_problems(p, banned)
-                           and not _KANA_RE.search(p)).strip()
+                           and not _KANA_RE.search(p) and not ctx_copied(p, ctx_all)).strip()
     if not text:
         raise RuntimeError("文案写出来有问题，删完就没了")
     return {"text": text, "image": img["file"], "desc": img["desc"],
@@ -600,9 +711,22 @@ def asks_today_diary(text: str, force: bool = False) -> bool:
     return force or (any(w in text for w in ("日记", "说说", "动态")) and any(w in text for w in TODAY_WORDS))
 
 
-def diary_context(text: str, force: bool = False) -> str:
+def _moment_for_chat(m: dict, uin: int | None) -> str:
+    """把见闻拿给聊天时的她看：11/18 起见闻里用“对方”指那件事里的人（记忆 agent 改的写法）。
+    可她这时是在跟另一个人聊，“对方”会被当成眼前这个人——不是这个人的就换成“某人”
+    （用“某人”不用“有人”：“被对方夸”换成“被有人夸”不通）"""
+    ev = str(m.get("event", ""))
+    try:
+        same = uin is not None and int(m.get("qq") or 0) == int(uin)
+    except (TypeError, ValueError):
+        same = False
+    return ev if same else ev.replace("对方", "某人")
+
+
+def diary_context(text: str, force: bool = False, uin: int | None = None) -> str:
     """聊天时有人提到她的说说 / 日记：告诉她写过什么、今天的写了没有（聊天插件调用）。
-    force=True：对方在接着刚才日记的话题追问（“然后呢”），话里没提“日记”也照样给"""
+    force=True：对方在接着刚才日记的话题追问（“然后呢”），话里没提“日记”也照样给。
+    uin：正在跟她聊的人；见闻就是和他的事时保留“对方”，其余换成“某人”。不传就全部换成“某人”"""
     if not force and not any(w in text for w in DIARY_WORDS):
         return ""
     posts = recent_posts(1)
@@ -621,7 +745,7 @@ def diary_context(text: str, force: bool = False) -> str:
             plan = "今天不打算写了" if st.get("posted") else f"打算晚上 {st['post_at']} 左右写"
         except Exception:  # noqa: BLE001
             plan = "打算晚上再写"
-        events = "；".join(str(m.get("event", "")) for m in today_moments()[:4] if m.get("event"))
+        events = "；".join(_moment_for_chat(m, uin) for m in today_moments()[:4] if m.get("event"))
         parts.append(f"【今天的旅行日记】今天的还没写，{plan}。"
                      + (f"今天记下来、可能会写进去的事：{events}。" if events else "今天还没遇到什么值得写的事。")
                      + "对方问起今天的日记，就照这个说（可以说还没写、写好了再给他看），"

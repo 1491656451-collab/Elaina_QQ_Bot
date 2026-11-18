@@ -468,3 +468,23 @@ def test_plan_when_by_meaning(tmp_path):
                        ("大后天再动身", "后天"), ("后天就动身", "明天"), ("在这儿待了好几天了，该走了", "过几天")]:
         _said(sm, "group_1", _noon(), text=text, plans=[{"text": "动身", "when": when}])
         assert sm._load()["plans"] == [], text
+
+
+@pytest.mark.asyncio
+async def test_moments_say_who_and_pass_entries(tmp_path):
+    """11/18《交接-见闻写清谁做的-记忆-1118》：见闻要写清谁做的（她写“我”、对方写“对方”）；交给空间时带上这批聊天记录"""
+    seen = {}
+
+    def reply(kw):
+        sys_msg = kw["messages"][0]["content"]
+        assert "伊蕾娜自己写“我”" in sys_msg and "写“对方”" in sys_msg and "不超过 30 字" in sys_msg
+        return {"people": [{"qq": 111, "affection": 0}],
+                "today_moments": [{"qq": 111, "event": "对方怂恿我用魔法打飞挡路的猫，我没舍得", "mood": "好笑", "keywords": ["猫"]}]}
+    ltm, sm = _ltm_with_self(tmp_path, reply)
+    ltm.moment_sink = lambda key, moments, people, entries=None: seen.update(key=key, moments=moments, people=people, entries=entries)
+    talk = [{"role": "user", "content": "怎么不用魔法打飞它", "uid": 111, "name": "阿明"},
+            {"role": "assistant", "content": "它蹲那儿那么舒服，我把它打飞做什么"}]
+    ltm.add_pending("private_111", talk)
+    await ltm.summarize("private_111")
+    assert seen["key"] == "private_111" and seen["moments"][0]["event"].startswith("对方怂恿我")
+    assert [e["content"] for e in seen["entries"]] == [e["content"] for e in talk], "这批原话一起交过去"

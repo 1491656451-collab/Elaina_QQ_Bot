@@ -3333,6 +3333,22 @@ def test_today_diary_already_posted(monkeypatch):
     assert qd.diary_context("今天天气真好") == ""
 
 
+@pytest.mark.asyncio
+async def test_today_diary_passes_uin_1118(monkeypatch):
+    """11/18 空间 agent 交接：问今天的日记时把对方 QQ 传给 diary_context：和他的见闻保留“对方”，别人的写成“某人”"""
+    import plugins.roleplay_chat as p
+    qd = p.qzone_diary
+    monkeypatch.setattr(qd, "recent_posts", lambda n=5: [])
+    monkeypatch.setattr(qd, "state", lambda: {"posted": False, "post_at": "21:34"})
+    monkeypatch.setattr(qd, "today_moments", lambda: [{"qq": 9411, "event": "对方怂恿我用魔法打飞挡路的猫，我没舍得"},
+                                                     {"qq": 20002, "event": "被对方夸善解人意，又被说太敏感"}])
+    p._diary_topic.clear()
+    p.client.chat.completions.create = fake_create("还没写呢。")
+    await p.converse(_PBot(), pev("今天的日记呢", uid=9411, mid=5511))
+    sysmsg = CALLS[-1]["messages"][-2]["content"]
+    assert "对方怂恿我" in sysmsg and "被某人夸" in sysmsg and "被对方夸" not in sysmsg
+
+
 # ---------------------------------------------------------------- 9/29：刚互相道别时用完额度，不再补一句告别
 @pytest.mark.asyncio
 async def test_no_extra_farewell_after_goodbye(monkeypatch):

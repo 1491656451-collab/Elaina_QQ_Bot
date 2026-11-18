@@ -704,7 +704,7 @@ async def _build_prompt(turn: SimpleNamespace) -> bool:
     # 在聊她的日记 / 说说（“有今天的旅行日记吗”“然后呢”）：给她日记的真实情况，不去翻以前的旅途故事，
     # 免得把小说里某段“日记”的故事当成今天的日记讲
     diary_force = diary_followup(key, text)
-    diary_memo = qzone_diary.diary_context(text, force=diary_force)
+    diary_memo = qzone_diary.diary_context(text, force=diary_force, uin=event.user_id)   # 11/18 空间 agent 交接：和眼前这个人的见闻保留“对方”
     if diary_memo and qzone_diary.asks_today_diary(text, diary_force):
         _diary_topic[key] = time.time()
         _last_recall.pop(key, None)
