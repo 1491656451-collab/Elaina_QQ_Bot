@@ -90,7 +90,15 @@ VARIANTS = {"A": "现在的样子", "B": "加“说人话”", "C": "放松“�
             "Q": "11/05 以前：【你的近况】每轮都整段带、聊天规则里没有“玩笑别当真”（11/05 第一批改动之前）",
             "S": "长短固定为最短那档“几个字就好”（现在的说法）", "T": "长短固定为最短那档，改过的说法（去掉“蛤？”，加“先想想他指的是哪件事”）",
             "U": "11/11 以前：聊天规则里没有“对方的心思以他这几句话为准”，回消息不带“待久了”那句，“动什么身”“准备离开海边了吗”不算在问她",
-            "V": "11/13 以前：聊冷了以后的提示开头是“【刚看到】”"}
+            "V": "11/13 以前：聊冷了以后的提示开头是“【刚看到】”",
+            "W": "11/21 以前：聊天规则里没有“斗嘴别打辩论”“说人话”，只发 emoji / 符号时没有【表情】提示",
+            "Z": "现在的样子 + 人设“有主见”里去掉“有时也说说理由”和“承认得很不情愿”两句（只在回放里改，不动人设文件）",
+            "Y": "11/22 以前：只发 emoji / 符号时的【表情】提示是第 1 版（“按它的意思随口接一句……别问他发这个干嘛”）"}
+_OLD_SYMBOL_HINT = ("【表情】对方这次只发了几个表情符号或标点，是在表达反应、情绪，不是在问你问题。"
+                    "按它的意思随口接一句，或者也回个反应，别问他发这个干嘛；觉得不用接，就只输出「[不回]」。")
+_RULES_1121 = ("- 斗嘴别打辩论：", "- 说人话：")
+_PERSONA_1121 = [("，有时也说说理由。", "。"),
+                 ("对方真的有道理，你才会承认，而且承认得很不情愿：“……好吧，这次算你对。”", "")]
 _OLD_COLD_HINT = "【刚看到】对方这句是 {gap}前发的，你现在才看到。要不要提一句刚看到随你，不用解释为什么晚回。"
 _NEW_ASK = "动什么身|什么时候走|走不走|还走吗|准备走|离开|一直在|一直待|待多久|"     # 11/11 加进 _ASK_LIFE_RE 的，U 去掉
 
@@ -137,6 +145,23 @@ def apply_variant(p, v: str, base: dict) -> dict:
     if "ask_re" in base:                         # 11/11：U 用改之前的做法
         th._ASK_LIFE_RE = base["ask_re"] if v != "U" else re.compile(base["ask_re"].pattern.replace(_NEW_ASK, ""))
         p.cfg.life_long_stay_days = base["stay_days"] if v != "U" else 0
+    if v == "W":                                 # 11/21：去掉那两条规则和【表情】提示
+        lines = pr.CHAT_RULES.split("\n")
+        pr.CHAT_RULES = "\n".join(x for x in lines if not x.startswith(_RULES_1121))
+        hits["11/21 以前"] = f"去掉 {len(lines) - len(pr.CHAT_RULES.splitlines())} 条规则"
+    if "media_hint" in base:
+        p.reply.media_hint = base["media_hint"] if v != "W" else (
+            lambda text, _f=base["media_hint"], _y=base["symbol_hint"]: "" if _f(text) == _y else _f(text))
+    if "symbol_hint" in base:                    # 11/22：Y 用第 1 版【表情】提示（media_hint 从 prompts 模块里取，换模块里的常量就行）
+        p.reply.SYMBOL_HINT = _OLD_SYMBOL_HINT if v == "Y" else base["symbol_hint"]
+        if v == "Y":
+            hits["11/22 以前"] = "【表情】提示换回第 1 版"
+    if v == "Z":
+        n = 0
+        for a, b in _PERSONA_1121:
+            n += pr._persona.count(a)
+            pr._persona = pr._persona.replace(a, b)
+        hits["人设去掉两句"] = n
     if v == "U":
         lines = pr.CHAT_RULES.split("\n")
         pr.CHAT_RULES = "\n".join(x for x in lines if "对方的心思以他这几句话为准" not in x)
@@ -221,7 +246,8 @@ async def replay_private(p, case: dict, lines: list, real) -> dict:
     uid = int(case["user"])
     target_t = rc._ts(f"{case['date']} {case['target']}")
     start = target_t - float(case.get("window_min", 15)) * 60
-    before = [x for x in lines if start <= x[0] <= target_t + 0.5]
+    # 11/21：她发的和关键那句落在同一秒（她回上一句时对方正好又发了）：她那句算在关键那句之后，不算“之前的”
+    before = [x for x in lines if start <= x[0] <= target_t + 0.5 and not (x[1] == "assistant" and x[0] >= target_t - 0.5)]
     # 关键那一轮：她最后一次开口之后、到关键那句为止，对方连着发的几句
     last_a = max((i for i, x in enumerate(before) if x[1] == "assistant"), default=-1)
     burst = [x for x in before[last_a + 1:] if x[1] == "user"]
@@ -357,6 +383,8 @@ async def test_phrasing(app: App, monkeypatch):
         base["life_focus"] = p.reply.life_focus
     if hasattr(getattr(p, "turn_hints", None), "_ASK_LIFE_RE") and hasattr(p.cfg, "life_long_stay_days"):
         base["ask_re"], base["stay_days"] = p.turn_hints._ASK_LIFE_RE, p.cfg.life_long_stay_days
+    if hasattr(getattr(p, "reply", None), "media_hint") and hasattr(pr, "SYMBOL_HINT"):
+        base["media_hint"], base["symbol_hint"] = p.reply.media_hint, pr.SYMBOL_HINT
     if hasattr(getattr(p, "reply", None), "COLD_HINT"):
         base["cold_hint"] = p.reply.COLD_HINT
     # 11/13：题目里写了 cold_gap（秒）的，当成“聊冷了，她隔了这么久才看到”这一轮（不真的等）

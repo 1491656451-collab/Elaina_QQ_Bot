@@ -352,7 +352,7 @@ class Config(BaseModel):
     multi_message: bool = True            # 一次回复拆成几条消息发（像真人连发）
     max_bubbles: int = 3                  # 最多拆成几条
     split_prob: float = 0.6               # 模型没主动换行时，有几句话就按句拆开的概率
-    drop_period_prob: float = 0.7         # 每条消息末尾的句号去掉的概率（真人聊天很少打句号）
+    drop_period_prob: float = 0.9         # 每条消息末尾的句号去掉的概率（真人聊天很少打句号；11/21 从 0.7 调到 0.9）
     bubble_gap_min: float = 1.5           # 两条消息之间先停顿一下（秒），再按下一条的字数算打字时间
     bubble_gap_max: float = 3.5
     bubble_gap_cap: float = 18.0          # 两条之间最长隔多久（9/29 从 12 调到 18）

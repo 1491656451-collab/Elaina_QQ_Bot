@@ -17,7 +17,7 @@ from . import budget, commands, core, peak, quota, sleep, stickers, story, voice
 from .oocheck import ooc_words
 from .echocheck import echo_hint
 from .core import _arrival_seq, _chat_seq, _hands, _target_of, alert_admins, cfg, classify_error, client, ltm, mark_sent, switch_pause, tier_value
-from .prompts import BARE_IMAGE_HINT, REACTION_IMAGE_HINT, STICKER_IN_HINT, COLD_HINT, FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, SKIP_HINT, SKIP_HINT_SHORT, SKIP_PIN_HINT, SKIP_STICKER_PART, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
+from .prompts import BARE_IMAGE_HINT, REACTION_IMAGE_HINT, STICKER_IN_HINT, SYMBOL_HINT, COLD_HINT, FAMILIARITY_HINT, FLOOD_HINT, LATE_HINT, VISION_SEES_HINT, WAKE_HINT, SHORT_VARIANTS, SKIP_HINT, SKIP_HINT_SHORT, SKIP_PIN_HINT, SKIP_STICKER_PART, STORY_FIX_PROMPT, system_prompt, UNPROMPTED_HINT, WRAPUP_HINT, WRAPUP_SLEEP_HINT
 from .history import _inbox, _locks, _passive, _unrecord, api_messages, get_history, save_history, session_key
 from .turn_hints import BACK_HINT_HOURS, clock_text, gift_hint, human_gap, length_hint_for, life_focus, life_hint, now_hint, own_text, reply_mode, time_hint, unprompted_hits
 from .textin import _CALL_ONLY_RE, AT_ONLY_TEXT, STICKER_NOTE, is_sticker_image, caller_lead_start, clean_body, clip_input, gap_line, image_datas, prefetch_forwards, pull_own_lead, rich_text, sender_label, speaker_head, watch_block
@@ -227,9 +227,18 @@ _REACT_FACE_RE = re.compile(r"表情|神情|撇嘴|嘟嘴|吐舌|白眼|嫌弃|�
 _REACT_NOT_RE = re.compile(r"截图|聊天记录|对话框|界面|消息|文字较多|四格|漫画分格|海报")
 
 
+_SYMBOL_STRIP_RE = re.compile(r"（(?:回复|过了|引用)[^）]*）|@\S+|\s")
+
+
 def media_hint(text: str) -> str:
     """11/17：这轮对方只发了表情 / 图、没打字：表情包提示；只有普通图片：画的是人物表情的按反应图提示，别的按“只发了图”；有字就不加"""
     rest = _MEDIA_MARK_RE.sub("", own_text(text))
+    has_media = bool(re.search(r"\[(?:图片|表情|语音|视频)", text))
+    if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", rest):
+        rest = ""                          # 11/21：除了图 / 表情只剩 emoji、符号，也算没打字
+        core = _SYMBOL_STRIP_RE.sub("", own_text(text))
+        if core and not has_media:
+            return SYMBOL_HINT             # 11/21：只有 emoji、符号、标点（“🐷🐷”“？？”“。。。”）
     if rest or not re.search(r"\[(?:图片|表情)", text):
         return ""
     sticker = STICKER_NOTE in text or bool(re.search(r"\[表情", own_text(text)))

@@ -4114,7 +4114,7 @@ def test_rules_merged_0929():
     """9/29 规则合并：24 条 → 12 条；意思都还在（“喜好别硬扯”21:30 删过，22:10 回归测试面包变多，又加回来）"""
     import plugins.roleplay_chat as p
     rules = [x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]
-    assert len(rules) == 14          # 11/05 加了“玩笑别当真”一条；11/11 加了“对方的心思以他这几句话为准”
+    assert len(rules) == 16          # 11/05 加了“玩笑别当真”一条；11/11 加了“对方的心思以他这几句话为准”；11/21 加了“斗嘴别打辩论”“说人话”
     for must in ("（群友）", "#2", "（过了 X）", "Markdown", "只用中文", "最多三条", "群聊旁听记录", "伊蕾娜本人的画像",
                  "[表情:情绪]", "OOC", "→ 别人", "那个人说", "叫你一声", "说岔了", "有主见", "硬扯", "男是女"):
         assert must in p.CHAT_RULES, must
@@ -4981,7 +4981,7 @@ def test_promise_direction_2010():
     import plugins.roleplay_chat as p
     assert "别说成你请对方" in p.NUDGE_PROMPT and "别随口许下" in p.NUDGE_PROMPT
     assert "别把对方答应你的说成你答应对方的" in p.CHAT_RULES
-    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 14   # 11/05 加了“玩笑别当真”；11/11 加了“对方的心思以他这几句话为准”
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 16   # 11/05 加了“玩笑别当真”；11/11 加了“对方的心思以他这几句话为准”；11/21 +2
 
 
 @pytest.mark.asyncio
@@ -5129,7 +5129,7 @@ def test_chat_stop_and_rule_0100():
     import plugins.roleplay_chat as p
     assert p.CHAT_STOP == ["\n【"]
     assert "只写你自己这一轮要说的话" in p.CHAT_RULES
-    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 14   # 11/05 加了“玩笑别当真”；11/11 加了“对方的心思以他这几句话为准”
+    assert len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 16   # 11/05 加了“玩笑别当真”；11/11 加了“对方的心思以他这几句话为准”；11/21 +2
 
 
 @pytest.mark.asyncio
@@ -5209,7 +5209,7 @@ def test_watch_gaps_and_caller_mark_0140():
     assert p.caller_lead_start(buf, 1, now) == 1
     assert p.caller_lead_start(buf, 2, now) is None
     assert p.caller_lead_start([(1, "A", "【A → B】你说呢", now - 5)], 1, now) is None
-    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 14   # 11/05 +1；11/11 +1
+    assert "叫你的人刚才说的" in p.CHAT_RULES and len([x for x in p.CHAT_RULES.splitlines() if x.startswith("- ")]) == 16   # 11/05 +1；11/11 +1；11/21 +2
 
 
 @pytest.mark.asyncio
@@ -7635,6 +7635,16 @@ async def test_sleep_plan_usual_1113(monkeypatch, tmp_path):
     assert "平常 23:50-07:40" in sp.describe(datetime(2026, 11, 22, 23, 0, tzinfo=bj))
 
 
+def test_chat_rules_1121():
+    """11/21（《分析-AI味和DS五条建议-1121》）：斗嘴别打辩论、说人话（不用网络梗）；末尾句号默认 0.9 去掉"""
+    import plugins.roleplay_chat as p
+    r = p.CHAT_RULES
+    assert "斗嘴别打辩论" in r and "别抠对方用的词" in r and "照旧纠正、拒绝" in r
+    assert "说人话" in r and "不说网上的流行语和梗" in r
+    from plugins.roleplay_chat.config import Config
+    assert Config.model_fields["drop_period_prob"].default == 0.9
+
+
 def test_thought_label_1114():
     """11/14：心声前面的“心里补一句：”“心里一句：”“心里话：”这类标签去掉，心声本身留着"""
     import plugins.roleplay_chat as p
@@ -7680,6 +7690,12 @@ def test_media_hint_1117():
     assert h("[图片：四格漫画：少女先得意地笑，最后一格哭了]") == B
     assert h("[图片：夕阳下的海边，远处有几个人在散步]") == B
     assert h("[图片：少女撇嘴嫌弃][图片：少女在哭]") == B                                     # 好几张：多半是在分享
+    # 11/21：只有 emoji、符号、标点
+    Y = p.prompts.SYMBOL_HINT
+    assert "别问他发这个干嘛" in Y and "得意" not in Y                                         # 11/22 第 2 版回放后撤回，用第 1 版
+    assert h("🐷🐷") == Y and h("？？") == Y and h("。。。") == Y and h("……") == Y and h("（回复你说的“又来了”）🙄") == Y
+    assert h("🐷🐷好吃") == "" and h("？？你说啥") == "" and h("6") == "" and h("ok") == ""
+    assert h("[图片：一只猫瘫在地上（是表情包）]🐷") == S                                  # 带了图：照表情包算
     assert h("哈哈[图片：一只猫瘫在地上（是表情包）]") == ""                                # 配了字：不加
     assert h("你看这个[图片：一盘咖喱猪排饭]") == "" and h("早上好") == "" and h("[语音]") == ""
 
