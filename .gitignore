@@ -218,3 +218,8 @@ docs/见闻谁做的对比报告-*.md
 docs/说说谁做的回放报告-*.md
 docs/交接-见闻写清谁做的-*.md
 _sync_*.tgz
+
+# 11/21：空间评论回放的结果和报告、回放工具里写了好友的 QQ 号、网名和说说原文（部署 agent 加）
+docs/空间评论回放/
+docs/空间评论回放报告-*.md
+bot/tools/comment_replay.py

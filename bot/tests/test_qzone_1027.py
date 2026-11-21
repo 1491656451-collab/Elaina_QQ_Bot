@@ -3,6 +3,13 @@ import json, time, types
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _keep_period(monkeypatch):
+    """11/21 起空间评论、说说末尾的句号按概率去掉；这里的老测试比的是原文，固定不去"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "drop_period_prob", 0.0)
+
+
 def _resp(text):
     return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=text), finish_reason="stop")],
                                  usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=5, prompt_cache_hit_tokens=0, total_tokens=15))

@@ -632,6 +632,7 @@ async def make_post() -> dict:
                            and not _KANA_RE.search(p) and not ctx_copied(p, ctx_all)).strip()
     if not text:
         raise RuntimeError("文案写出来有问题，删完就没了")
+    text = drop_end_period(text)
     return {"text": text, "image": img["file"], "desc": img["desc"],
             "moments": [f"{m['event']}（{ltm.TIER_NAMES[m['tier']]}）" for m in moments], "at": time.time()}
 
@@ -818,6 +819,65 @@ FRIEND_DECIDE_PROMPT = """【你在刷 QQ 空间，刷到了「{nick}」{when}�
 
 SKIP_WORD = "不评"
 
+# 11/21：在别人空间里的分寸（《问题排查记录-空间评论人机感和没礼貌-1121》）。
+# 11/16～11/21 她在不熟的人说说下：人家生病问“发出来是想提醒谁”、晒猫纪念日评“命挺硬”、对方说“太好笑了”接“换深一点就不一定了”。
+# 毒舌人设 + 陌生人档“口气淡、不主动关心”（那是为别人来找她聊天写的），到了人家空间就成了冷脸挑刺。
+# 用户 11/21 定：不熟的人严格，熟人放宽（可以损，但生病、难过、晒宠物家人时先接住）。只写态度，不给例句（会被照抄）
+# 第 2 版加过“别唱反调”“往穿没穿衣服上引申也算带颜色”，用户看了回放说“你平时都不穿吗”还行、唱反调也挺有意思，撤了
+_MANNERS_HEAD = ("【在别人空间里的分寸】这是对方的空间，你的话是写给发说说的人看的，他的朋友也都看得到。\n"
+                 "- 先看他发这条想要什么反应：晒开心的事（宠物、到手的东西、纪念日、好吃的）就跟着乐、夸一句；"
+                 "生病、难受就说句宽心的话——这是礼数，不算主动关心；吐槽就顺着他吐槽；开玩笑就接住这个玩笑，跟着笑。\n"
+                 "- 别往坏处假设，别猜他为什么发这条，别较真分析（人家当笑话讲的事，不用去算会不会出事）。\n")
+MANNERS_HINT = {
+    "stranger": _MANNERS_HEAD + "- 你们不熟：不熟只是话少、不套近乎，不是冷着脸。不开带颜色的玩笑，不拿人家的身体、病、宠物、家人说事。你的毒舌留给熟人和你自己的空间。",
+    "friend": _MANNERS_HEAD + "- 你们还不算熟：不熟只是话少、不套近乎，不是冷着脸。不开带颜色的玩笑，不拿人家的身体、病、宠物、家人说事。你的毒舌留给熟人和你自己的空间。",
+    "acquaintance": _MANNERS_HEAD + "- 你们挺熟，可以照常损他；但他生病、难过、晒宠物家人的时候，先接住（宽心一句、跟着乐），再损也不迟，别拿这些往坏处说。",
+    "close": _MANNERS_HEAD + "- 你们很熟，可以照常损他；但他生病、难过、晒宠物家人的时候，先接住（宽心一句、跟着乐），再损也不迟，别拿这些往坏处说。",
+    "disliked": "【在别人空间里的分寸】这是对方的空间，他的朋友都看得到。看不顺眼可以不评；评了也别拿人家的病、宠物、家人说事。",
+}
+# 决定评不评（11/21，用户定）：不熟的人少评一点，不加强制概率。
+# 第 1 版“真有想说的再评”回放里不熟的人 30 次评 0 次（改前 15 次），用户：“评论少的话放松点”，改成这版
+DECIDE_TIER_HINT = {
+    "stranger": "你们不熟：不用每条都说点什么，很多时候点个赞或者划过去就好；看到有意思、想接一句的，就评。",
+    "friend": "你们还不算熟：不用每条都说点什么，很多时候点个赞或者划过去就好；看到有意思、想接一句的，就评。",
+}
+
+
+def manners_hint(uin: int) -> str:
+    """在别人空间里说话时，按关系补的分寸（评论好友说说、在别人说说下回人、别人说说里 @ 她）"""
+    return MANNERS_HINT.get(familiarity_of(uin), MANNERS_HINT["stranger"])
+
+
+# 11/20 发出去了“我回一个。回复：「不会的啦，多喝热水早点睡。」”：模型先表态再写回复，整段被发了出去
+_META_QUOTE_RE = re.compile(r"(?:回复|评论|回|评|说)(?:一句|一个|一下)?[:：]\s*[「“\"]([^」”\"]+)[」”\"]")
+_META_LEAD_RE = re.compile(r"^(?:嗯[，,]?\s*)?(?:那|就)?我?(?:回|评)(?:一个|一句|一下|两句)[。，,.!！:：]\s*")
+_META_LEFT_RE = re.compile(r"(?:回复|评论)[:：]")
+# 11/21 回放：开头带一段说明自己在干嘛的括号，“（顺着吐槽一句好了），……”“（刷到这条，忍不住想评论），……”
+_META_PAREN_LEAD_RE = re.compile(r"^[（(][^（）()]{0,20}(?:评|吐槽|回一句|回个|说一句|顺着|忍不住|刷到)[^（）()]{0,20}[）)][，,、。\s]*")
+
+
+def drop_end_period(text: str) -> str:
+    """11/21 用户：“真人一般不会加句号”。聊天发消息时末尾的句号有 DROP_PERIOD_PROB（默认 0.7）的概率去掉（textout.py），
+    空间的评论、回复、说说不走那里，句号一直都在。这里照同一个概率去掉末尾那个句号（“……。”不动）"""
+    t = text or ""
+    if t.endswith("。") and not t.endswith("……。") and random.random() < cfg.drop_period_prob:
+        t = t[:-1]
+    return t
+
+
+def unwrap_meta(reply: str) -> str:
+    """把“我回一个。回复：「……」”这种漏出来的表态剥掉，只留真正要说的那句"""
+    t = _META_PAREN_LEAD_RE.sub("", (reply or "").strip())
+    m = _META_QUOTE_RE.search(t)
+    if m:
+        return m.group(1).strip()
+    return _META_LEAD_RE.sub("", t).strip()
+
+
+def meta_left(reply: str) -> bool:
+    """剥完还带着“回复：”“评论：”这种格式"""
+    return bool(_META_LEFT_RE.search(reply or ""))
+
 
 def _declined(reply: str) -> bool:
     """她决定不评：回的就是“不评”（可能带标点、括号）"""
@@ -904,6 +964,20 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
             reply = clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length")
             if ooc_words(reply, text):
                 reply = drop_ooc_sentences(reply, text)
+        reply = unwrap_meta(reply)
+        if meta_left(reply):
+            logger.info(f"空间回复带了格式（回复：/评论：），重新生成：{reply[:40]}")
+            resp = await client.chat.completions.create(
+                model=cfg.deepseek_model, temperature=cfg.llm_temperature, max_tokens=cfg.short_reply_max_tokens,
+                messages=messages + [{"role": "assistant", "content": reply}, {"role": "system", "content":
+                    "刚才把“回复：”“评论：”这种格式也写出来了。只写你要发出去的那句话本身，别的什么都不要。"}],
+                extra_body={"thinking": {"type": "disabled"}})
+            budget.track(resp, "qzone_reply", user=uin, group=None)
+            ch = resp.choices[0]
+            reply = unwrap_meta(clean_reply(ch.message.content or "", truncated=ch.finish_reason == "length"))
+            if meta_left(reply):
+                logger.info(f"空间回复重写后还带格式，这次不发：{reply[:40]}")
+                reply = ""
     except Exception as e:  # noqa: BLE001
         kind = classify_error(e)
         logger.error(f"空间：DeepSeek 调用失败（{kind or '其他错误'}）：{e}")
@@ -913,7 +987,7 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
                 await alert_admins(bots[0], kind)
         return None
     reply = re.sub(r"([，。！？!?…~、,])\s*\n+\s*", r"\1", reply)    # 评论不分条：几行合成一行
-    return re.sub(r"\s*\n+\s*", "，", reply).strip()[:150]
+    return drop_end_period(re.sub(r"\s*\n+\s*", "，", reply).strip()[:150])
 
 
 def _remember_action(uin: int, nick: str, said: str, where: str, pending: bool = True) -> None:
@@ -960,7 +1034,7 @@ async def reply_comment(me: int, post: dict, root: Comment, item: Comment | None
     if owner and owner != me:
         scene = ELSEWHERE_COMMENT_PROMPT.format(owner=owner_nick or owner, post=plain_text(str(post.get("content") or ""))[:200],
                                                pic=pic, thread=_thread_text(me, root, c), nick=nick,
-                                               when=_ago(int(post.get("created_time") or 0)))
+                                               when=_ago(int(post.get("created_time") or 0))) + "\n" + manners_hint(c.uin)
         where = f"在「{owner_nick or owner}」的说说下对你说"
     else:
         known = next((p for p in _read(POSTS_FILE, []) if p["tid"] == post.get("tid")), None)
@@ -992,7 +1066,7 @@ async def reply_post_mention(me: int, owner: int, owner_nick: str, d: dict, pic:
     if why:
         raise QzoneError("hold", why)
     text = clip_input(plain_text(str(d.get("content") or ""))) or "（一条说说）"
-    scene = ELSEWHERE_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic)
+    scene = ELSEWHERE_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic) + "\n" + manners_hint(owner)
     async with _locks[f"qzone_{owner}"]:
         reply = await _respond(owner, owner_nick, text, scene)
         if reply is None:
@@ -1354,6 +1428,8 @@ async def decide_friend_post(owner: int, nick: str, text: str, pic: str, when: s
     """她看完一条好友说说，自己决定：点不点赞、评不评论。返回 {"like": bool, "comment": bool}；出错返回 None（留到下一轮）"""
     fam = familiarity_of(owner)
     scene = FRIEND_DECIDE_PROMPT.format(nick=nick, post=text, pic=pic, when=when)
+    if DECIDE_TIER_HINT.get(fam):
+        scene += "\n" + DECIDE_TIER_HINT[fam]
     extra = "\n\n".join(x for x in (ltm.context_for(owner, nick, None, place="qzone", text=text), now_hint(), scene,
                                      FAMILIARITY_HINT[fam]) if x)
     messages = [{"role": "system", "content": system_prompt()}, {"role": "system", "content": extra},
@@ -1384,7 +1460,8 @@ async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic
     if why:
         raise QzoneError("hold", why)
     text = clip_input(plain_text(str(d.get("content") or ""))) or "（只发了图）"
-    scene = FRIEND_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic, when=_ago(int(d.get("created_time") or 0)))
+    scene = FRIEND_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic, when=_ago(int(d.get("created_time") or 0))) + \
+        "\n" + manners_hint(owner)
     async with _locks[f"qzone_{owner}"]:
         reply = await _respond(owner, owner_nick, text, scene)
         if reply is None:

@@ -2,6 +2,13 @@
 import json, types
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _keep_period(monkeypatch):
+    """11/21 起空间评论、说说末尾的句号按概率去掉；这里的老测试比的是原文，固定不去"""
+    import plugins.roleplay_chat as p
+    monkeypatch.setattr(p.cfg, "drop_period_prob", 0.0)
+
 Q = 10001
 ENTRIES = [
     {"role": "user", "content": "【鲨鱼】找你收过路费呢", "uid": Q, "name": "鲨鱼"},
