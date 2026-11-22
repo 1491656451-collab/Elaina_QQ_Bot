@@ -916,19 +916,38 @@ def _thread_text(me: int, root: Comment, upto: Comment) -> str:
     return "\n".join(lines[-8:])
 
 
-async def _pic_hint(urls: list[str]) -> str:
-    """别人说说的配图：看第一张（和聊天里看图一样，同一张只看一次）"""
+async def _pic_hint(urls: list[str], text: str = "") -> str:
+    """别人说说的配图：看第一张（和聊天里看图一样，同一张只看一次）。
+    text（11/22，《交接-说说配文给识图-空间-1122》）：说说原文，第一次看这张图时交给看图模型参考（以画面为准）。
+    二创好友“兔？！”配的拓印兔子被看成“戴帽子的人偶、字母 m”，带上原文能让它往兔子上想"""
     if not urls or not cfg.vision_enabled:
         return ""
+    text = (text or "").strip()
     try:
-        desc = await vision.describe({"url": urls[0]})
+        desc = await (vision.describe({"url": urls[0]}, caption=text) if text else vision.describe({"url": urls[0]}))
     except Exception:  # noqa: BLE001
         desc = None
     return f"（配图：{desc}）" if desc else "（配了图，你没看清）"
 
 
-async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
-    """按聊天规则想一句回复（不负责发出去）；返回 None 表示这次不回（讨厌、限流、出错……），"" 表示想不出来"""
+# 11/22（用户定，《交接-手画小动物读不准-识图-1122》第 4 节）：在别人说说下写东西时（评好友说说、回别人说说下的评论、
+# 别人说说里 @ 她），配图原图也给她看——识图那句读偏了（拓印的兔子读成“戴帽子的人偶、字母 m”）她还能自己看。
+# 只在要写的那一步给；“赞不赞、评不评”那一步仍只给描述（每条好友说说都要问，省钱）。开关和聊天共用 VISION_CHAT_SEES_IMAGE
+QZONE_SEES_HINT = ("【原图】这条说说的配图你能直接看到。上面「（配图：……）」是先看图时写下的一句，和你看到的对不上时，以你看到的为准。"
+                   "图里画的是不是你，以那句描述为准：写着「画的不是你」「看不太出是不是你」就别认成你。")
+
+
+def _post_image_datas(d: dict) -> list[dict]:
+    """说说的第一张配图，交给聊天模型看原图用（开关关着、没图就空）"""
+    if not cfg.vision_chat_sees_image:
+        return []
+    urls = post_pics(d or {})
+    return [{"url": urls[0]}] if urls else []
+
+
+async def _respond(uin: int, nick: str, text: str, scene: str, image_datas: list[dict] | None = None) -> str | None:
+    """按聊天规则想一句回复（不负责发出去）；返回 None 表示这次不回（讨厌、限流、出错……），"" 表示想不出来。
+    image_datas：要附上的原图（11/22，在别人说说下写东西时给配图原图）"""
     fam = familiarity_of(uin)
     if fam == "disliked" and random.random() < cfg.dislike_ignore_prob:
         logger.info(f"空间：讨厌的人，不想理 {uin}")
@@ -944,6 +963,16 @@ async def _respond(uin: int, nick: str, text: str, scene: str) -> str | None:
     extra = "\n\n".join(x for x in (ltm.context_for(uin, nick, None, place="qzone", text=text), now_hint(), scene, FAMILIARITY_HINT[fam] + short_hint()) if x)
     messages = api_messages([{"role": "system", "content": system_prompt()}] + history[-6:]) + [
         {"role": "system", "content": extra}, {"role": "user", "content": text}]
+    if image_datas:
+        try:
+            parts = await vision.image_parts(image_datas, 1)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"空间：带原图失败，这次只给描述：{e}")
+            parts = []
+        if parts:
+            messages[-1] = {"role": "user", "content": [{"type": "text", "text": text}] + parts}
+            messages[-2] = {"role": "system", "content": extra + "\n\n" + QZONE_SEES_HINT}
+            logger.info(f"空间：这次给她带了说说配图的原图（{nick}）")
     try:
         resp = await client.chat.completions.create(
             model=cfg.deepseek_model, messages=messages, temperature=cfg.llm_temperature,
@@ -1045,7 +1074,7 @@ async def reply_comment(me: int, post: dict, root: Comment, item: Comment | None
                                       when=_ago(written))
         where = "在你的日记下评论"
     async with _locks[f"qzone_{c.uin}"]:
-        reply = await _respond(c.uin, nick, text, scene)
+        reply = await _respond(c.uin, nick, text, scene, _post_image_datas(post) if owner and owner != me else None)
         if reply is None:
             return "retry"
         if not reply:
@@ -1068,7 +1097,7 @@ async def reply_post_mention(me: int, owner: int, owner_nick: str, d: dict, pic:
     text = clip_input(plain_text(str(d.get("content") or ""))) or "（一条说说）"
     scene = ELSEWHERE_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic) + "\n" + manners_hint(owner)
     async with _locks[f"qzone_{owner}"]:
-        reply = await _respond(owner, owner_nick, text, scene)
+        reply = await _respond(owner, owner_nick, text, scene, _post_image_datas(d))
         if reply is None:
             return "retry"
         if not reply:
@@ -1308,7 +1337,7 @@ async def poll_mentions() -> str:
         await _gap_between_replies(i)
         d = t["d"]
         if d["tid"] not in pics:
-            pics[d["tid"]] = await _pic_hint(post_pics(d))
+            pics[d["tid"]] = await _pic_hint(post_pics(d), plain_text(str(d.get("content") or "")))
         try:
             if t["kind"] == "post":
                 res = await reply_post_mention(me, t["owner"], t["owner_nick"], d, pics[d["tid"]])
@@ -1463,7 +1492,7 @@ async def comment_friend_post(me: int, owner: int, owner_nick: str, d: dict, pic
     scene = FRIEND_POST_PROMPT.format(nick=owner_nick, post=text, pic=pic, when=_ago(int(d.get("created_time") or 0))) + \
         "\n" + manners_hint(owner)
     async with _locks[f"qzone_{owner}"]:
-        reply = await _respond(owner, owner_nick, text, scene)
+        reply = await _respond(owner, owner_nick, text, scene, _post_image_datas(d))
         if reply is None:
             return "retry"
         if not reply:
@@ -1526,7 +1555,7 @@ async def poll_friends() -> str:
             continue
         shown += 1
         text = clip_input(plain_text(str(d.get("content") or ""))) or "（只发了图）"
-        pic = await _pic_hint(post_pics(d))
+        pic = await _pic_hint(post_pics(d), plain_text(str(d.get("content") or "")))
         created = int(d.get("created_time") or it["abstime"] or 0)
         choice = await decide_friend_post(it["owner"], nick, text, pic, _ago(created))
         if choice is None:

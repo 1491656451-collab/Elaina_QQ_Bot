@@ -61,12 +61,23 @@ EXPR_HINT = ("\n本机识别读出的{where}表情特征（比较准，描述表
 EXPR_NO_TEAR = "特征里没有“眼泪”“哭”就不要写流泪、含泪，脸边、额头的水滴是汗。"
 EXPR_NO_TONGUE = "特征里没有“吐舌”就不要写吐舌，张着嘴能看到舌头不算吐舌。"
 EXPR_ON = True
+# 11/22 空间二创那张拓印的两只兔子（《交接-手画小动物读不准-识图-1122》）：耳朵的黑描边被读成字母“m”，棕兔被读成帽子、
+# 拍在纸上的画被当成实物写成“人偶”，3 次都没认出兔子。三处改动，各自单独放，测试时可以拿掉做新旧对比：
+# ① SKETCH_RULE 简笔画、手绘、拓印怎么看；② 本机看出“画里没有人”就告诉看图模型（NOHUMAN_HINT），这时不再给表情特征
+# （拓印兔子被读出“吐舌 0.40”）；③ 发图的人配的字（说说原文、和图一起发的话）可以一起给看图模型参考（CAPTION_HINT）
+SKETCH_RULE = ("简笔画、手绘、印章或海绵拓印这类画：先数清画了几个东西，各是什么动物或东西；"
+               "黑色的粗线条可能是耳朵、尾巴、身体的轮廓，不一定是字母；认不出是什么，就照形状和颜色写，不要硬说成人、人偶、帽子。"
+               "拍的是画在纸上、印出来的图案，算画，不算实物。")
+NOHUMAN_HINT = "\n本机识别看出画里没有人（是动物、物件、食物之类）：不要写成人、人偶，也不要写“画中的少女”“画中人”。"
+CAPTION_HINT = "\n发图的人配的文字是：“{caption}”。可以参考它认出画的是什么，但以画面为准；描述里不用复述这句话。"
+CAPTION_MAX = 60
+SKETCH_ON = True
 DESCRIBE_PROMPT = (
     "用简短的中文描述这张图片，一般不超过 50 字。"
     "写出主要内容；图里有文字就写出关键文字；如果是表情包，写出画面上的表情、动作和配字，"
     "画里人物的情绪（开心、无语、嫌弃之类）和梗本身的意思可以写，但别替发图的人猜用意（比如“在调侃对方”“在敷衍”“想求安慰”），"
     "这要看的人结合聊天自己判断。"
-    + FACE_RULE +
+    + FACE_RULE + SKETCH_RULE +
     "图里文字多、内容复杂（聊天截图、长段配文、多格漫画、通知公告、表格清单）时可以写到 100 字，"
     "把关键的话写全，聊天截图写清谁说了什么。"
     "画出来的人物写成“画中的少女”“画中人”之类，不要用“动漫”“动画”“二次元”“番剧”“角色”这些词。"
@@ -419,6 +430,9 @@ class Vision:
             expr = getattr(self.tagger, "expressions", lambda _r: None)(raw)
             if expr is not None:
                 self._cache.setdefault(key, {})["e"] = expr
+            nh = getattr(self.tagger, "no_humans", lambda _r: None)(raw)
+            if nh is not None:
+                self._cache.setdefault(key, {})["nh"] = int(nh)
         if found:
             logger.info("角色识别：" + "、".join(f"{t}（{p:.2f}）" for t, p in found))
         if key and self_score < 0:          # 图太大没识别：记下来，别每次都重新下载，也不给她加“画的不是你”
@@ -448,6 +462,11 @@ class Vision:
 
     def _expr_hint(self, entry: dict | None, raw: bytes, gif: bool) -> str:
         """11/17 本机识别读出的表情特征 → 给看图模型的一句提示；没有、或者是长条截图就不加"""
+        nh = entry.get("nh") if entry else None
+        if nh is None and self.tagging:
+            nh = getattr(self.tagger, "no_humans", lambda _r: None)(raw)
+        if nh and SKETCH_ON and not _is_tall(raw):
+            return NOHUMAN_HINT              # 11/22 画里没有人：表情标签多半不准（拓印兔子读出“吐舌”），不给
         if not EXPR_ON:
             return ""
         expr = entry.get("e") if entry else None
@@ -524,11 +543,12 @@ class Vision:
                 out.append(part)
         return out
 
-    async def describe(self, data: dict) -> str | None:
+    async def describe(self, data: dict, caption: str | None = None) -> str | None:
         """data 是 OneBot image 段的 data（含 url / file）。返回一句描述；失败返回 None。
         本机认过、确定画的不是伊蕾娜、画里又有人时，末尾加「（画的不是你）」；
-        伊蕾娜分数 ≥ UNSURE_MIN、拿不准时改加「（看不太出是不是你）」"""
-        desc = await self._describe(data)
+        伊蕾娜分数 ≥ UNSURE_MIN、拿不准时改加「（看不太出是不是你）」。
+        caption（11/22）：发图的人配的字（说说原文、和图一起发的话），第一次看这张图时给看图模型参考；看过的图用缓存，不再看"""
+        desc = await self._describe(data, caption)
         if not desc or SELF_NAME in desc:
             return desc
         key = self.cache_key(data)
@@ -538,7 +558,7 @@ class Vision:
             return desc + (UNSURE_NOTE if self._is_unsure(entry) else NOT_SELF_NOTE)
         return desc
 
-    async def _describe(self, data: dict) -> str | None:
+    async def _describe(self, data: dict, caption: str | None = None) -> str | None:
         key = self.cache_key(data)
         self._touch(key)
         entry = self._cache.get(key) if key else None
@@ -593,6 +613,9 @@ class Vision:
             prompt += OTHER_HINT.format(names="、".join(others))
         sheet = self._sheets.get(key) if key else None
         prompt += self._expr_hint(entry, raw, bool(sheet))
+        cap = re.sub(r"\s+", " ", caption or "").strip()[:CAPTION_MAX] if SKETCH_ON else ""
+        if cap:
+            prompt += CAPTION_HINT.format(caption=cap.replace("“", "「").replace("”", "」"))
         if sheet:
             prompt += GIF_HINT
             raw, mime = sheet, "image/jpeg"

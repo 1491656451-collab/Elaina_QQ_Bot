@@ -67,7 +67,7 @@ async def test_respond_rewrites_then_drops(qd, monkeypatch):
 
 async def test_comment_friend_post_has_manners(qd, monkeypatch):
     scenes = []
-    async def respond(uin, nick, text, scene):
+    async def respond(uin, nick, text, scene, image_datas=None):
         scenes.append(scene); return "不评"
     monkeypatch.setattr(qd, "_respond", respond)
     monkeypatch.setattr(qd, "write_block", lambda: "")

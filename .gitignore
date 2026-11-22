@@ -227,3 +227,12 @@ bot/tools/comment_replay.py
 # 11/22：AI味回放报告引了私聊、群聊原话；AI味分析里有 QQ 号、群号和原话（部署 agent 加）
 docs/AI味回放报告-*.md
 docs/分析-AI味和DS五条建议-*.md
+
+# 11/22：空间二创（好友说说的图、原文、回放结果和报告）、手画测试（好友的画、逐张结果和报告）、相关交接，回放工具里写了好友 QQ 号（部署 agent 加）
+bot/tools/空间二创/
+bot/tools/acg_post_replay.py
+docs/空间二创回放/
+docs/空间二创回放报告-*.md
+docs/识图手画测试/
+docs/交接-手画小动物读不准-*.md
+docs/交接-说说配文给识图-*.md

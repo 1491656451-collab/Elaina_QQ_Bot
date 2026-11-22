@@ -52,6 +52,9 @@ EXPR_LOW = {"tears": 0.35, "crying": 0.35, "streaming_tears": 0.35, "tongue_out"
 # 带情绪的标签把握不大时注明“不太确定”：G5（闭眼张嘴、一脸无奈）被读出“笑 0.57”，看图模型照着写成了笑；
 # K3 真在笑也只有 0.54，分不开。干脆不说的话 K3 又被写回“无奈嫌弃”（复测 11-17 15:41），所以说，但让看图模型自己再看
 EXPR_SURE = 0.75
+# 11/22 画里有没有人：空间二创那张拓印的兔子被写成“一个戴帽子的人偶”。no_humans 这个标签分得很开
+# （饭菜、黄脸表情、拓印兔子 0.93～0.96，人物图、手办照片、截图都在 0.02 以下），过了这条线就告诉看图模型画里没有人
+NO_HUMANS_MIN = 0.8
 EXPR_MOOD = {"smile", "grin", ":d", "laughing", "smug", "angry", "sad", "surprised", "scared", "expressionless"}
 
 
@@ -182,6 +185,8 @@ class Tagger:
         self._self_idx: int | None = None          # 伊蕾娜这个标签在输出里的下标
         self._expr_idx: list[tuple[int, str, float]] = []   # (输出下标, 表情标签, 门槛)
         self._expr: OrderedDict[str, list[str]] = OrderedDict()   # 图的 md5 -> 最近一次识别出的表情（中文，去重）
+        self._nohuman_idx: int | None = None
+        self._nohuman: OrderedDict[str, bool] = OrderedDict()     # 图的 md5 -> 画里没有人
         self._lock = threading.Lock()
         self._task: asyncio.Task | None = None
         self._mem_task: asyncio.Task | None = None
@@ -306,6 +311,7 @@ class Tagger:
         self._chars = [(i, r["name"]) for i, r in enumerate(rows) if r.get("category") == str(CHARACTER)]
         self._expr_idx = [(i, r["name"], EXPR_LOW.get(r["name"], EXPR_MIN)) for i, r in enumerate(rows)
                           if r.get("name") in EXPR_TAGS]
+        self._nohuman_idx = next((i for i, r in enumerate(rows) if r.get("name") == "no_humans"), None)
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = max(1, self.threads)   # 少占几个核，别让 QQ 卡
         opts.inter_op_num_threads = 1
@@ -367,10 +373,15 @@ class Tagger:
         expr = sorted(((float(probs[i]), EXPR_TAGS[n] + ("（不太确定）" if n in EXPR_MOOD and probs[i] < EXPR_SURE else ""))
                        for i, n, lim in self._expr_idx if probs[i] >= lim), reverse=True)
         words = list(dict.fromkeys(w for _, w in expr))
+        nohuman = self._nohuman_idx is not None and float(probs[self._nohuman_idx]) >= NO_HUMANS_MIN
         with self._lock:
-            self._expr[hashlib.md5(raw).hexdigest()] = words
+            h = hashlib.md5(raw).hexdigest()
+            self._expr[h] = words
+            self._nohuman[h] = nohuman
             while len(self._expr) > 64:
                 self._expr.popitem(last=False)
+            while len(self._nohuman) > 64:
+                self._nohuman.popitem(last=False)
         self_score = float(probs[self._self_idx]) if self._self_idx is not None else 0.0
         return sorted(found, key=lambda t: -t[1])[:3], self_score
 
@@ -387,6 +398,11 @@ class Tagger:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"角色识别：这张图识别失败：{e}")
             return None
+
+    def no_humans(self, raw: bytes) -> bool | None:
+        """11/22 这张图上一次识别时看出画里没有人（动物、物件、食物……）；没识别过返回 None"""
+        with self._lock:
+            return self._nohuman.get(hashlib.md5(raw).hexdigest())
 
     def expressions(self, raw: bytes) -> list[str] | None:
         """这张图上一次识别时读出的表情（中文，按把握从高到低）；没识别过返回 None"""
