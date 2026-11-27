@@ -8,6 +8,7 @@ def _keep_period(monkeypatch):
     """11/21 起空间评论、说说末尾的句号按概率去掉；这里的老测试比的是原文，固定不去"""
     import plugins.roleplay_chat as p
     monkeypatch.setattr(p.cfg, "drop_period_prob", 0.0)
+    monkeypatch.setattr(p.cfg, "qzone_text_only_prob", 0.0)      # 11/27 起一半说说不配图；老测试都按配图写的
 
 Q = 10001
 ENTRIES = [

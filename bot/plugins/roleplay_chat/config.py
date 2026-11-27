@@ -203,6 +203,7 @@ class Config(BaseModel):
     qzone_image_reuse_days: int = 60      # 同一张图多少天内不重复用
     qzone_length_weights: list[float] = [35, 45, 20]   # 一句话 / 两三句 / 小游记 的概率
     qzone_max_moments: int = 3            # 一条说说最多写几件今天的见闻
+    qzone_text_only_prob: float = 0.5     # 说说只写字、不配图的概率（11/27 用户：“不一定要配图片，写几句话也是 OK 的”）；0 = 每条都配图
     qzone_private_moments: bool = True    # 私聊（只算有长期档案的人）也算见闻素材
     qzone_max_tokens: int = 350           # 写说说文案最多多少 token（小游记那档也不超过它）
     qzone_comment_reply: bool = True      # 回复说说下的评论

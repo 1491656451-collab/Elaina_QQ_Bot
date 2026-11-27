@@ -392,14 +392,23 @@ def today_moments() -> list[dict]:
 
 
 TIER_WEIGHT = {"close": 5.0, "acquaintance": 3.0, "friend": 2.0, "stranger": 1.0, "disliked": 0.6}
-COUNT_WEIGHTS = [(0, 0.10), (1, 0.55), (2, 0.25), (3, 0.10)]
+# 11/27：用户“老是提到别人，跟特地写给谁看一样”：11/14～11/27 有见闻的说说几乎条条在写某个人。
+# 不写见闻从 10% 提到 40%，最多两件（原来 0/1/2/3 件是 10/55/25/10）
+COUNT_WEIGHTS = [(0, 0.40), (1, 0.45), (2, 0.15)]
+# 空间里的往来（谁给她点赞、谁在日记下评论、她刷到谁的说说）：11/18～11/27 的见闻 53 件里占 34 件，
+# 写出来就是“某个老熟人……该不会是特意让我看见的吧”。用户 11/27 定：可以当素材，但要偶尔写——
+# 每次写说说只有 30% 的时候让空间往来进候选，进了也一条最多一件（只调权重不够：很多天的见闻全是空间往来）
+QZONE_MOMENT_PROB = 0.3
 
 
 def choose_moments(moments: list[dict]) -> list[dict]:
     """按好感挑 0～3 件：很熟的人最容易被写进去；讨厌的人只偶尔拿来吐槽"""
     allow_disliked = random.random() < 0.2
+    allow_qzone = random.random() < QZONE_MOMENT_PROB
     pool = []
     for m in moments:
+        if m.get("src") == "qzone" and not allow_qzone:
+            continue
         tier = familiarity_of(int(m["qq"]))
         if tier == "disliked" and not allow_disliked:
             continue
@@ -416,6 +425,8 @@ def choose_moments(moments: list[dict]) -> list[dict]:
         weights = [TIER_WEIGHT.get(m["tier"], 1.0) for m in pool]
         m = random.choices(pool, weights=weights)[0]
         pool = [x for x in pool if x is not m and x["qq"] != m["qq"]]    # 同一个人一天只写一件
+        if m.get("src") == "qzone":
+            pool = [x for x in pool if x.get("src") != "qzone"]          # 空间里的往来一条最多写一件
         picked.append(m)
     return picked
 
@@ -425,8 +436,9 @@ def _tier_hint(m: dict) -> str:
     if tier == "close":
         # 11/13：原来把 QQ 昵称原文当“称呼”给她，11/05 那条把“そう、わたし私です”整个写进了正文。
         # 现在只让她用平时的叫法或“老熟人”之类，QQ 网名进了 banned，写出来会被查出来重写
-        return ("对方是你很熟的人：这件事可以写得分量重一点，嘴硬但看得出你在意。可以让对方一看就知道你写的是和他聊的这件事："
-                "用你平时对他的叫法，或者写“某个老熟人”“那个总来烦我的家伙”之类；不要写他的 QQ 网名，也不要写外文。")
+        # 11/27：原来写“可以让对方一看就知道你写的是和他聊的这件事”，写出来像在隔空对他喊话（用户：“跟特地写给谁看一样”）
+        return ("对方是你很熟的人：可以写得分量重一点，嘴硬但看得出你在意。写的是这件事和你自己的感受，不是写给他看的；"
+                "提到他就用你平时对他的叫法，或者“某个老熟人”之类；不要写他的 QQ 网名，也不要写外文。")
     if tier == "acquaintance":
         return "对方是熟人：随口一提，带点调侃，写成“一个熟人”“之前认识的某人”，不写名字。"
     if tier == "friend":
@@ -444,12 +456,13 @@ LENGTHS = [
 ]
 
 DIARY_PROMPT = """【这次不是聊天，是写旅行日记，发在 QQ 空间的说说里】现在是{date}（星期{weekday}）{period}。
-这条日记会被很多人看到。配图是今天的你：{desc}
+这条日记会被很多人看到。{pic_line}
 今天用传信魔法聊过天的人，都是你旅途中“新认识的人”或者熟人（不要把他们叫作“旅人”）。
 {moments}
 这次想怎么写（只是个起点，觉得不合适可以换别的写法）：{way}
 写作要求：
-- 一条只讲一件事。写见闻就专心写见闻，配图里的样子最多顺带一句；没有合适的见闻，就写图里的场景和心情。别把几件不相干的事拼在一起，句子和句子之间要接得上。
+- 一条只讲一件事。{one_thing}别把几件不相干的事拼在一起，句子和句子之间要接得上。
+- 这是写给自己、也给所有看到的人看的，不是写给某一个人的：别冲谁喊话，别写成在回谁的话，别猜谁是不是故意让你看见。
 - 见闻是你自己对这件事的概括，细节记不清了就别写细节：见闻里没写的事别添（谁请了什么、你替他做了什么、他说了什么原话），也别写对方的表情和动作——你们是隔着传信魔法聊的，看不到对方。
 - 谁说了什么、谁做了什么、谁怎么想，照见闻和“当时的几句”来，别把你自己的话和想法安到对方头上，也别反过来；看不出是谁的，就别写成是谁的。
 - 篇幅：{length}。写不满就少写，别为了凑字数编情节。
@@ -464,7 +477,6 @@ DIARY_PROMPT = """【这次不是聊天，是写旅行日记，发在 QQ 空间�
 # (写法, 有见闻时的权重, 没见闻时的权重)
 WRITE_WAYS = [
     ("记今天聊天里的一件事", 4, 0),
-    ("隔空对今天聊过的某个人说一句话（不点名，对方看了知道是在说他）", 2, 0),
     ("一句话吐槽，或者没头没尾的碎碎念，不用交代前因后果", 2, 3),
     ("写吃到的东西、路过的地方、今天的天气", 1, 3),
     ("自言自语，写突然想到的一个念头", 1, 2),
@@ -474,14 +486,25 @@ WRITE_WAYS = [
 ]
 
 
-def pick_way(has_moments: bool) -> str:
-    ways = [(w, a if has_moments else b) for w, a, b in WRITE_WAYS]
+PIC_WAY = "写图里的样子和当时在做什么"
+
+
+def pick_way(has_moments: bool, has_pic: bool = True) -> str:
+    """11/27 去掉了“隔空对今天聊过的某个人说一句话”（写出来像特地写给谁看）；不配图时不抽“写图里的样子”"""
+    ways = [(w, a if has_moments else b) for w, a, b in WRITE_WAYS if has_pic or w != PIC_WAY]
     ways = [(w, x) for w, x in ways if x > 0]
     return random.choices([w for w, _ in ways], weights=[x for _, x in ways])[0]
 
 
 NO_MOMENT = ("今天没什么特别想写的见闻：就写旅途中的一件小事（在哪个国家或小镇、看到了什么、吃了什么），"
              "随手编一件就好，不要搬出书里有名有姓的人物和事件；也可以只写图里的场景和心情。")
+NO_MOMENT_TEXT_ONLY = ("今天没什么特别想写的见闻：就写旅途中的一件小事（在哪个国家或小镇、看到了什么、吃了什么），"
+                       "随手编一件就好，不要搬出书里有名有姓的人物和事件；也可以只写此刻的心情、一个念头。")
+# 11/27 用户：“不一定要配图片，写几句话也是 OK 的”。QZONE_TEXT_ONLY_PROB（默认 0.5）的概率这条只写字
+PIC_LINE = "配图是今天的你：{desc}"
+PIC_LINE_NONE = "这条只写字，不配图。"
+ONE_THING = "写见闻就专心写见闻，配图里的样子最多顺带一句；没有合适的见闻，就写图里的场景和心情。"
+ONE_THING_NONE = "写见闻就专心写见闻；没有合适的见闻，就写一件小事、一个念头或者此刻的心情。"
 
 
 def _period(now: datetime) -> str:
@@ -572,9 +595,11 @@ async def make_post() -> dict:
     await gallery.prepare()
     moments = choose_moments(today_moments())
     keywords = [k for m in moments for k in m.get("keywords", [])]
-    img = gallery.pick(keywords, cfg.qzone_image_reuse_days)
-    if not img:
-        raise RuntimeError(f"图库里没有可用的图（{gallery.image_dir}）")
+    img = None
+    if random.random() >= cfg.qzone_text_only_prob:
+        img = gallery.pick(keywords, cfg.qzone_image_reuse_days)
+        if not img:
+            logger.warning(f"图库里没有可用的图（{gallery.image_dir}），这条只写字")
 
     lw = (list(cfg.qzone_length_weights) + [0] * 3)[:3]
     if len(moments) < 2:
@@ -591,14 +616,15 @@ async def make_post() -> dict:
                 lines += [f"    {c}" for c in m["ctx"]]
         moment_text = "\n".join(lines)
     else:
-        moment_text = NO_MOMENT
+        moment_text = NO_MOMENT if img else NO_MOMENT_TEXT_ONLY
     recent = "；".join(f"「{p['text'][:30]}」" for p in recent_posts()) or "（还没有）"
     used = habits_recent()
     now = _now()
     prompt = DIARY_PROMPT.format(date=f"{now.month}月{now.day}日", weekday=WEEKDAYS[now.weekday()],
-                                 period=_period(now), desc=img["desc"], moments=moment_text,
+                                 period=_period(now), pic_line=PIC_LINE.format(desc=img["desc"]) if img else PIC_LINE_NONE,
+                                 one_thing=ONE_THING if img else ONE_THING_NONE, moments=moment_text,
                                  length=length, recent=recent, habits=habit_rule(bool(moments), used),
-                                 way=pick_way(bool(moments)))
+                                 way=pick_way(bool(moments), bool(img)))
     banned = set()        # 11/13 起很熟的人的 QQ 网名也不许写（原来很熟的不查）
     for m in today_moments():
         banned |= _name_parts(ltm.get_user(int(m["qq"])).get("name", ""))
@@ -633,22 +659,32 @@ async def make_post() -> dict:
     if not text:
         raise RuntimeError("文案写出来有问题，删完就没了")
     text = drop_end_period(text)
-    return {"text": text, "image": img["file"], "desc": img["desc"],
+    return {"text": text, "image": img["file"] if img else "", "desc": img["desc"] if img else "", "text_only": not img,
             "moments": [f"{m['event']}（{ltm.TIER_NAMES[m['tier']]}）" for m in moments], "at": time.time()}
 
 
+def _post_pic_note(p: dict | None) -> str:
+    """自己那条说说的配图怎么跟她说：配了图给描述；11/27 起只写字的条目标了 text_only；别的（手动补记的）说记不清"""
+    if p and p.get("desc"):
+        return f"（配图是你自己：{p['desc']}）"
+    if p and p.get("text_only"):
+        return "（没配图）"
+    return "（配图是你自己：记不清了）"
+
+
 async def publish(draft: dict) -> str:
-    img = gallery.items.get(draft["image"])
-    if not img:
+    img = gallery.items.get(draft["image"]) if draft.get("image") else None
+    if draft.get("image") and not img:
         raise RuntimeError("草稿里的图不在图库里了")
     # 先读一下自己的说说列表，顺便验证凭证：旧了会在这里重新要（上传图片的接口凭证过期时不报 -3000，直接失败）。
     # 刚重新要到凭证时，下面的发布会被闸门挡住，过几分钟再发
     await qz.list_posts(1)
-    tid = await qz.publish(draft["text"], [gallery.image_bytes(img)], right=RIGHT_PUBLIC)
-    gallery.mark_used(draft["image"])
+    tid = await qz.publish(draft["text"], [gallery.image_bytes(img)] if img else None, right=RIGHT_PUBLIC)
+    if img:
+        gallery.mark_used(draft["image"])
     posts = _read(POSTS_FILE, [])
     posts.append({"tid": tid, "ts": int(time.time()), "text": draft["text"], "image": draft["image"],
-                  "desc": draft["desc"], "moments": draft.get("moments", [])})
+                  "desc": draft["desc"], "moments": draft.get("moments", []), **({"text_only": True} if not img else {})})
     _write(POSTS_FILE, posts[-60:])
     logger.info(f"说说已发出 tid={tid}：{draft['text'][:40]}")
     if cfg.qzone_self_like:
@@ -739,7 +775,8 @@ def diary_context(text: str, force: bool = False, uin: int | None = None) -> str
     if last and time.time() - last["ts"] <= 3 * 86400:
         when = datetime.fromtimestamp(last["ts"], BJ)
         parts.append(f"【你最近写的旅行日记】{when.month}月{when.day}日{'（就是今天）' if last_day == today else ''}："
-                     f"「{last['text']}」（配图是你自己：{last['desc']}）。别人提到的话，你知道自己写过这个。")
+                     f"「{last['text']}」" + _post_pic_note(last)
+                     + "。别人提到的话，你知道自己写过这个。")
     if last_day != today and asks_today_diary(text, force):
         try:
             st = state()
@@ -796,7 +833,7 @@ def _rounds_with(me: int, root: Comment, uin: int) -> int:
     return n
 
 
-COMMENT_PROMPT = """【这是你旅行日记（QQ 空间说说）下的评论】你{when}写的是：「{post}」（配图是你自己：{desc}）
+COMMENT_PROMPT = """【这是你旅行日记（QQ 空间说说）下的评论】你{when}写的是：「{post}」{desc}
 这一楼到目前为止：
 {thread}
 现在「{nick}」对你说了最后那句。像回评论一样回一句：一两句话，不要换行。"""
@@ -1068,7 +1105,7 @@ async def reply_comment(me: int, post: dict, root: Comment, item: Comment | None
     else:
         known = next((p for p in _read(POSTS_FILE, []) if p["tid"] == post.get("tid")), None)
         post_text = (known or {}).get("text") or str(post.get("content") or "")[:200]
-        desc = (known or {}).get("desc") or "（记不清了）"
+        desc = _post_pic_note(known)
         written = (known or {}).get("ts") or int(post.get("created_time") or 0)
         scene = COMMENT_PROMPT.format(post=post_text, desc=desc, thread=_thread_text(me, root, c), nick=nick,
                                       when=_ago(written))
@@ -1848,7 +1885,7 @@ def _draft_msg(d: dict, head: str) -> Message:
     msg = Message(head + "\n")
     if img:
         msg += MessageSegment.image(gallery.image_bytes(img))
-    msg += f"\n{d['text']}\n\n（图：{d['image']}｜见闻：{'；'.join(d['moments']) or '没用'}）"
+    msg += f"\n{d['text']}\n\n（图：{d['image'] or '不配图'}｜见闻：{'；'.join(d['moments']) or '没用'}）"
     return msg
 
 

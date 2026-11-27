@@ -8,6 +8,7 @@ def _keep_period(monkeypatch):
     """11/21 起空间评论、说说末尾的句号按概率去掉；这里的老测试比的是原文，固定不去"""
     import plugins.roleplay_chat as p
     monkeypatch.setattr(p.cfg, "drop_period_prob", 0.0)
+    monkeypatch.setattr(p.cfg, "qzone_text_only_prob", 0.0)      # 11/27 起一半说说不配图；老测试都按配图写的
 
 P1105 = "站在这里忽然觉得，这样的傍晚倒也不坏，前提是身边没有某个老熟人。毕竟那位美丽的魔女究竟是谁？没错，就是我。话虽如此，就算是我，被人拿身材开玩笑也是会记仇的——そう、わたし私です，说的就是你。"
 P1106 = "下一站？还没定。……被这么一说，倒好像有点盼着下一回再被他夸了呢。（文字，约一百五十字。）"
